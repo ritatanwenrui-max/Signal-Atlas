@@ -73,6 +73,9 @@ export async function runNewsSync(force = false) {
   if (lastRun?.status === "running" && lastRunAge < 2 * 60 * 1000) {
     return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
   }
+  if (lastRun && lastRunAge < 15 * 1000) {
+    return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0 };
+  }
   if (!force && lastRun && lastRunAge < 8 * 60 * 1000) {
     return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
   }

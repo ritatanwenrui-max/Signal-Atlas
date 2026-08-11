@@ -26,6 +26,7 @@ test("news sync searches, deduplicates, classifies countries, and records runs",
 
   assert.match(sync, /api\.gdeltproject\.org\/api\/v2\/doc\/doc/);
   assert.match(sync, /SELECT url FROM mentions/);
+  assert.match(sync, /lastRunAge < 15 \* 1000/);
   assert.match(sync, /countryNames/);
   assert.match(sync, /INSERT INTO mentions/);
   assert.match(sync, /INSERT INTO alerts/);
