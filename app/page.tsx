@@ -32,13 +32,14 @@ type Traffic = {
 
 type Entity = { id: number; type: string; value: string; language: string; active: number };
 type Alert = { id: number; title: string; severity: string; country: string; reason: string; acknowledged: number; created_at: string };
-type DashboardData = { mentions: Mention[]; traffic: Traffic[]; entities: Entity[]; alerts: Alert[] };
+type SyncRun = { id: number; provider: string; status: string; found_count: number; inserted_count: number; error: string; started_at: string; completed_at: string | null };
+type DashboardData = { mentions: Mention[]; traffic: Traffic[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[] };
 
-const emptyData: DashboardData = { mentions: [], traffic: [], entities: [], alerts: [] };
+const emptyData: DashboardData = { mentions: [], traffic: [], entities: [], alerts: [], syncRuns: [] };
 const nav = [
   ["overview", "全球总览", "01"],
   ["events", "传播事件", "02"],
-  ["ingest", "内容录入", "03"],
+  ["ingest", "补充录入", "03"],
   ["traffic", "流量归因", "04"],
   ["coverage", "全球覆盖", "05"],
   ["settings", "监测配置", "06"],
@@ -50,6 +51,14 @@ const countryCode: Record<string, string> = {
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
+
+function syncTime(value?: string | null) {
+  if (!value) return "等待首次搜索";
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  return formatDate(value);
 }
 
 function riskLabel(risk: number) {
@@ -73,6 +82,7 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   async function refresh() {
     const response = await fetch("/api/data");
@@ -80,8 +90,41 @@ export default function Home() {
     setData(await response.json());
   }
 
+  async function syncNews(force = false, announce = false) {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const response = await fetch("/api/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "新闻自动搜索失败");
+      setData(result.data);
+      if (announce) {
+        const message = result.sync.skipped ? "刚刚已经完成过搜索" : `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条`;
+        setToast(message);
+        window.setTimeout(() => setToast(""), 3200);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "新闻自动搜索失败";
+      setToast(`${message}，系统会自动重试`);
+      window.setTimeout(() => setToast(""), 4200);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   useEffect(() => {
-    refresh().catch(() => setToast("暂时无法读取数据，请稍后刷新")).finally(() => setLoading(false));
+    refresh()
+      .catch(() => setToast("暂时无法读取数据，请稍后刷新"))
+      .finally(() => {
+        setLoading(false);
+        void syncNews(false, false);
+      });
+    const timer = window.setInterval(() => void syncNews(false, false), 10 * 60 * 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   async function post(payload: Record<string, unknown>, success: string) {
@@ -122,6 +165,7 @@ export default function Home() {
   const activeAlerts = data.alerts.filter((item) => !item.acknowledged);
   const countries = ["全球", ...new Set(data.mentions.map((item) => item.source_country))];
   const selected = clusters.find((item) => item.key === selectedCluster) ?? clusters[0];
+  const lastSync = data.syncRuns[0];
 
   return (
     <main className="app-shell">
@@ -141,10 +185,10 @@ export default function Home() {
         </nav>
 
         <div className="system-card">
-          <div className="system-title"><i /> 数据网络在线</div>
-          <div className="system-row"><span>新闻与网页</span><strong>99.4%</strong></div>
-          <div className="system-row"><span>社交数据</span><strong>92.8%</strong></div>
-          <div className="system-row"><span>最后同步</span><strong>2 分钟前</strong></div>
+          <div className="system-title"><i /> 自动搜索已开启</div>
+          <div className="system-row"><span>全球新闻</span><strong>每 10 分钟</strong></div>
+          <div className="system-row"><span>当前搜索源</span><strong>GDELT</strong></div>
+          <div className="system-row"><span>最后同步</span><strong>{syncTime(lastSync?.completed_at ?? lastSync?.started_at)}</strong></div>
         </div>
 
         <div className="sidebar-foot">
@@ -167,7 +211,8 @@ export default function Home() {
               <kbd>⌘ K</kbd>
             </label>
             <button className="icon-button" aria-label="查看告警" onClick={() => setView("overview")}>◉<b>{activeAlerts.length}</b></button>
-            <button className="primary-button" onClick={() => setShowAdd(true)}><span>＋</span> 录入舆情</button>
+            <button className="secondary-button quick-add-button" onClick={() => setShowAdd(true)}>＋ 补充录入</button>
+            <button className="primary-button sync-button" disabled={syncing} onClick={() => void syncNews(true, true)}><span>{syncing ? "↻" : "◎"}</span> {syncing ? "正在搜索…" : "立即搜索"}</button>
           </div>
         </header>
 
@@ -213,9 +258,9 @@ function Overview({ data, clusters, alerts, country, countries, setCountry, setV
   return <div className="overview-grid">
     <section className="signal-hero panel-dark">
       <div className="hero-copy">
-        <div className="live-chip"><i /> LIVE BRIEFING · 过去 24 小时</div>
+        <div className="live-chip"><i /> AUTO SEARCH · 每 10 分钟</div>
         <h2>跨境声量正在<br /><em>加速扩散</em></h2>
-        <p>Somnia Lab 产品报道从香港进入台湾与泰国，台湾媒体转载密度最高；美国隐私议题出现高风险讨论。</p>
+        <p>系统会按公司名、产品名和别名自动搜索全球网页新闻，识别媒体所在国家并去重入库；无需逐个国家配置。</p>
         <div className="hero-actions">
           <button onClick={() => setView("events")}>查看传播事件 <span>↗</span></button>
           <small>系统置信度 <strong>92%</strong></small>
@@ -235,7 +280,7 @@ function Overview({ data, clusters, alerts, country, countries, setCountry, setV
     </section>
 
     <section className="metric-strip">
-      <Metric label="已发现提及" value={String(data.mentions.length).padStart(2, "0")} delta="+38%" note="当前演示数据" />
+      <Metric label="已发现提及" value={String(data.mentions.length).padStart(2, "0")} delta="自动" note="搜索累计入库" />
       <Metric label="独立传播事件" value={String(clusters.length).padStart(2, "0")} delta="+2" note="已自动去重" />
       <Metric label="覆盖国家" value={String(globalCountries).padStart(2, "0")} delta="全球" note="无需逐国配置" />
       <Metric label="高风险信号" value={String(highRisk).padStart(2, "0")} delta="需处理" note="含隐私议题" danger />
@@ -291,7 +336,7 @@ function Overview({ data, clusters, alerts, country, countries, setCountry, setV
     <section className="coverage-mini surface">
       <div className="section-head compact"><div><p className="eyebrow">DATA COVERAGE</p><h3>数据网络</h3></div><button className="text-link" onClick={() => setView("coverage")}>覆盖矩阵 →</button></div>
       <div className="source-health">
-        {["全球网页新闻", "X / YouTube", "Instagram / TikTok", "地区性媒体"].map((label, index) => <div key={label}><span><i className={index === 2 ? "partial" : "online"} />{label}</span><strong>{["在线", "在线", "部分覆盖", "在线"][index]}</strong></div>)}
+        {["GDELT 全球新闻", "X / YouTube", "Instagram / TikTok", "地区性媒体"].map((label, index) => <div key={label}><span><i className={index === 0 ? "online" : "partial"} />{label}</span><strong>{["自动搜索", "待授权", "待授权", "索引覆盖"][index]}</strong></div>)}
       </div>
     </section>
   </div>;
@@ -357,8 +402,8 @@ function DataEntryForm({ submit }: { submit: (payload: Record<string, unknown>, 
     } finally { setBusy(false); }
   }
   return <section className="surface data-form">
-    <div className="section-head"><div><p className="eyebrow">MANUAL INGEST</p><h3>录入一条舆情</h3></div><span className="status-note"><i /> 自动分析已开启</span></div>
-    <p className="form-intro">粘贴搜索或供应商尚未覆盖的媒体内容，系统会将其纳入国家识别、事件聚类和风险告警。</p>
+    <div className="section-head"><div><p className="eyebrow">FALLBACK CAPTURE</p><h3>补充漏报内容</h3></div><span className="status-note"><i /> 自动搜索为主</span></div>
+    <p className="form-intro">这里不是日常工作入口，只用于补充付费墙、私域社群或供应商暂时无法访问的内容。</p>
     <form onSubmit={handleSubmit}>
       <label className="field full"><span>新闻或帖文标题 *</span><input name="title" required placeholder="例如：台湾媒体报道 Somnia Lab 新产品" /></label>
       <label className="field full"><span>原文链接</span><input name="url" type="url" placeholder="https://" /></label>
@@ -409,16 +454,16 @@ function TrafficView({ traffic, submit }: { traffic: Traffic[]; submit: (payload
 
 function CoverageView() {
   const rows = [
-    ["全球网页新闻", "210+", "100+", "< 15 min", "完整", "online"],
-    ["X / Twitter", "全球", "40+", "< 10 min", "授权 API", "online"],
-    ["YouTube", "全球", "80+", "< 30 min", "公开搜索", "online"],
+    ["GDELT 全球新闻", "全球", "100+", "10 min", "自动搜索", "online"],
+    ["X / Twitter", "全球", "40+", "需接入 API", "待授权", "pending"],
+    ["YouTube", "全球", "80+", "需接入 API", "待授权", "pending"],
     ["Instagram", "主要市场", "30+", "供应商延迟", "部分覆盖", "partial"],
     ["TikTok", "主要市场", "25+", "最长 48 h", "部分覆盖", "partial"],
     ["微博 / 微信 / 小红书", "中国大陆", "中文", "供应商延迟", "待授权", "pending"],
     ["LINE / Naver / Kakao", "亚太", "8+", "供应商延迟", "部分覆盖", "partial"],
   ];
   return <div className="coverage-page">
-    <section className="coverage-hero panel-dark"><div><p className="eyebrow">GLOBAL COVERAGE MATRIX</p><h2>国家无需逐个添加。<br /><em>覆盖缺口必须透明。</em></h2><p>系统对所有国家使用统一数据模型；实际可见内容取决于公开权限、供应商授权和平台政策。</p></div><div className="coverage-score"><span>GLOBAL READINESS</span><strong>87<small>%</small></strong><i><b style={{ width: "87%" }} /></i><p>5 个连接器在线 · 2 个待授权</p></div></section>
+    <section className="coverage-hero panel-dark"><div><p className="eyebrow">GLOBAL COVERAGE MATRIX</p><h2>网页新闻已经自动搜索。<br /><em>国家无需逐个添加。</em></h2><p>GDELT 全球新闻索引每 10 分钟按监测词搜索一次；社交平台仍需各平台官方 API 或合规数据供应商授权。</p></div><div className="coverage-score"><span>NEWS AUTOMATION</span><strong>ON<small>LINE</small></strong><i><b style={{ width: "100%" }} /></i><p>网页新闻连接器在线 · 社交连接器待授权</p></div></section>
     <section className="surface coverage-table-wrap"><div className="section-head"><div><p className="eyebrow">SOURCE × REGION × LATENCY</p><h3>数据源覆盖矩阵</h3></div><button className="secondary-button">导出矩阵</button></div><div className="coverage-table"><div className="coverage-row header"><span>数据网络</span><span>覆盖地区</span><span>语言</span><span>典型延迟</span><span>状态</span></div>{rows.map((row) => <div className="coverage-row" key={row[0]}><strong><i className={row[5]} />{row[0]}</strong><span>{row[1]}</span><span>{row[2]}</span><span>{row[3]}</span><b className={`coverage-state ${row[5]}`}>{row[4]}</b></div>)}</div></section>
     <section className="coverage-notes"><article><span>01</span><h4>全球统一模型</h4><p>国家、语言和平台都是内容属性，新国家自动进入处理流程。</p></article><article><span>02</span><h4>多供应商底座</h4><p>授权数据源为主，官方 API 与公开网页连接器用于交叉验证。</p></article><article><span>03</span><h4>证据优先</h4><p>无法合法获取的数据明确标记，不用推测填补覆盖缺口。</p></article></section>
   </div>;

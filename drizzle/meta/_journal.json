@@ -15,6 +15,13 @@
       "when": 1786441378723,
       "tag": "0001_wise_human_torch",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786443162176,
+      "tag": "0002_gorgeous_mad_thinker",
+      "breakpoints": true
     }
   ]
 }

@@ -54,3 +54,15 @@ export const alerts = sqliteTable("alerts", {
   acknowledged: integer("acknowledged", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("idx_alerts_ack_severity").on(table.acknowledged, table.severity)]);
+
+export const syncRuns = sqliteTable("sync_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  provider: text("provider").notNull(),
+  query: text("query").notNull(),
+  status: text("status").notNull(),
+  foundCount: integer("found_count").notNull().default(0),
+  insertedCount: integer("inserted_count").notNull().default(0),
+  error: text("error").notNull().default(""),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+}, (table) => [index("idx_sync_runs_started_at").on(table.startedAt)]);

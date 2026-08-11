@@ -47,6 +47,17 @@ const tables = [
     acknowledged INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    query TEXT NOT NULL,
+    status TEXT NOT NULL,
+    found_count INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+  )`,
 ] as const;
 
 const indexes = [
@@ -55,6 +66,7 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_mentions_cluster_key ON mentions(cluster_key)",
   "CREATE INDEX IF NOT EXISTS idx_alerts_ack_severity ON alerts(acknowledged, severity)",
   "CREATE INDEX IF NOT EXISTS idx_traffic_country_recorded ON traffic_signals(country, recorded_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at)",
 ] as const;
 
 export async function ensureDatabase() {
@@ -115,16 +127,18 @@ async function seedDatabase() {
 export async function loadDashboardData() {
   await ensureDatabase();
   const db = env.DB;
-  const [mentions, traffic, entities, alerts] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns] = await Promise.all([
     db.prepare("SELECT * FROM mentions ORDER BY published_at DESC").all(),
     db.prepare("SELECT * FROM traffic_signals ORDER BY recorded_at DESC").all(),
     db.prepare("SELECT * FROM tracked_entities ORDER BY id DESC").all(),
     db.prepare("SELECT * FROM alerts ORDER BY acknowledged ASC, id DESC").all(),
+    db.prepare("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20").all(),
   ]);
   return {
     mentions: mentions.results,
     traffic: traffic.results,
     entities: entities.results,
     alerts: alerts.results,
+    syncRuns: syncRuns.results,
   };
 }
