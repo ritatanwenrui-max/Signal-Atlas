@@ -66,3 +66,8 @@ export const syncRuns = sqliteTable("sync_runs", {
   startedAt: text("started_at").notNull(),
   completedAt: text("completed_at"),
 }, (table) => [index("idx_sync_runs_started_at").on(table.startedAt)]);
+
+export const syncLocks = sqliteTable("sync_locks", {
+  name: text("name").primaryKey(),
+  lockedUntil: text("locked_until").notNull(),
+});

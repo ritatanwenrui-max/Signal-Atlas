@@ -58,6 +58,10 @@ const tables = [
     started_at TEXT NOT NULL,
     completed_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS sync_locks (
+    name TEXT PRIMARY KEY,
+    locked_until TEXT NOT NULL
+  )`,
 ] as const;
 
 const indexes = [

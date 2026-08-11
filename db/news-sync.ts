@@ -68,82 +68,89 @@ function sourceName(article: GdeltArticle) {
 export async function runNewsSync(force = false) {
   await ensureDatabase();
   const db = env.DB;
-  const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs ORDER BY id DESC LIMIT 1").first<SyncRun>();
-  const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
-  if (lastRun?.status === "running" && lastRunAge < 2 * 60 * 1000) {
-    return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
-  }
-  if (lastRun && lastRunAge < 15 * 1000) {
-    return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0 };
-  }
-  if (!force && lastRun && lastRunAge < 8 * 60 * 1000) {
-    return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
-  }
-
-  const entities = await db.prepare("SELECT type, value, active FROM tracked_entities WHERE active = 1 ORDER BY id ASC").all<TrackedEntity>();
-  const query = compactQuery(entities.results);
-  if (!query) throw new Error("请先在监测配置中添加公司名、产品名或关键词");
-
-  const startedAt = new Date().toISOString();
-  const run = await db.prepare(`INSERT INTO sync_runs (provider, query, status, started_at)
-    VALUES (?, ?, ?, ?)`).bind("GDELT DOC 2.0", query, "running", startedAt).run();
-  const runId = run.meta.last_row_id;
-
   try {
-    const endpoint = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
-    endpoint.searchParams.set("query", `(${query})`);
-    endpoint.searchParams.set("mode", "artlist");
-    endpoint.searchParams.set("maxrecords", "75");
-    endpoint.searchParams.set("timespan", "7d");
-    endpoint.searchParams.set("sort", "datedesc");
-    endpoint.searchParams.set("format", "json");
+    const now = new Date().toISOString();
+    const lockedUntil = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    const lease = await db.prepare(`INSERT INTO sync_locks (name, locked_until) VALUES (?, ?)
+      ON CONFLICT(name) DO UPDATE SET locked_until = excluded.locked_until
+      WHERE sync_locks.locked_until < ?`).bind("news", lockedUntil, now).run();
+    if ((lease.meta.changes ?? 0) === 0) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
 
-    const response = await fetch(endpoint, {
-      headers: { "Accept": "application/json", "User-Agent": "SignalAtlas/1.0 media-monitoring" },
-      signal: AbortSignal.timeout(18_000),
-    });
-    if (!response.ok) throw new Error(`新闻索引返回 HTTP ${response.status}`);
-    const payload = await response.json() as { articles?: GdeltArticle[] };
-    const articles = (payload.articles ?? []).filter((article) => article.url && article.title);
+    try {
+      const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs ORDER BY id DESC LIMIT 1").first<SyncRun>();
+      const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
+      if (lastRun?.status === "running" && lastRunAge < 2 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
+      if (lastRun && lastRunAge < 15 * 1000) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0 };
+      if (!force && lastRun && lastRunAge < 8 * 60 * 1000) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
 
-    const existing = await db.prepare("SELECT url FROM mentions").all<{ url: string }>();
-    const knownUrls = new Set(existing.results.map((item) => item.url));
-    const knownCountries = new Set((await db.prepare("SELECT DISTINCT source_country AS country FROM mentions").all<{ country: string }>()).results.map((item) => item.country));
-    let inserted = 0;
-    const newCountries = new Set<string>();
+      const entities = await db.prepare("SELECT type, value, active FROM tracked_entities WHERE active = 1 ORDER BY id ASC").all<TrackedEntity>();
+      const query = compactQuery(entities.results);
+      if (!query) throw new Error("请先在监测配置中添加公司名、产品名或关键词");
 
-    for (const article of articles) {
-      const url = article.url!;
-      if (knownUrls.has(url)) continue;
-      const title = article.title!.trim();
-      const country = countryNames[article.sourcecountry ?? ""] ?? article.sourcecountry ?? "未知地区";
-      const language = languageNames[article.language ?? ""] ?? article.language ?? "自动识别";
-      const source = sourceName(article);
-      const risk = riskFor(title);
-      await db.prepare(`INSERT INTO mentions
-        (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(title, url, source, "网页新闻", country, country, language, sentimentFor(title), risk, 68,
-          `GDELT 全球新闻索引自动发现 · ${source} · 来源国家 ${country}`, clusterFor(title), normalizePublishedAt(article.seendate))
-        .run();
-      knownUrls.add(url);
-      inserted += 1;
-      if (!knownCountries.has(country)) newCountries.add(country);
+      const startedAt = new Date().toISOString();
+      const run = await db.prepare(`INSERT INTO sync_runs (provider, query, status, started_at)
+        VALUES (?, ?, ?, ?)`).bind("GDELT DOC 2.0", query, "running", startedAt).run();
+      const runId = run.meta.last_row_id;
+
+      try {
+        const endpoint = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
+        endpoint.searchParams.set("query", `(${query})`);
+        endpoint.searchParams.set("mode", "artlist");
+        endpoint.searchParams.set("maxrecords", "75");
+        endpoint.searchParams.set("timespan", "7d");
+        endpoint.searchParams.set("sort", "datedesc");
+        endpoint.searchParams.set("format", "json");
+
+        const response = await fetch(endpoint, {
+          headers: { "Accept": "application/json", "User-Agent": "SignalAtlas/1.0 media-monitoring" },
+          signal: AbortSignal.timeout(18_000),
+        });
+        if (!response.ok) throw new Error(`新闻索引返回 HTTP ${response.status}`);
+        const payload = await response.json() as { articles?: GdeltArticle[] };
+        const articles = (payload.articles ?? []).filter((article) => article.url && article.title);
+
+        const existing = await db.prepare("SELECT url FROM mentions").all<{ url: string }>();
+        const knownUrls = new Set(existing.results.map((item) => item.url));
+        const knownCountries = new Set((await db.prepare("SELECT DISTINCT source_country AS country FROM mentions").all<{ country: string }>()).results.map((item) => item.country));
+        let inserted = 0;
+        const newCountries = new Set<string>();
+
+        for (const article of articles) {
+          const url = article.url!;
+          if (knownUrls.has(url)) continue;
+          const title = article.title!.trim();
+          const country = countryNames[article.sourcecountry ?? ""] ?? article.sourcecountry ?? "未知地区";
+          const language = languageNames[article.language ?? ""] ?? article.language ?? "自动识别";
+          const source = sourceName(article);
+          const risk = riskFor(title);
+          await db.prepare(`INSERT INTO mentions
+            (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(title, url, source, "网页新闻", country, country, language, sentimentFor(title), risk, 68,
+              `GDELT 全球新闻索引自动发现 · ${source} · 来源国家 ${country}`, clusterFor(title), normalizePublishedAt(article.seendate))
+            .run();
+          knownUrls.add(url);
+          inserted += 1;
+          if (!knownCountries.has(country)) newCountries.add(country);
+        }
+
+        for (const country of newCountries) {
+          await db.prepare("INSERT INTO alerts (title, severity, country, reason) VALUES (?, ?, ?, ?)")
+            .bind(`监测对象首次进入${country}媒体`, "High", country, "GDELT 自动搜索发现新的来源国家或地区")
+            .run();
+        }
+
+        await db.prepare(`UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, completed_at = ? WHERE id = ?`)
+          .bind("completed", articles.length, inserted, new Date().toISOString(), runId).run();
+        return { skipped: false, found: articles.length, inserted, query, provider: "GDELT DOC 2.0" };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "未知同步错误";
+        await db.prepare(`UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?`)
+          .bind("failed", message, new Date().toISOString(), runId).run();
+        throw error;
+      }
+    } finally {
+      await db.prepare("UPDATE sync_locks SET locked_until = ? WHERE name = ?").bind(new Date().toISOString(), "news").run();
     }
-
-    for (const country of newCountries) {
-      await db.prepare("INSERT INTO alerts (title, severity, country, reason) VALUES (?, ?, ?, ?)")
-        .bind(`监测对象首次进入${country}媒体`, "High", country, "GDELT 自动搜索发现新的来源国家或地区")
-        .run();
-    }
-
-    await db.prepare(`UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, completed_at = ? WHERE id = ?`)
-      .bind("completed", articles.length, inserted, new Date().toISOString(), runId).run();
-    return { skipped: false, found: articles.length, inserted, query, provider: "GDELT DOC 2.0" };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "未知同步错误";
-    await db.prepare(`UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?`)
-      .bind("failed", message, new Date().toISOString(), runId).run();
-    throw error;
-  }
+  } catch (error) { throw error; }
 }
