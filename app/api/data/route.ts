@@ -13,7 +13,30 @@ export async function POST(request: Request) {
   const payload = await request.json() as Record<string, unknown>;
   const action = String(payload.action ?? "");
 
-  if (action === "createMention") {
+  if (action === "saveBrandProfile") {
+    const brandName = String(payload.brandName ?? "").trim();
+    if (!brandName) return Response.json({ error: "品牌名不能为空" }, { status: 400 });
+    const aliases = String(payload.aliases ?? "")
+      .split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
+    const website = String(payload.website ?? "").trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const existing = await db.prepare("SELECT name FROM brand_profiles WHERE active = 1 ORDER BY id DESC LIMIT 1").first<{ name: string }>();
+
+    if (existing && existing.name !== brandName) {
+      await db.batch([
+        db.prepare("DELETE FROM mentions"), db.prepare("DELETE FROM alerts"), db.prepare("DELETE FROM traffic_signals"),
+        db.prepare("DELETE FROM sync_runs"), db.prepare("DELETE FROM sync_locks"),
+      ]);
+    }
+    await db.batch([
+      db.prepare("UPDATE brand_profiles SET active = 0"),
+      db.prepare("DELETE FROM tracked_entities"),
+      db.prepare("INSERT INTO brand_profiles (name, aliases, website, active, updated_at) VALUES (?, ?, ?, 1, ?)")
+        .bind(brandName, aliases.join("\n"), website, new Date().toISOString()),
+      db.prepare("INSERT INTO tracked_entities (type, value, language) VALUES (?, ?, ?)").bind("品牌", brandName, "通用"),
+      ...aliases.map((alias) => db.prepare("INSERT INTO tracked_entities (type, value, language) VALUES (?, ?, ?)").bind("别名", alias, "通用")),
+      ...(website ? [db.prepare("INSERT INTO tracked_entities (type, value, language) VALUES (?, ?, ?)").bind("官网域名", website, "通用")] : []),
+    ]);
+  } else if (action === "createMention") {
     const title = String(payload.title ?? "").trim();
     const source = String(payload.source ?? "").trim();
     if (!title || !source) return Response.json({ error: "标题和来源为必填项" }, { status: 400 });
@@ -35,7 +58,7 @@ export async function POST(request: Request) {
         String(payload.sentiment ?? "中性"),
         risk,
         impact,
-        String(payload.summary ?? "由用户手动录入，等待进一步研判。"),
+        String(payload.summary ?? "人工补充内容，已进入统一分析流程。"),
         String(payload.clusterKey ?? `manual-${Date.now()}`),
         String(payload.publishedAt ?? new Date().toISOString()),
       ).run();
