@@ -18,16 +18,19 @@ test("dashboard onboards any brand and starts automatic monitoring", async () =>
   assert.match(page, /saveBrandProfile/);
   assert.match(page, /链路推断置信/);
   assert.match(page, /补充漏报内容/);
+  assert.match(page, /最近 30 天/);
+  assert.match(page, /限流保护 \/ 自动重试/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
 
 test("monitoring searches providers, analyzes discussion, and builds evidence-backed propagation", async () => {
-  const [sync, providers, repository, brandMigration, evidenceMigration] = await Promise.all([
+  const [sync, providers, repository, brandMigration, evidenceMigration, providerHealthMigration] = await Promise.all([
     source("db/news-sync.ts"),
     source("db/providers.ts"),
     source("db/repository.ts"),
     source("drizzle/0004_polite_talos.sql"),
     source("drizzle/0005_silky_firebrand.sql"),
+    source("drizzle/0006_nappy_wildside.sql"),
   ]);
 
   assert.match(providers, /api\.gdeltproject\.org\/api\/v2\/doc\/doc/);
@@ -35,6 +38,10 @@ test("monitoring searches providers, analyzes discussion, and builds evidence-ba
   assert.match(providers, /googleapis\.com\/youtube\/v3\/search/);
   assert.match(providers, /youtube\/v3\/commentThreads/);
   assert.match(providers, /referenced_tweets\.id/);
+  assert.match(providers, /maxrecords", "250"/);
+  assert.match(providers, /timespan", "30d"/);
+  assert.match(providers, /30 \* 86400_000/);
+  assert.match(providers, /ProviderRequestError/);
   assert.match(sync, /Promise\.allSettled/);
   assert.match(sync, /similarity/);
   assert.match(sync, /candidate\.discussionText/);
@@ -43,6 +50,10 @@ test("monitoring searches providers, analyzes discussion, and builds evidence-ba
   assert.match(sync, /lastRunAge < 15 \* 1000/);
   assert.match(sync, /INSERT INTO sync_locks/);
   assert.match(sync, /ON CONFLICT\(name\) DO UPDATE/);
+  assert.match(sync, /provider_health/);
+  assert.match(sync, /provider_backoff/);
+  assert.match(sync, /10 \* 60 \* 1000/);
+  assert.match(sync, /Math\.min\(60 \* 60 \* 1000/);
   assert.match(sync, /INSERT INTO mentions/);
   assert.match(sync, /INSERT INTO alerts/);
   assert.doesNotMatch(repository, /seedDatabase/);
@@ -54,6 +65,8 @@ test("monitoring searches providers, analyzes discussion, and builds evidence-ba
   assert.match(brandMigration, /DELETE FROM `mentions`/);
   assert.match(evidenceMigration, /ADD `parent_url`/);
   assert.match(evidenceMigration, /ADD `engagement`/);
+  assert.match(providerHealthMigration, /CREATE TABLE `provider_health`/);
+  assert.match(providerHealthMigration, /GDELT HTTP 429/);
 });
 
 test("worker has a ten-minute background schedule", async () => {

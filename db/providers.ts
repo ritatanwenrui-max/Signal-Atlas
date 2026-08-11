@@ -30,6 +30,13 @@ type YouTubeStatsPayload = { items?: Array<{ id: string; statistics?: { viewCoun
 type YouTubeChannelsPayload = { items?: Array<{ id: string; snippet?: { country?: string } }> };
 type YouTubeCommentsPayload = { items?: Array<{ snippet?: { topLevelComment?: { snippet?: { textDisplay?: string; likeCount?: number } } } }> };
 
+export class ProviderRequestError extends Error {
+  constructor(public provider: string, public status: number, public retryAfterMs: number | null, message: string) {
+    super(message);
+    this.name = "ProviderRequestError";
+  }
+}
+
 const countryNames: Record<string, string> = {
   Taiwan: "台湾", "Hong Kong": "香港", Thailand: "泰国", "United States": "美国", China: "中国",
   Japan: "日本", Singapore: "新加坡", Malaysia: "马来西亚", "South Korea": "韩国", "United Kingdom": "英国",
@@ -57,16 +64,25 @@ function isoDate(value?: string) {
   return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
 }
 
+function retryAfterMs(response: Response) {
+  const header = response.headers.get("retry-after");
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const absolute = new Date(header).getTime();
+  return Number.isNaN(absolute) ? null : Math.max(0, absolute - Date.now());
+}
+
 export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> {
   const endpoint = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
   endpoint.searchParams.set("query", `(${query})`);
   endpoint.searchParams.set("mode", "artlist");
-  endpoint.searchParams.set("maxrecords", "75");
-  endpoint.searchParams.set("timespan", "7d");
+  endpoint.searchParams.set("maxrecords", "250");
+  endpoint.searchParams.set("timespan", "30d");
   endpoint.searchParams.set("sort", "datedesc");
   endpoint.searchParams.set("format", "json");
   const response = await fetch(endpoint, { headers: { Accept: "application/json", "User-Agent": "SignalAtlas/2.0 brand-monitoring" }, signal: AbortSignal.timeout(18_000) });
-  if (!response.ok) throw new Error(`GDELT HTTP ${response.status}`);
+  if (!response.ok) throw new ProviderRequestError("GDELT", response.status, retryAfterMs(response), `GDELT HTTP ${response.status}`);
   const payload = await response.json() as { articles?: GdeltArticle[] };
   return (payload.articles ?? []).filter((item) => item.url && item.title).map((item) => ({
     title: item.title!.trim(), url: item.url!, source: item.domain?.replace(/^www\./, "") ?? new URL(item.url!).hostname.replace(/^www\./, ""),
@@ -117,7 +133,7 @@ export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate
   const endpoint = new URL("https://www.googleapis.com/youtube/v3/search");
   endpoint.searchParams.set("part", "snippet"); endpoint.searchParams.set("type", "video"); endpoint.searchParams.set("order", "date");
   endpoint.searchParams.set("maxResults", "50"); endpoint.searchParams.set("q", terms.slice(0, 8).join("|"));
-  endpoint.searchParams.set("publishedAfter", new Date(Date.now() - 7 * 86400_000).toISOString()); endpoint.searchParams.set("key", env.YOUTUBE_API_KEY);
+  endpoint.searchParams.set("publishedAfter", new Date(Date.now() - 30 * 86400_000).toISOString()); endpoint.searchParams.set("key", env.YOUTUBE_API_KEY);
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`YouTube API HTTP ${response.status}`);
   const payload = await response.json() as YouTubePayload;

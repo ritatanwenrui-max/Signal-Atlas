@@ -1,10 +1,12 @@
 import { env } from "cloudflare:workers";
 import { ensureDatabase } from "./repository";
-import { fetchGdelt, fetchX, fetchYouTube, type MonitoringCandidate } from "./providers";
+import { fetchGdelt, fetchX, fetchYouTube, ProviderRequestError, type MonitoringCandidate } from "./providers";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
 type ExistingMention = { title: string; cluster_key: string; url: string; source_country: string };
+type ProviderHealth = { provider: string; status: string; consecutive_failures: number; retry_after: string; last_error: string };
+type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> };
 
 function termsFrom(entities: TrackedEntity[]) {
   return [...new Set(entities.filter((item) => item.active && item.type !== "排除词" && item.type !== "官网域名")
@@ -86,6 +88,37 @@ function impactFor(candidate: MonitoringCandidate) {
   return Math.min(98, base + Math.round(Math.log10(candidate.engagement + 1) * 12));
 }
 
+function retryDelay(error: unknown, failureCount: number) {
+  const rateLimited = error instanceof ProviderRequestError && error.status === 429;
+  const base = rateLimited ? 10 * 60 * 1000 : 5 * 60 * 1000;
+  const exponential = base * 2 ** Math.min(3, Math.max(0, failureCount - 1));
+  const serverHint = error instanceof ProviderRequestError ? error.retryAfterMs ?? 0 : 0;
+  return Math.min(60 * 60 * 1000, Math.max(base, exponential, serverHint));
+}
+
+async function markProviderHealthy(db: D1Database, provider: string, attemptedAt: string) {
+  await db.prepare(`INSERT INTO provider_health
+    (provider, status, consecutive_failures, retry_after, last_error, last_attempt_at, last_success_at, updated_at)
+    VALUES (?, 'online', 0, '', '', ?, ?, ?)
+    ON CONFLICT(provider) DO UPDATE SET status = 'online', consecutive_failures = 0, retry_after = '', last_error = '',
+      last_attempt_at = excluded.last_attempt_at, last_success_at = excluded.last_success_at, updated_at = excluded.updated_at`)
+    .bind(provider, attemptedAt, attemptedAt, attemptedAt).run();
+}
+
+async function markProviderFailed(db: D1Database, provider: string, error: unknown, previousFailures: number, attemptedAt: string) {
+  const failures = previousFailures + 1;
+  const limited = error instanceof ProviderRequestError && error.status === 429;
+  const retryAt = new Date(Date.now() + retryDelay(error, failures)).toISOString();
+  const message = error instanceof Error ? error.message : "连接失败";
+  await db.prepare(`INSERT INTO provider_health
+    (provider, status, consecutive_failures, retry_after, last_error, last_attempt_at, last_success_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, '', ?)
+    ON CONFLICT(provider) DO UPDATE SET status = excluded.status, consecutive_failures = excluded.consecutive_failures,
+      retry_after = excluded.retry_after, last_error = excluded.last_error, last_attempt_at = excluded.last_attempt_at, updated_at = excluded.updated_at`)
+    .bind(provider, limited ? "limited" : "degraded", failures, retryAt, message, attemptedAt, attemptedAt).run();
+  return { retryAt, message, limited };
+}
+
 export async function runNewsSync(force = false) {
   await ensureDatabase();
   const db = env.DB;
@@ -113,15 +146,45 @@ export async function runNewsSync(force = false) {
     const runId = run.meta.last_row_id;
 
     try {
-      const providers = [
+      const providers: ProviderTask[] = [
         { name: "GDELT", load: () => fetchGdelt(query) },
         ...(env.X_BEARER_TOKEN ? [{ name: "X", load: () => fetchX(terms) }] : []),
         ...(env.YOUTUBE_API_KEY ? [{ name: "YouTube", load: () => fetchYouTube(terms) }] : []),
       ];
-      const settled = await Promise.allSettled(providers.map((provider) => provider.load()));
+      const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error FROM provider_health").all<ProviderHealth>();
+      const health = new Map(healthRows.results.map((item) => [item.provider, item]));
+      const deferred = providers.filter((provider) => {
+        const retryAt = health.get(provider.name)?.retry_after;
+        return Boolean(retryAt && new Date(retryAt).getTime() > Date.now());
+      });
+      const ready = providers.filter((provider) => !deferred.some((item) => item.name === provider.name));
+      const errors = deferred.map((provider) => `${provider.name}: ${health.get(provider.name)?.last_error || "等待自动重试"}`);
+      const retryTimes = deferred.flatMap((provider) => health.get(provider.name)?.retry_after ? [health.get(provider.name)!.retry_after] : []);
+
+      if (!ready.length) {
+        const retryAt = retryTimes.sort()[0] ?? "";
+        await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")
+          .bind("deferred", errors.join("；"), new Date().toISOString(), runId).run();
+        const rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
+        return { skipped: true, reason: "provider_backoff", found: 0, inserted: 0, query, warnings: errors, rateLimited, retryAt };
+      }
+
+      const settled = await Promise.allSettled(ready.map((provider) => provider.load()));
       const candidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-      const errors = settled.flatMap((result, index) => result.status === "rejected" ? [`${providers[index].name}: ${result.reason instanceof Error ? result.reason.message : "连接失败"}`] : []);
-      if (!candidates.length && errors.length === providers.length) throw new Error(errors.join("；"));
+      let rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
+      const attemptedAt = new Date().toISOString();
+      for (let index = 0; index < settled.length; index += 1) {
+        const result = settled[index];
+        const provider = ready[index];
+        if (result.status === "fulfilled") {
+          await markProviderHealthy(db, provider.name, attemptedAt);
+        } else {
+          const failure = await markProviderFailed(db, provider.name, result.reason, health.get(provider.name)?.consecutive_failures ?? 0, attemptedAt);
+          errors.push(`${provider.name}: ${failure.message}`);
+          retryTimes.push(failure.retryAt);
+          rateLimited ||= failure.limited;
+        }
+      }
 
       const existing = await db.prepare("SELECT title, cluster_key, url, source_country FROM mentions ORDER BY published_at DESC LIMIT 1000").all<ExistingMention>();
       const known = [...existing.results];
@@ -156,10 +219,11 @@ export async function runNewsSync(force = false) {
         await db.prepare("INSERT INTO alerts (title, severity, country, reason) VALUES (?, ?, ?, ?)")
           .bind(`品牌首次进入${country}的信息环境`, "High", country, "系统首次观察到该国家或地区的相关内容").run();
       }
-      const status = errors.length ? "partial" : "completed";
+      const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
-      return { skipped: false, found: candidates.length, inserted, query, provider: providers.map((item) => item.name).join(" + "), warnings: errors };
+      return { skipped: false, found: candidates.length, inserted, query, provider: providers.map((item) => item.name).join(" + "), warnings: errors,
+        rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知同步错误";
       await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")

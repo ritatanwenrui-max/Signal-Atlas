@@ -84,3 +84,14 @@ export const syncLocks = sqliteTable("sync_locks", {
   name: text("name").primaryKey(),
   lockedUntil: text("locked_until").notNull(),
 });
+
+export const providerHealth = sqliteTable("provider_health", {
+  provider: text("provider").primaryKey(),
+  status: text("status").notNull().default("online"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  retryAfter: text("retry_after").notNull().default(""),
+  lastError: text("last_error").notNull().default(""),
+  lastAttemptAt: text("last_attempt_at").notNull().default(""),
+  lastSuccessAt: text("last_success_at").notNull().default(""),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

@@ -43,6 +43,13 @@
       "when": 1786445504006,
       "tag": "0005_silky_firebrand",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786446337317,
+      "tag": "0006_nappy_wildside",
+      "breakpoints": true
     }
   ]
 }

@@ -37,11 +37,12 @@ type Entity = { id: number; type: string; value: string; language: string; activ
 type Alert = { id: number; title: string; severity: string; country: string; reason: string; acknowledged: number; created_at: string };
 type SyncRun = { id: number; provider: string; status: string; found_count: number; inserted_count: number; error: string; started_at: string; completed_at: string | null };
 type BrandProfile = { id: number; name: string; aliases: string; website: string };
-type Connector = { id: string; name: string; status: "online" | "credentials" | "approval"; detail: string };
-type DashboardData = { mentions: Mention[]; traffic: Traffic[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null; connectors: Connector[] };
+type ProviderHealth = { provider: string; status: string; retry_after: string; last_error: string; last_success_at: string };
+type Connector = { id: string; name: string; status: "online" | "limited" | "credentials" | "approval"; detail: string; retryAt?: string };
+type DashboardData = { mentions: Mention[]; traffic: Traffic[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null; connectors: Connector[]; providerHealth: ProviderHealth[] };
 type StoryCluster = { key: string; items: Mention[]; title: string; summary: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string };
 
-const emptyData: DashboardData = { mentions: [], traffic: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [] };
+const emptyData: DashboardData = { mentions: [], traffic: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], providerHealth: [] };
 const nav = [
   ["overview", "全球总览", "01"],
   ["events", "传播事件", "02"],
@@ -66,6 +67,13 @@ function syncTime(value?: string | null) {
   if (minutes < 1) return "刚刚";
   if (minutes < 60) return `${minutes} 分钟前`;
   return formatDate(value);
+}
+
+function connectorPresentation(connector: Connector) {
+  if (connector.status === "online") return { dot: "online", state: "online", label: "正在采集", short: "在线" };
+  if (connector.status === "limited") return { dot: "limited", state: "limited", label: "限流保护 / 自动重试", short: "自动重试" };
+  if (connector.status === "credentials") return { dot: "partial", state: "partial", label: "待配置凭证", short: "待凭证" };
+  return { dot: "pending", state: "pending", label: "需审批/供应商", short: "待审批" };
 }
 
 function riskLabel(risk: number) {
@@ -104,9 +112,14 @@ export default function Home() {
       if (!response.ok) throw new Error(result.error ?? "新闻自动搜索失败");
       setData(result.data);
       if (announce) {
-        const message = result.sync.skipped ? "刚刚已经完成过搜索" : `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条`;
+        const newsStatus = result.data.connectors?.find((item: Connector) => item.id === "news");
+        const retryAt = result.sync.retryAt || newsStatus?.retryAt;
+        const retryLabel = retryAt ? formatDate(retryAt) : "稍后";
+        const message = result.sync.reason === "provider_backoff" || result.sync.rateLimited || newsStatus?.status === "limited"
+          ? `GDELT 暂时限流，已停止重复请求，将在 ${retryLabel} 自动重试`
+          : result.sync.skipped ? "刚刚已经完成过搜索" : `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条`;
         setToast(message);
-        window.setTimeout(() => setToast(""), 3200);
+        window.setTimeout(() => setToast(""), 5200);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "新闻自动搜索失败";
@@ -184,6 +197,7 @@ export default function Home() {
   const countries = ["全球", ...new Set(data.mentions.map((item) => item.source_country))];
   const selected = clusters.find((item) => item.key === selectedCluster) ?? clusters[0];
   const lastSync = data.syncRuns[0];
+  const newsConnector = data.connectors.find((item) => item.id === "news");
   const connectedSources = data.connectors.filter((item) => item.status === "online").map((item) => item.name).join(" · ") || "等待连接";
   const initials = data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR";
 
@@ -205,8 +219,10 @@ export default function Home() {
         </nav>
 
         <div className="system-card">
-          <div className="system-title"><i /> {data.brand ? "自动监测已开启" : "等待品牌配置"}</div>
+          <div className="system-title"><i className={newsConnector?.status === "limited" ? "limited" : ""} /> {newsConnector?.status === "limited" ? "新闻源限流保护中" : data.brand ? "自动监测已开启" : "等待品牌配置"}</div>
           <div className="system-row"><span>全球新闻</span><strong>每 10 分钟</strong></div>
+          <div className="system-row"><span>搜索窗口</span><strong>最近 30 天</strong></div>
+          {newsConnector?.retryAt && <div className="system-row"><span>下次重试</span><strong>{formatDate(newsConnector.retryAt)}</strong></div>}
           <div className="system-row"><span>已连接</span><strong>{connectedSources}</strong></div>
           <div className="system-row"><span>最后同步</span><strong>{syncTime(lastSync?.completed_at ?? lastSync?.started_at)}</strong></div>
         </div>
@@ -309,7 +325,7 @@ function Overview({ data, brand, clusters, alerts, country, countries, setCountr
       {clusters.length === 0 && <div className="empty-mini">尚未发现相关内容；系统会继续自动搜索</div>}</div><button className="text-link" onClick={() => setView("events")}>查看全部传播事件 →</button></section>
     <aside className="alerts-panel surface"><div className="section-head compact"><div><p className="eyebrow">ACTION QUEUE</p><h3>待处理告警</h3></div><span className="count-chip">{alerts.length}</span></div><div className="alert-list">{alerts.slice(0, 3).map((alert) => <article className="alert-card" key={alert.id}><div className="alert-top"><span className={`severity ${alert.severity.toLowerCase()}`}>{alert.severity}</span><small>{alert.country}</small></div><h4>{alert.title}</h4><p>{alert.reason}</p><button onClick={() => acknowledge(alert.id)}>确认处理</button></article>)}{alerts.length === 0 && <div className="empty-mini">暂无待处理告警</div>}</div></aside>
     <section className="traffic-panel surface"><div className="section-head compact"><div><p className="eyebrow">TRAFFIC CORRELATION</p><h3>官网访问异常</h3></div><button className="text-link" onClick={() => setView("traffic")}>查看归因 →</button></div><div className="traffic-bars">{data.traffic.slice(0, 4).map((item) => <div className="traffic-row" key={item.id}><div className="traffic-country"><span>{countryCode[item.country] ?? item.country.slice(0, 2).toUpperCase()}</span><strong>{item.country}</strong></div><div className="bar-track"><i style={{ width: `${Math.min(100, item.anomaly_ratio / 6)}%` }} /></div><div className="traffic-value"><strong>{item.visitors.toLocaleString()}</strong><small>{(item.anomaly_ratio / 100).toFixed(1)}× 基线</small></div></div>)}{data.traffic.length === 0 && <div className="empty-mini">可选：接入网站分析或补充异常流量，用于反向归因</div>}</div></section>
-    <section className="coverage-mini surface"><div className="section-head compact"><div><p className="eyebrow">DATA COVERAGE</p><h3>数据网络</h3></div><button className="text-link" onClick={() => setView("coverage")}>覆盖矩阵 →</button></div><div className="source-health">{data.connectors.map((connector) => <div key={connector.id}><span><i className={connector.status === "online" ? "online" : "partial"} />{connector.name}</span><strong>{connector.status === "online" ? "在线" : "待授权"}</strong></div>)}</div></section>
+    <section className="coverage-mini surface"><div className="section-head compact"><div><p className="eyebrow">DATA COVERAGE</p><h3>数据网络</h3></div><button className="text-link" onClick={() => setView("coverage")}>覆盖矩阵 →</button></div><div className="source-health">{data.connectors.map((connector) => { const status = connectorPresentation(connector); return <div key={connector.id}><span><i className={status.dot} />{connector.name}</span><strong>{status.short}</strong></div>; })}</div></section>
   </div>;
 }
 
@@ -429,8 +445,8 @@ function TrafficView({ traffic, submit }: { traffic: Traffic[]; submit: (payload
 function CoverageView({ connectors }: { connectors: Connector[] }) {
   const onlineCount = connectors.filter((item) => item.status === "online").length;
   return <div className="coverage-page">
-    <section className="coverage-hero panel-dark"><div><p className="eyebrow">GLOBAL COVERAGE MATRIX</p><h2>品牌词只配置一次。<br /><em>国家无需逐个添加。</em></h2><p>系统按品牌名、别名和域名持续搜索全球公开内容。不同社交网络的数据权限各不相同，因此每个连接器都会公开显示真实可用状态。</p></div><div className="coverage-score"><span>ACTIVE CONNECTORS</span><strong>{onlineCount}<small>/{connectors.length}</small></strong><i><b style={{ width: `${connectors.length ? onlineCount / connectors.length * 100 : 0}%` }} /></i><p>网页新闻开箱即用 · 社交数据按官方权限接入</p></div></section>
-    <section className="surface coverage-table-wrap"><div className="section-head"><div><p className="eyebrow">SOURCE × ACCESS × STATUS</p><h3>数据连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article className="connector-card" key={connector.id}><div><i className={connector.status === "online" ? "online" : connector.status === "credentials" ? "partial" : "pending"} /><strong>{connector.name}</strong><b className={`coverage-state ${connector.status === "online" ? "online" : connector.status === "credentials" ? "partial" : "pending"}`}>{connector.status === "online" ? "正在采集" : connector.status === "credentials" ? "待配置凭证" : "需审批/供应商"}</b></div><p>{connector.detail}</p></article>)}</div></section>
+    <section className="coverage-hero panel-dark"><div><p className="eyebrow">GLOBAL COVERAGE MATRIX</p><h2>品牌词只配置一次。<br /><em>国家无需逐个添加。</em></h2><p>系统按品牌名、别名和域名持续搜索最近 30 天的全球公开内容。不同社交网络的数据权限各不相同，因此每个连接器都会公开显示真实可用状态。</p></div><div className="coverage-score"><span>ACTIVE CONNECTORS</span><strong>{onlineCount}<small>/{connectors.length}</small></strong><i><b style={{ width: `${connectors.length ? onlineCount / connectors.length * 100 : 0}%` }} /></i><p>网页新闻开箱即用 · 社交数据按官方权限接入</p></div></section>
+    <section className="surface coverage-table-wrap"><div className="section-head"><div><p className="eyebrow">SOURCE × ACCESS × STATUS</p><h3>数据连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => { const status = connectorPresentation(connector); return <article className="connector-card" key={connector.id}><div><i className={status.dot} /><strong>{connector.name}</strong><b className={`coverage-state ${status.state}`}>{status.label}</b></div><p>{connector.detail}{connector.retryAt ? ` · 下次重试 ${formatDate(connector.retryAt)}` : ""}</p></article>; })}</div></section>
     <section className="coverage-notes"><article><span>01</span><h4>全球统一模型</h4><p>国家、语言和平台都是内容属性，新国家自动进入处理流程。</p></article><article><span>02</span><h4>多供应商底座</h4><p>授权数据源为主，官方 API 与公开网页连接器用于交叉验证。</p></article><article><span>03</span><h4>证据优先</h4><p>无法合法获取的数据明确标记，不用推测填补覆盖缺口。</p></article></section>
   </div>;
 }
@@ -451,7 +467,7 @@ function SettingsView({ brand, connectors, entities, submit }: { brand: BrandPro
     <section className="surface entity-panel"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>品牌监测档案</h3></div><span className="count-chip">{entities.length} 词</span></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea name="aliases" rows={3} defaultValue={brand.aliases} /></label><button className="secondary-button">更新品牌档案</button></form><p className="form-intro">更换品牌名称会清空旧品牌的提及与告警，避免不同品牌数据混在一起。</p><div className="section-head entity-subhead"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>扩展监测词典</h3></div></div><form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>域名</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入新的监测词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form><div className="entity-list">{entities.map((item) => <div key={item.id}><span className="entity-type">{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i></div>)}</div></section>
     <aside className="surface rule-panel"><div className="section-head compact"><div><p className="eyebrow">AUTOMATION</p><h3>自动化规则</h3></div></div>{[
       ["跨国传播告警", "首次进入新国家时立即通知", true], ["负面风险升级", "风险分 ≥ 70 时通知负责人", true], ["流量异常反查", "访问量 ≥ 3× 基线时搜索当地媒体", true], ["普通转载静默", "重复转载只更新事件，不重复通知", true], ["自动对外回复", "需要人工审批", false],
-    ].map(([title, desc, active]) => <div className="rule-row" key={String(title)}><div><strong>{title}</strong><small>{desc}</small></div><span className={active ? "toggle on" : "toggle"} aria-label={`${title}状态`}><i /></span></div>)}<div className="connector-status-list"><p className="eyebrow">CONNECTOR STATUS</p>{connectors.map((connector) => <div key={connector.id}><span>{connector.name}</span><strong>{connector.status === "online" ? "在线" : connector.status === "credentials" ? "待凭证" : "待审批"}</strong></div>)}</div></aside>
+    ].map(([title, desc, active]) => <div className="rule-row" key={String(title)}><div><strong>{title}</strong><small>{desc}</small></div><span className={active ? "toggle on" : "toggle"} aria-label={`${title}状态`}><i /></span></div>)}<div className="connector-status-list"><p className="eyebrow">CONNECTOR STATUS</p>{connectors.map((connector) => <div key={connector.id}><span>{connector.name}</span><strong>{connectorPresentation(connector).short}</strong></div>)}</div></aside>
   </div>;
 }
 

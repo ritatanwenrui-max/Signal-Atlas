@@ -74,6 +74,16 @@ const tables = [
     name TEXT PRIMARY KEY,
     locked_until TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS provider_health (
+    provider TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'online',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    retry_after TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_attempt_at TEXT NOT NULL DEFAULT '',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
 ] as const;
 
 const indexes = [
@@ -93,14 +103,17 @@ export async function ensureDatabase() {
 export async function loadDashboardData() {
   await ensureDatabase();
   const db = env.DB;
-  const [mentions, traffic, entities, alerts, syncRuns, brand] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, brand, providerHealth] = await Promise.all([
     db.prepare("SELECT * FROM mentions ORDER BY published_at DESC").all(),
     db.prepare("SELECT * FROM traffic_signals ORDER BY recorded_at DESC").all(),
     db.prepare("SELECT * FROM tracked_entities ORDER BY id DESC").all(),
     db.prepare("SELECT * FROM alerts ORDER BY acknowledged ASC, id DESC").all(),
     db.prepare("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20").all(),
     db.prepare("SELECT * FROM brand_profiles WHERE active = 1 ORDER BY id DESC LIMIT 1").first(),
+    db.prepare("SELECT * FROM provider_health ORDER BY provider").all<{ provider: string; status: string; retry_after: string; last_error: string; last_success_at: string }>(),
   ]);
+  const gdeltHealth = providerHealth.results.find((item) => item.provider === "GDELT");
+  const gdeltLimited = Boolean(gdeltHealth?.status === "limited" && gdeltHealth.retry_after && new Date(gdeltHealth.retry_after).getTime() > Date.now());
   return {
     mentions: mentions.results,
     traffic: traffic.results,
@@ -108,8 +121,9 @@ export async function loadDashboardData() {
     alerts: alerts.results,
     syncRuns: syncRuns.results,
     brand,
+    providerHealth: providerHealth.results,
     connectors: [
-      { id: "news", name: "全球网页新闻", status: "online", detail: "GDELT · 每 10 分钟" },
+      { id: "news", name: "全球网页新闻", status: gdeltLimited ? "limited" : "online", detail: gdeltLimited ? "GDELT 限流保护中，系统将自动恢复" : "GDELT · 最近 30 天 · 每 10 分钟", retryAt: gdeltLimited ? gdeltHealth?.retry_after : "" },
       { id: "x", name: "X", status: env.X_BEARER_TOKEN ? "online" : "credentials", detail: env.X_BEARER_TOKEN ? "近 7 日公开帖文、转发与引用链路" : "需要 Bearer Token" },
       { id: "youtube", name: "YouTube", status: env.YOUTUBE_API_KEY ? "online" : "credentials", detail: env.YOUTUBE_API_KEY ? "视频、互动量与高相关评论" : "需要 API Key" },
       { id: "meta", name: "Meta / Instagram", status: "approval", detail: "需企业账号授权或数据供应商" },
