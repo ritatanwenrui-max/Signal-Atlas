@@ -25,6 +25,9 @@ export const mentions = sqliteTable("mentions", {
   impact: integer("impact").notNull().default(50),
   summary: text("summary").notNull().default(""),
   clusterKey: text("cluster_key").notNull(),
+  parentUrl: text("parent_url").notNull().default(""),
+  relation: text("relation").notNull().default(""),
+  engagement: integer("engagement").notNull().default(0),
   publishedAt: text("published_at").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [

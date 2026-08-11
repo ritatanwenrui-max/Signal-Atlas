@@ -45,8 +45,8 @@ export async function POST(request: Request) {
     const impact = Number(payload.impact ?? 60);
     const country = String(payload.sourceCountry ?? "全球");
     const result = await db.prepare(`INSERT INTO mentions
-      (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, parent_url, relation, engagement, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(
         title,
         String(payload.url ?? "#"),
@@ -60,6 +60,9 @@ export async function POST(request: Request) {
         impact,
         String(payload.summary ?? "人工补充内容，已进入统一分析流程。"),
         String(payload.clusterKey ?? `manual-${Date.now()}`),
+        String(payload.parentUrl ?? ""),
+        String(payload.relation ?? ""),
+        Math.max(0, Number(payload.engagement ?? 0)),
         String(payload.publishedAt ?? new Date().toISOString()),
       ).run();
 

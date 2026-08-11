@@ -16,6 +16,9 @@ type Mention = {
   impact: number;
   summary: string;
   cluster_key: string;
+  parent_url: string;
+  relation: string;
+  engagement: number;
   published_at: string;
 };
 
@@ -315,7 +318,8 @@ function Metric({ label, value, delta, note, danger = false }: { label: string; 
 }
 
 function EventsView({ clusters, selected, onSelect }: { clusters: StoryCluster[]; selected: StoryCluster | undefined; onSelect: (key: string) => void }) {
-  const chainConfidence = selected ? Math.min(95, 52 + selected.items.length * 7 + selected.countries.length * 4) : 0;
+  const directEvidence = selected?.items.filter((item) => item.parent_url && item.relation).length ?? 0;
+  const chainConfidence = selected ? Math.min(95, 48 + selected.items.length * 5 + selected.countries.length * 4 + directEvidence * 15) : 0;
   return <div className="split-view">
     <section className="surface cluster-browser">
       <div className="section-head"><div><p className="eyebrow">GLOBAL STORY GRAPH</p><h3>传播事件</h3></div><span className="count-chip">{clusters.length}</span></div>
@@ -329,7 +333,7 @@ function EventsView({ clusters, selected, onSelect }: { clusters: StoryCluster[]
     </section>
     <section className="surface event-detail">
       {selected ? <>
-        <div className="detail-kicker"><span className={`risk-pill ${riskClass(selected.risk)}`}>{riskLabel(selected.risk)}</span><small>事件 ID · {selected.key.toUpperCase()}</small></div>
+        <div className="detail-kicker"><span className={`risk-pill ${riskClass(selected.risk)}`}>{riskLabel(selected.risk)}</span><small>事件 ID · {selected.key.toUpperCase()} · {directEvidence} 条直接链路证据</small></div>
         <h2>{selected.title}</h2>
         <p className="detail-summary">{selected.summary}</p>
         <div className="score-board">
@@ -340,8 +344,8 @@ function EventsView({ clusters, selected, onSelect }: { clusters: StoryCluster[]
         <div className="detail-section"><p className="eyebrow">PROPAGATION TIMELINE</p><h3>传播时间线</h3>
           <div className="timeline">{[...selected.items].sort((a: Mention, b: Mention) => a.published_at.localeCompare(b.published_at)).map((item: Mention, index: number) => <article key={item.id}>
             <span className={index === 0 ? "origin" : ""}>{index === 0 ? "源" : index + 1}</span>
-            <div><small>{formatDate(item.published_at)} · {item.source_country} · {item.platform}</small><h4>{item.source}</h4><p>{item.title}</p></div>
-            <a href={item.url} target="_blank" rel="noreferrer">原文 ↗</a>
+            <div><small>{formatDate(item.published_at)} · {item.source_country} · {item.platform}{item.relation ? ` · ${item.relation}` : ""}</small><h4>{item.source}</h4><p>{item.title}</p>{item.engagement > 0 && <small>{item.engagement.toLocaleString()} 次公开互动</small>}</div>
+            <div className="evidence-links">{item.parent_url && <a href={item.parent_url} target="_blank" rel="noreferrer">上游证据 ↗</a>}<a href={item.url} target="_blank" rel="noreferrer">原文 ↗</a></div>
           </article>)}</div>
           <p className="inference-note">链路按发布时间、标题语义相似度和跨平台出现顺序推断；只有平台明确提供转发或引用关系时，才视为直接传播证据。</p>
         </div>

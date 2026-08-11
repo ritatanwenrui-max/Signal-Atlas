@@ -21,19 +21,24 @@ test("dashboard onboards any brand and starts automatic monitoring", async () =>
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
 
-test("monitoring searches multiple providers, clusters propagation, and records runs", async () => {
-  const [sync, providers, repository, migration] = await Promise.all([
+test("monitoring searches providers, analyzes discussion, and builds evidence-backed propagation", async () => {
+  const [sync, providers, repository, brandMigration, evidenceMigration] = await Promise.all([
     source("db/news-sync.ts"),
     source("db/providers.ts"),
     source("db/repository.ts"),
     source("drizzle/0004_polite_talos.sql"),
+    source("drizzle/0005_silky_firebrand.sql"),
   ]);
 
   assert.match(providers, /api\.gdeltproject\.org\/api\/v2\/doc\/doc/);
   assert.match(providers, /api\.x\.com\/2\/tweets\/search\/recent/);
   assert.match(providers, /googleapis\.com\/youtube\/v3\/search/);
+  assert.match(providers, /youtube\/v3\/commentThreads/);
+  assert.match(providers, /referenced_tweets\.id/);
   assert.match(sync, /Promise\.allSettled/);
   assert.match(sync, /similarity/);
+  assert.match(sync, /candidate\.discussionText/);
+  assert.match(sync, /candidate\.parentUrl/);
   assert.match(sync, /sort\(\(a, b\) => a\.publishedAt\.localeCompare/);
   assert.match(sync, /lastRunAge < 15 \* 1000/);
   assert.match(sync, /INSERT INTO sync_locks/);
@@ -45,8 +50,10 @@ test("monitoring searches multiple providers, clusters propagation, and records 
   assert.match(repository, /Meta \/ Instagram/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS sync_runs/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS sync_locks/);
-  assert.match(migration, /CREATE TABLE `brand_profiles`/);
-  assert.match(migration, /DELETE FROM `mentions`/);
+  assert.match(brandMigration, /CREATE TABLE `brand_profiles`/);
+  assert.match(brandMigration, /DELETE FROM `mentions`/);
+  assert.match(evidenceMigration, /ADD `parent_url`/);
+  assert.match(evidenceMigration, /ADD `engagement`/);
 });
 
 test("worker has a ten-minute background schedule", async () => {

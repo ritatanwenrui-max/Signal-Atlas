@@ -58,15 +58,27 @@ function hashKey(tokens: Set<string>, title: string) {
   return `story-${Math.abs(hash).toString(36)}`;
 }
 
-function findCluster(title: string, terms: string[], known: ExistingMention[]) {
-  const incoming = titleTokens(title, terms);
+function canonicalUrl(value: string) {
+  const xPost = value.match(/x\.com\/[^/]+\/status\/(\d+)/);
+  if (xPost) return `x:${xPost[1]}`;
+  const youtube = value.match(/[?&]v=([^&]+)/);
+  if (youtube) return `youtube:${youtube[1]}`;
+  return value.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
+}
+
+function findCluster(candidate: MonitoringCandidate, terms: string[], known: ExistingMention[]) {
+  if (candidate.parentUrl) {
+    const upstream = known.find((mention) => canonicalUrl(mention.url) === canonicalUrl(candidate.parentUrl));
+    if (upstream) return upstream.cluster_key;
+  }
+  const incoming = titleTokens(candidate.title, terms);
   let best: ExistingMention | undefined;
   let bestScore = 0;
   for (const mention of known) {
     const score = similarity(incoming, titleTokens(mention.title, terms));
     if (score > bestScore) { best = mention; bestScore = score; }
   }
-  return best && bestScore >= 0.38 ? best.cluster_key : hashKey(incoming, title);
+  return best && bestScore >= 0.38 ? best.cluster_key : hashKey(incoming, candidate.title);
 }
 
 function impactFor(candidate: MonitoringCandidate) {
@@ -120,16 +132,16 @@ export async function runNewsSync(force = false) {
 
       for (const candidate of candidates.sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))) {
         if (knownUrls.has(candidate.url)) continue;
-        const cluster = findCluster(candidate.title, terms, known);
-        const analysis = analyzeText(candidate.title);
+        const cluster = findCluster(candidate, terms, known);
+        const analysis = analyzeText(`${candidate.title} ${candidate.discussionText}`);
         const impact = impactFor(candidate);
         const result = await db.prepare(`INSERT INTO mentions
-          (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, parent_url, relation, engagement, published_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(candidate.title, candidate.url, candidate.source, candidate.platform, candidate.sourceCountry, candidate.sourceCountry,
             candidate.language, analysis.sentiment, analysis.risk, impact,
-            `自动分析 · ${analysis.topic} · ${candidate.platform} · ${candidate.engagement ? `${candidate.engagement.toLocaleString()} 次公开互动` : "互动数据未披露"}`,
-            cluster, candidate.publishedAt).run();
+            `自动分析 · ${analysis.topic} · ${candidate.platform} · ${candidate.engagement ? `${candidate.engagement.toLocaleString()} 次公开互动` : "互动数据未披露"}${candidate.commentsAnalyzed ? ` · 已分析 ${candidate.commentsAnalyzed} 条高相关评论` : ""}`,
+            cluster, candidate.parentUrl, candidate.relation, candidate.engagement, candidate.publishedAt).run();
         known.push({ title: candidate.title, cluster_key: cluster, url: candidate.url, source_country: candidate.sourceCountry });
         knownUrls.add(candidate.url); inserted += 1;
         if (!knownCountries.has(candidate.sourceCountry) && candidate.sourceCountry !== "地区未披露") newCountries.add(candidate.sourceCountry);

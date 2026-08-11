@@ -9,6 +9,10 @@ export type MonitoringCandidate = {
   language: string;
   publishedAt: string;
   engagement: number;
+  discussionText: string;
+  commentsAnalyzed: number;
+  parentUrl: string;
+  relation: string;
 };
 
 type GdeltArticle = { url?: string; title?: string; seendate?: string; domain?: string; language?: string; sourcecountry?: string };
@@ -17,10 +21,14 @@ type XPlace = { id: string; country?: string; country_code?: string; full_name?:
 type XPost = {
   id: string; text: string; author_id?: string; created_at?: string; lang?: string; geo?: { place_id?: string };
   public_metrics?: { like_count?: number; reply_count?: number; retweet_count?: number; quote_count?: number };
+  referenced_tweets?: Array<{ type: "retweeted" | "quoted" | "replied_to"; id: string }>;
 };
-type XPayload = { data?: XPost[]; includes?: { users?: XUser[]; places?: XPlace[] } };
-type YouTubeItem = { id?: { videoId?: string }; snippet?: { title?: string; channelTitle?: string; publishedAt?: string } };
+type XPayload = { data?: XPost[]; includes?: { users?: XUser[]; places?: XPlace[]; tweets?: XPost[] } };
+type YouTubeItem = { id?: { videoId?: string }; snippet?: { title?: string; description?: string; channelId?: string; channelTitle?: string; publishedAt?: string } };
 type YouTubePayload = { items?: YouTubeItem[] };
+type YouTubeStatsPayload = { items?: Array<{ id: string; statistics?: { viewCount?: string; likeCount?: string; commentCount?: string } }> };
+type YouTubeChannelsPayload = { items?: Array<{ id: string; snippet?: { country?: string } }> };
+type YouTubeCommentsPayload = { items?: Array<{ snippet?: { topLevelComment?: { snippet?: { textDisplay?: string; likeCount?: number } } } }> };
 
 const countryNames: Record<string, string> = {
   Taiwan: "台湾", "Hong Kong": "香港", Thailand: "泰国", "United States": "美国", China: "中国",
@@ -33,6 +41,13 @@ const languageNames: Record<string, string> = {
   English: "英文", Chinese: "中文", Thai: "泰语", Japanese: "日语", Korean: "韩语", Spanish: "西班牙语",
   French: "法语", German: "德语", Vietnamese: "越南语", en: "英文", zh: "中文", th: "泰语", ja: "日语", ko: "韩语",
 };
+
+const countryCodes: Record<string, string> = {
+  US: "美国", GB: "英国", TW: "台湾", HK: "香港", TH: "泰国", CN: "中国", JP: "日本", KR: "韩国",
+  SG: "新加坡", MY: "马来西亚", AU: "澳大利亚", CA: "加拿大", DE: "德国", FR: "法国", IN: "印度",
+};
+
+const relationNames = { retweeted: "直接转发", quoted: "引用传播", replied_to: "回复讨论" } as const;
 
 function isoDate(value?: string) {
   if (!value) return new Date().toISOString();
@@ -57,17 +72,18 @@ export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> 
     title: item.title!.trim(), url: item.url!, source: item.domain?.replace(/^www\./, "") ?? new URL(item.url!).hostname.replace(/^www\./, ""),
     platform: "网页新闻", sourceCountry: countryNames[item.sourcecountry ?? ""] ?? item.sourcecountry ?? "地区未披露",
     language: languageNames[item.language ?? ""] ?? item.language ?? "自动识别", publishedAt: isoDate(item.seendate), engagement: 0,
+    discussionText: "", commentsAnalyzed: 0, parentUrl: "", relation: "",
   }));
 }
 
 export async function fetchX(terms: string[]): Promise<MonitoringCandidate[]> {
   if (!env.X_BEARER_TOKEN) return [];
   const endpoint = new URL("https://api.x.com/2/tweets/search/recent");
-  endpoint.searchParams.set("query", `(${terms.slice(0, 8).map((term) => `"${term.replaceAll('"', "")}"`).join(" OR ")}) -is:retweet`);
+  endpoint.searchParams.set("query", `(${terms.slice(0, 8).map((term) => `"${term.replaceAll('"', "")}"`).join(" OR ")})`);
   endpoint.searchParams.set("max_results", "100");
   endpoint.searchParams.set("sort_order", "recency");
   endpoint.searchParams.set("tweet.fields", "created_at,lang,public_metrics,geo,conversation_id,referenced_tweets");
-  endpoint.searchParams.set("expansions", "author_id,geo.place_id");
+  endpoint.searchParams.set("expansions", "author_id,geo.place_id,referenced_tweets.id,referenced_tweets.id.author_id");
   endpoint.searchParams.set("user.fields", "username,name,location");
   endpoint.searchParams.set("place.fields", "country,country_code,full_name");
   const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${env.X_BEARER_TOKEN}` }, signal: AbortSignal.timeout(15_000) });
@@ -77,16 +93,21 @@ export async function fetchX(terms: string[]): Promise<MonitoringCandidate[]> {
   for (const user of payload.includes?.users ?? []) users.set(user.id, user);
   const places = new Map<string, XPlace>();
   for (const place of payload.includes?.places ?? []) places.set(place.id, place);
-  return (payload.data ?? []).map((post) => {
+  const posts = new Map<string, XPost>();
+  for (const post of [...(payload.includes?.tweets ?? []), ...(payload.data ?? [])]) posts.set(post.id, post);
+  return [...posts.values()].map((post) => {
     const user = post.author_id ? users.get(post.author_id) : undefined;
     const place = post.geo?.place_id ? places.get(post.geo.place_id) : undefined;
     const metrics = post.public_metrics ?? {};
     const placeCountry = place?.country;
     const postLanguage = post.lang;
+    const reference = post.referenced_tweets?.[0];
     return {
       title: post.text, url: `https://x.com/${user?.username ?? "i"}/status/${post.id}`, source: user?.username ? `@${user.username}` : "X 用户",
       platform: "X", sourceCountry: placeCountry ? countryNames[placeCountry] ?? placeCountry : "地区未披露", language: postLanguage ? languageNames[postLanguage] ?? postLanguage : "自动识别",
       publishedAt: isoDate(post.created_at), engagement: Number(metrics.like_count ?? 0) + Number(metrics.reply_count ?? 0) + Number(metrics.retweet_count ?? 0) + Number(metrics.quote_count ?? 0),
+      discussionText: "", commentsAnalyzed: 0, parentUrl: reference ? `https://x.com/i/status/${reference.id}` : "",
+      relation: reference ? relationNames[reference.type] : "",
     } as MonitoringCandidate;
   });
 }
@@ -100,13 +121,49 @@ export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`YouTube API HTTP ${response.status}`);
   const payload = await response.json() as YouTubePayload;
-  return (payload.items ?? []).flatMap((item) => {
+  const items = (payload.items ?? []).filter((item) => item.id?.videoId);
+  const videoIds = items.flatMap((item) => item.id?.videoId ? [item.id.videoId] : []);
+  const channelIds = [...new Set(items.flatMap((item) => item.snippet?.channelId ? [item.snippet.channelId] : []))];
+
+  const statsUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
+  statsUrl.searchParams.set("part", "statistics"); statsUrl.searchParams.set("id", videoIds.join(",")); statsUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
+  const channelsUrl = new URL("https://www.googleapis.com/youtube/v3/channels");
+  channelsUrl.searchParams.set("part", "snippet"); channelsUrl.searchParams.set("id", channelIds.join(",")); channelsUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
+  const [statsResponse, channelsResponse, commentResults] = await Promise.all([
+    videoIds.length ? fetch(statsUrl, { signal: AbortSignal.timeout(15_000) }) : null,
+    channelIds.length ? fetch(channelsUrl, { signal: AbortSignal.timeout(15_000) }) : null,
+    Promise.allSettled(videoIds.slice(0, 10).map(async (videoId) => {
+      const commentsUrl = new URL("https://www.googleapis.com/youtube/v3/commentThreads");
+      commentsUrl.searchParams.set("part", "snippet"); commentsUrl.searchParams.set("videoId", videoId);
+      commentsUrl.searchParams.set("maxResults", "20"); commentsUrl.searchParams.set("order", "relevance");
+      commentsUrl.searchParams.set("textFormat", "plainText"); commentsUrl.searchParams.set("key", env.YOUTUBE_API_KEY!);
+      const commentsResponse = await fetch(commentsUrl, { signal: AbortSignal.timeout(12_000) });
+      if (!commentsResponse.ok) return { videoId, comments: [] as string[] };
+      const commentsPayload = await commentsResponse.json() as YouTubeCommentsPayload;
+      const comments = (commentsPayload.items ?? []).flatMap((comment) => comment.snippet?.topLevelComment?.snippet?.textDisplay ? [comment.snippet.topLevelComment.snippet.textDisplay] : []);
+      return { videoId, comments };
+    })),
+  ]);
+  const statsPayload = statsResponse?.ok ? await statsResponse.json() as YouTubeStatsPayload : { items: [] };
+  const channelsPayload = channelsResponse?.ok ? await channelsResponse.json() as YouTubeChannelsPayload : { items: [] };
+  const stats = new Map((statsPayload.items ?? []).map((item) => [item.id, item.statistics]));
+  const channelCountries = new Map((channelsPayload.items ?? []).map((item) => [item.id, item.snippet?.country]));
+  const comments = new Map(commentResults.flatMap((result) => result.status === "fulfilled" ? [[result.value.videoId, result.value.comments] as const] : []));
+
+  return items.flatMap((item) => {
     const videoId = item.id?.videoId;
     if (!videoId) return [];
+    const videoStats = stats.get(videoId);
+    const videoComments = comments.get(videoId) ?? [];
+    const channelCountry = item.snippet?.channelId ? channelCountries.get(item.snippet.channelId) : undefined;
+    const engagement = Number(videoStats?.viewCount ?? 0) + Number(videoStats?.likeCount ?? 0) + Number(videoStats?.commentCount ?? 0);
     return [{
       title: item.snippet?.title ?? "YouTube 视频", url: `https://www.youtube.com/watch?v=${videoId}`,
-      source: item.snippet?.channelTitle ?? "YouTube 频道", platform: "YouTube" as const, sourceCountry: "地区未披露",
-      language: "自动识别", publishedAt: isoDate(item.snippet?.publishedAt), engagement: 0,
+      source: item.snippet?.channelTitle ?? "YouTube 频道", platform: "YouTube" as const,
+      sourceCountry: channelCountry ? countryCodes[channelCountry] ?? channelCountry : "地区未披露",
+      language: "自动识别", publishedAt: isoDate(item.snippet?.publishedAt), engagement,
+      discussionText: [item.snippet?.description ?? "", ...videoComments].join(" "), commentsAnalyzed: videoComments.length,
+      parentUrl: "", relation: "",
     }];
   });
 }

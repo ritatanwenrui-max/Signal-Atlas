@@ -24,6 +24,9 @@ const tables = [
     impact INTEGER NOT NULL DEFAULT 50,
     summary TEXT NOT NULL DEFAULT '',
     cluster_key TEXT NOT NULL,
+    parent_url TEXT NOT NULL DEFAULT '',
+    relation TEXT NOT NULL DEFAULT '',
+    engagement INTEGER NOT NULL DEFAULT 0,
     published_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
@@ -107,8 +110,8 @@ export async function loadDashboardData() {
     brand,
     connectors: [
       { id: "news", name: "全球网页新闻", status: "online", detail: "GDELT · 每 10 分钟" },
-      { id: "x", name: "X", status: env.X_BEARER_TOKEN ? "online" : "credentials", detail: env.X_BEARER_TOKEN ? "近 7 日公开帖文" : "需要 Bearer Token" },
-      { id: "youtube", name: "YouTube", status: env.YOUTUBE_API_KEY ? "online" : "credentials", detail: env.YOUTUBE_API_KEY ? "关键词视频搜索" : "需要 API Key" },
+      { id: "x", name: "X", status: env.X_BEARER_TOKEN ? "online" : "credentials", detail: env.X_BEARER_TOKEN ? "近 7 日公开帖文、转发与引用链路" : "需要 Bearer Token" },
+      { id: "youtube", name: "YouTube", status: env.YOUTUBE_API_KEY ? "online" : "credentials", detail: env.YOUTUBE_API_KEY ? "视频、互动量与高相关评论" : "需要 API Key" },
       { id: "meta", name: "Meta / Instagram", status: "approval", detail: "需企业账号授权或数据供应商" },
       { id: "tiktok", name: "TikTok", status: "approval", detail: "商业监测需合规数据供应商" },
     ],
