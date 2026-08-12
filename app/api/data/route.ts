@@ -7,7 +7,7 @@ export const runtime = "edge";
 
 export async function GET() {
   const user = await getChatGPTUser();
-  return Response.json(await loadDashboardData(user?.userId));
+  return Response.json({ ...await loadDashboardData(user?.userId), viewer: { authenticated: Boolean(user) } });
 }
 
 export async function POST(request: Request) {
@@ -95,5 +95,5 @@ export async function POST(request: Request) {
       await db.prepare("UPDATE alerts SET acknowledged = 1 WHERE id = ? AND brand_id = ?").bind(Number(payload.id), brandId).run();
     } else return Response.json({ error: "未知操作" }, { status: 400 });
   }
-  return Response.json(await loadDashboardData(user.userId));
+  return Response.json({ ...await loadDashboardData(user.userId), viewer: { authenticated: true } });
 }

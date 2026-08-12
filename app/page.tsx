@@ -29,11 +29,12 @@ type Analytics = {
 type DashboardData = {
   mentions: Mention[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null;
   connectors: Connector[]; mediaSources: MediaSource[]; propagationEdges: PropagationEdge[]; analytics: Analytics;
+  viewer: { authenticated: boolean };
 };
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 
 const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, timeline: [], words: [], sources: [], crossBorderEdges: 0, archivedTotal: 0 };
-const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics };
+const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, viewer: { authenticated: false } };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "舆情分析", "04"], ["coverage", "来源覆盖", "05"], ["settings", "品牌配置", "06"],
@@ -107,19 +108,22 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
     async function bootstrap() {
       try {
         const response = await fetch("/api/data");
         if (!response.ok) throw new Error("数据加载失败");
         const next = await response.json() as DashboardData;
         if (!cancelled) setData(next);
-        if (next.brand) void syncNews(false, false);
+        if (next.viewer.authenticated) {
+          if (next.brand) void syncNews(false, false);
+          timer = window.setInterval(() => void syncNews(false, false), 60 * 60 * 1000);
+        }
       } catch { if (!cancelled) setToast("暂时无法读取情报档案，请稍后刷新"); }
       finally { if (!cancelled) setLoading(false); }
     }
     void bootstrap();
-    const timer = window.setInterval(() => void syncNews(false, false), 60 * 60 * 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    return () => { cancelled = true; if (timer) window.clearInterval(timer); };
     // The server lease and discovery clock independently protect paid/free provider quotas.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -161,34 +165,34 @@ export default function Home() {
   const platforms = ["全部平台", ...platformCatalog, ...uncataloguedPlatforms];
   const selected = clusters.find((item) => item.key === selectedCluster) ?? clusters.find((item) => item.items.length > 1) ?? clusters[0];
   const lastSync = data.syncRuns[0];
-  const initials = data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR";
+  const initials = data.viewer.authenticated ? data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR" : "--";
 
   return <main className="app-shell">
     <aside className="sidebar">
       <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><strong>SIGNAL ATLAS</strong><small>GLOBAL MEDIA INTELLIGENCE</small></div></div>
-      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <button key={id} className={view === id ? "nav-item active" : "nav-item"} onClick={() => setView(id)}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</button>)}</nav>
-      <div className="system-card">
+      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <button key={id} disabled={!data.viewer.authenticated} className={view === id ? "nav-item active" : "nav-item"} onClick={() => setView(id)}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</button>)}</nav>
+      {data.viewer.authenticated && <div className="system-card">
         <div className="system-title"><i /> 混合监测已运行</div>
         <div className="system-row"><span>调度巡检</span><strong>每小时 :17</strong></div>
         <div className="system-row"><span>全球发现</span><strong>6 小时 / 每日</strong></div>
         <div className="system-row"><span>免费单源</span><strong>活跃 3h / 探测 12h</strong></div>
         <div className="system-row"><span>媒体来源库</span><strong>{data.mediaSources.length} 个</strong></div>
         <div className="system-row"><span>最后巡检</span><strong>{syncTime(lastSync?.completed_at ?? lastSync?.started_at)}</strong></div>
-      </div>
-      <div className="sidebar-foot"><div className="avatar">{initials}</div><div><strong>{data.brand?.name ?? "尚未配置品牌"}</strong><small>品牌情报工作区</small></div></div>
+      </div>}
+      <div className="sidebar-foot"><div className="avatar">{initials}</div><div><strong>{data.viewer.authenticated ? data.brand?.name ?? "尚未配置品牌" : "尚未登录"}</strong><small>品牌情报工作区</small></div></div>
     </aside>
 
     <section className="workspace">
       <header className="topbar">
         <div><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div>
         <div className="top-actions">
-          <label className="search-box"><span>⌕</span><input aria-label="搜索全部档案" placeholder="搜索标题、来源、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>全档案</kbd></label>
+          <label className="search-box"><span>⌕</span><input disabled={!data.viewer.authenticated} aria-label="搜索全部档案" placeholder="搜索标题、来源、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>全档案</kbd></label>
           <button className="primary-button" disabled={syncing || !data.brand} onClick={() => void syncNews(true, true)}><span>{syncing ? "↻" : "◎"}</span>{syncing ? "巡检中…" : "立即巡检"}</button>
         </div>
       </header>
 
       <div className="content-area">
-        {loading ? <LoadingState /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
+        {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
           {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} />}
           {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
@@ -203,6 +207,13 @@ export default function Home() {
 }
 
 function LoadingState() { return <div className="loading-state"><span /><p>正在读取长期新闻档案与传播图谱…</p></div>; }
+
+function PublicAccess() {
+  return <section className="onboarding">
+    <div className="onboarding-copy panel-dark"><h2>品牌舆情监测</h2><p>自动搜索网页新闻与已接入的社交平台内容，并按地区归档、聚类事件、分析情绪和推断传播路径。</p><div className="architecture-mini"><span>搜索与归档</span><b>→</b><span>事件与传播</span><b>→</b><span>情绪与风险</span></div></div>
+    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>每个账号拥有独立的品牌档案、新闻数据和 API 凭证，其他用户无法查看或修改。</p><a className="primary-button wide" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录 →</a><small>登录后即可创建自己的品牌监测空间。</small></div>
+  </section>;
+}
 
 function BrandOnboarding({ submit }: { submit: (payload: Record<string, unknown>) => Promise<void> }) {
   const [busy, setBusy] = useState(false);

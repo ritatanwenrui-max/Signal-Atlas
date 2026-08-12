@@ -16,6 +16,9 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /监测概览/);
   assert.match(page, /采集计划/);
   assert.doesNotMatch(page, /少量付费发现|大部分追踪免费完成|正在被归档和溯源|输入一次品牌名/);
+  assert.match(page, /!data\.viewer\.authenticated \? <PublicAccess/);
+  assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
+  assert.match(page, /每个账号拥有独立的品牌档案、新闻数据和 API 凭证/);
   assert.match(page, /全球报道热力分布/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
@@ -80,6 +83,7 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.match(credentials, /TikTok/);
   assert.match(route, /getChatGPTUser/);
   assert.match(route, /请先登录/);
+  assert.match(route, /viewer: \{ authenticated: Boolean\(user\) \}/);
   assert.match(schema, /connectorCredentials/);
   assert.match(schema, /primaryKey\(\{ columns: \[table\.userId, table\.provider\] \}\)/);
   assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
