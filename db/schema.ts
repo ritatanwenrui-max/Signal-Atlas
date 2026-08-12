@@ -221,3 +221,38 @@ export const socialAuthorSnapshots = sqliteTable("social_author_snapshots", {
   verified: integer("verified", { mode: "boolean" }).notNull().default(false),
   capturedAt: text("captured_at").notNull(),
 }, (table) => [index("idx_social_authors_brand_user_time").on(table.brandId, table.username, table.capturedAt)]);
+
+export const commentAnalyses = sqliteTable("comment_analyses", {
+  mentionId: integer("mention_id").primaryKey(),
+  brandId: integer("brand_id").notNull(),
+  adapter: text("adapter").notNull().default(""),
+  status: text("status").notNull().default("unsupported"),
+  reportedCount: integer("reported_count").notNull().default(0),
+  analyzedCount: integer("analyzed_count").notNull().default(0),
+  positiveCount: integer("positive_count").notNull().default(0),
+  neutralCount: integer("neutral_count").notNull().default(0),
+  negativeCount: integer("negative_count").notNull().default(0),
+  mixedCount: integer("mixed_count").notNull().default(0),
+  sentiment: text("sentiment").notNull().default("样本不足"),
+  sentimentScore: integer("sentiment_score").notNull().default(0),
+  keywords: text("keywords").notNull().default("[]"),
+  lastError: text("last_error").notNull().default(""),
+  lastCollectedAt: text("last_collected_at").notNull(),
+}, (table) => [index("idx_comment_analyses_brand_collected").on(table.brandId, table.lastCollectedAt)]);
+
+export const mentionComments = sqliteTable("mention_comments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  mentionId: integer("mention_id").notNull(),
+  brandId: integer("brand_id").notNull(),
+  sourceCommentId: text("source_comment_id").notNull(),
+  content: text("content").notNull(),
+  sentiment: text("sentiment").notNull(),
+  sentimentScore: integer("sentiment_score").notNull().default(0),
+  likes: integer("likes").notNull().default(0),
+  replies: integer("replies").notNull().default(0),
+  publishedAt: text("published_at").notNull().default(""),
+  collectedAt: text("collected_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_mention_comments_source").on(table.mentionId, table.sourceCommentId),
+  index("idx_mention_comments_brand_mention").on(table.brandId, table.mentionId),
+]);

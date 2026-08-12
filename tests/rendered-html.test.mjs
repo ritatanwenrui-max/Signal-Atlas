@@ -111,6 +111,29 @@ test("Monid runs Instagram keyword searches asynchronously and archives social m
   assert.match(schema, /socialAuthorSnapshots/);
   assert.match(schema, /monidJobs/);
   assert.match(repository, /Instagram 公共搜索（Monid）/);
+  assert.match(monid, /CREATED.*QUEUED.*PENDING.*READY.*RUNNING/);
+  assert.match(sync, /earlyMonidPending/);
+  assert.match(repository, /页面会自动回收结果/);
+});
+
+test("public news comments are collected, archived, and analyzed without inventing samples", async () => {
+  const [comments, providers, sync, schema, repository, page] = await Promise.all([
+    source("db/comments.ts"), source("db/providers.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"),
+  ]);
+  assert.match(providers, /163\\\.com.*中国/);
+  assert.match(providers, /网易.*netease/);
+  assert.match(comments, /comment\.tie\.163\.com\/api\/v1\/products/);
+  assert.match(comments, /网页结构化评论/);
+  assert.match(comments, /MAX_COMMENTS_PER_ARTICLE = 100/);
+  assert.match(comments, /positive_count/);
+  assert.match(comments, /keywordCounts/);
+  assert.match(sync, /refreshPublicCommentAnalyses/);
+  assert.match(schema, /commentAnalyses/);
+  assert.match(schema, /mentionComments/);
+  assert.match(repository, /comment_analyses\.reported_count AS comment_reported_count/);
+  assert.match(page, /评论区情绪/);
+  assert.match(page, /评论区关键词词云/);
+  assert.match(page, /页面显示的评论总数不会被冒充为已分析样本/);
 });
 
 test("worker runs the hybrid monitor hourly", async () => {

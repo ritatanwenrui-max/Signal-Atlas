@@ -192,6 +192,36 @@ const tables = [
     verified INTEGER NOT NULL DEFAULT 0,
     captured_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS comment_analyses (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    adapter TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'unsupported',
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    analyzed_count INTEGER NOT NULL DEFAULT 0,
+    positive_count INTEGER NOT NULL DEFAULT 0,
+    neutral_count INTEGER NOT NULL DEFAULT 0,
+    negative_count INTEGER NOT NULL DEFAULT 0,
+    mixed_count INTEGER NOT NULL DEFAULT 0,
+    sentiment TEXT NOT NULL DEFAULT '样本不足',
+    sentiment_score INTEGER NOT NULL DEFAULT 0,
+    keywords TEXT NOT NULL DEFAULT '[]',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_collected_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS mention_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mention_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    source_comment_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sentiment TEXT NOT NULL,
+    sentiment_score INTEGER NOT NULL DEFAULT 0,
+    likes INTEGER NOT NULL DEFAULT 0,
+    replies INTEGER NOT NULL DEFAULT 0,
+    published_at TEXT NOT NULL DEFAULT '',
+    collected_at TEXT NOT NULL
+  )`,
 ] as const;
 
 const indexes = [
@@ -213,11 +243,23 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_social_metrics_brand_platform ON social_post_metrics(brand_id, platform)",
   "CREATE INDEX IF NOT EXISTS idx_social_metrics_author ON social_post_metrics(brand_id, author_username)",
   "CREATE INDEX IF NOT EXISTS idx_social_authors_brand_user_time ON social_author_snapshots(brand_id, username, captured_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_analyses_brand_collected ON comment_analyses(brand_id, last_collected_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_mention_comments_source ON mention_comments(mention_id, source_comment_id)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_mention ON mention_comments(brand_id, mention_id)",
 ] as const;
 
 export async function ensureDatabase() {
   const db = env.DB;
   await db.batch([...tables, ...indexes].map((statement) => db.prepare(statement)));
+  await db.batch([
+    db.prepare(`UPDATE mentions SET source_country = '中国', content_country = '中国', location_confidence = 99,
+      location_method = '媒体域名 / 已知媒体库'
+      WHERE (lower(url) LIKE '%://%.163.com/%' OR lower(url) LIKE '%://163.com/%' OR source LIKE '%网易%' OR source LIKE '%網易%')
+        AND source_country IN ('地区未披露', '地区待确认', '华语地区')`),
+    db.prepare(`UPDATE media_sources SET country = '中国'
+      WHERE (lower(domain) = '163.com' OR lower(domain) LIKE '%.163.com' OR name LIKE '%网易%' OR name LIKE '%網易%')
+        AND country IN ('地区未披露', '地区待确认', '华语地区')`),
+  ]);
 }
 
 export async function getActiveBrandForUser(db: D1Database, userId: string) {
@@ -239,8 +281,16 @@ export async function loadDashboardData(userId = "") {
       social_post_metrics.likes AS social_likes, social_post_metrics.comments AS social_comments,
       social_post_metrics.shares AS social_shares, social_post_metrics.views AS social_views,
       social_post_metrics.plays AS social_plays, social_post_metrics.matched_terms AS social_matched_terms,
-      social_post_metrics.metrics_updated_at AS social_metrics_updated_at
+      social_post_metrics.metrics_updated_at AS social_metrics_updated_at,
+      comment_analyses.adapter AS comment_adapter, comment_analyses.status AS comment_status,
+      comment_analyses.reported_count AS comment_reported_count, comment_analyses.analyzed_count AS comment_analyzed_count,
+      comment_analyses.positive_count AS comment_positive_count, comment_analyses.neutral_count AS comment_neutral_count,
+      comment_analyses.negative_count AS comment_negative_count, comment_analyses.mixed_count AS comment_mixed_count,
+      comment_analyses.sentiment AS comment_sentiment, comment_analyses.sentiment_score AS comment_sentiment_score,
+      comment_analyses.keywords AS comment_keywords, comment_analyses.last_error AS comment_last_error,
+      comment_analyses.last_collected_at AS comment_last_collected_at
       FROM mentions LEFT JOIN social_post_metrics ON social_post_metrics.mention_id = mentions.id
+      LEFT JOIN comment_analyses ON comment_analyses.mention_id = mentions.id
       WHERE mentions.brand_id = ? ORDER BY mentions.published_at DESC`).bind(brandId).all(),
     db.prepare("SELECT * FROM traffic_signals WHERE brand_id = ? ORDER BY recorded_at DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM tracked_entities WHERE brand_id = ? ORDER BY id DESC").bind(brandId).all(),
@@ -268,7 +318,7 @@ export async function loadDashboardData(userId = "") {
   const tiktokConfigured = storedCredentials.has("TikTok");
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
-  const monidPending = monidJobs.results.filter((item) => ["READY", "RUNNING"].includes(item.status)).length;
+  const monidPending = monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length;
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
@@ -285,6 +335,9 @@ export async function loadDashboardData(userId = "") {
   const sentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   const timelineMap = new Map<string, { date: string; total: number; positive: number; negative: number }>();
   const wordMap = new Map<string, number>();
+  const commentWordMap = new Map<string, number>();
+  const commentSentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
+  let commentsAnalyzed = 0;
   const sourceMap = new Map<string, { source: string; country: string; count: number; impact: number }>();
   const stopwords = new Set(["the", "and", "for", "with", "from", "that", "this", "have", "will", "news", "brand", "company", "their", "about", "into", "after", "more", "latest", "报道", "新闻", "媒体", "公司", "品牌", "一个", "以及", "进行", "表示", "相关", "发布", "今日", "目前", "可以"]);
   const tracked = (entities.results as Array<Record<string, unknown>>).map((item) => String(item.value ?? "").toLowerCase());
@@ -325,6 +378,19 @@ export async function loadDashboardData(userId = "") {
         if (!stopwords.has(token) && !tracked.some((term) => term.includes(token))) wordMap.set(token, (wordMap.get(token) ?? 0) + 1);
       }
     }
+    commentsAnalyzed += Number(row.comment_analyzed_count ?? 0);
+    commentSentiment.positive += Number(row.comment_positive_count ?? 0);
+    commentSentiment.neutral += Number(row.comment_neutral_count ?? 0);
+    commentSentiment.negative += Number(row.comment_negative_count ?? 0);
+    commentSentiment.mixed += Number(row.comment_mixed_count ?? 0);
+    try {
+      const commentKeywords = JSON.parse(String(row.comment_keywords ?? "[]")) as Array<{ word?: string; count?: number }>;
+      for (const keyword of commentKeywords) {
+        const word = String(keyword.word ?? "").trim();
+        const count = Number(keyword.count ?? 0);
+        if (word && count > 0) commentWordMap.set(word, (commentWordMap.get(word) ?? 0) + count);
+      }
+    } catch { /* Older rows may not contain JSON yet. */ }
   }
   const sourceRows = mediaSources.results as Array<Record<string, unknown>>;
   const crawlerOnline = sourceRows.some((item) => item.status === "active" || item.status === "discovered" || item.status === "watching");
@@ -344,6 +410,9 @@ export async function loadDashboardData(userId = "") {
       sentiment,
       timeline: [...timelineMap.values()].filter((item) => item.date).sort((a, b) => a.date.localeCompare(b.date)).slice(-30),
       words: [...wordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
+      commentWords: [...commentWordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
+      commentSentiment,
+      commentsAnalyzed,
       sources: [...sourceMap.values()].sort((a, b) => b.count - a.count || b.impact - a.impact).slice(0, 12),
       crossBorderEdges: (propagationEdges.results as Array<Record<string, unknown>>).filter((item) => Number(item.cross_border) === 1).length,
       archivedTotal: mentionRows.length,
@@ -354,8 +423,10 @@ export async function loadDashboardData(userId = "") {
       { id: "monid-instagram", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Instagram 公共搜索（Monid）",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
+        pending: monidPending, retryAt: monidHealth?.retry_after ?? "", lastError: monidHealth?.last_error ?? "",
         detail: !monidConfigured ? "配置 Monid API Key 后，按品牌词搜索公开帖子并补全作者与互动数据"
-          : monidPending ? `${monidPending} 个搜帖或作者补全任务正在后台处理` : "普通文字关键词搜帖 · 作者粉丝数 · 点赞、评论、转发与播放量" },
+          : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
+          : monidPending ? `${monidPending} 个任务采集中，页面会自动回收结果` : "普通文字关键词搜帖 · 作者粉丝数 · 点赞、评论、转发与播放量" },
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
       { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },

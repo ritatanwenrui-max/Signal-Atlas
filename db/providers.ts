@@ -93,6 +93,7 @@ const countryCodes: Record<string, string> = {
 const relationNames = { retweeted: "直接转发", quoted: "引用传播", replied_to: "回复讨论" } as const;
 
 const domainCountryRules: Array<[RegExp, string]> = [
+  [/(^|\.)163\.com$|(^|\.)126\.com$/i, "中国"],
   [/\.tw$/i, "台湾"], [/\.hk$/i, "香港"], [/\.th$/i, "泰国"], [/\.jp$/i, "日本"], [/\.kr$/i, "韩国"],
   [/\.sg$/i, "新加坡"], [/\.my$/i, "马来西亚"], [/\.vn$/i, "越南"], [/\.ph$/i, "菲律宾"], [/\.id$/i, "印度尼西亚"],
   [/\.cn$/i, "中国"], [/\.uk$/i, "英国"], [/\.au$/i, "澳大利亚"], [/\.ca$/i, "加拿大"], [/\.de$/i, "德国"],
@@ -108,7 +109,7 @@ const sourceCountryCues: Array<[RegExp, string]> = [
   [/(台灣|台湾|臺灣|taiwan|台北|臺北)/i, "台湾"], [/(香港|hong kong|港媒)/i, "香港"], [/(泰國|泰国|thailand|bangkok|ประเทศไทย)/i, "泰国"],
   [/(日本|japan|東京|tokyo)/i, "日本"], [/(韓國|韩国|south korea|seoul|서울)/i, "韩国"], [/(新加坡|singapore)/i, "新加坡"],
   [/(馬來西亞|马来西亚|malaysia)/i, "马来西亚"], [/(美國|美国|united states|\busa\b)/i, "美国"], [/(英國|英国|united kingdom|\buk\b)/i, "英国"],
-  [/(中國|中国|mainland china|beijing)/i, "中国"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
+  [/(中國|中国|mainland china|beijing|网易|網易|netease)/i, "中国"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
 ];
 
 export function inferLanguage(text: string, declared = "") {

@@ -14,6 +14,7 @@ const API_BASE = "https://api.monid.ai";
 const SEARCH_ENDPOINT = "/apify/instagram-hashtag-scraper";
 const PROFILE_ENDPOINT = "/apify/instagram-profile-scraper";
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
+const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
 
 function pathValue(value: unknown, path: string) {
   return path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as JsonObject)[key] : undefined, value);
@@ -225,7 +226,7 @@ async function startProfileEnrichment(db: D1Database, brandId: number, apiKey: s
   const freshNames = new Set(fresh.results.map((item) => item.username));
   const pending = unique.filter((item) => !freshNames.has(item.toLowerCase()));
   if (!pending.length) return;
-  const active = await db.prepare("SELECT id FROM monid_jobs WHERE brand_id = ? AND stage = 'profiles' AND status IN ('READY','RUNNING') LIMIT 1")
+  const active = await db.prepare(`SELECT id FROM monid_jobs WHERE brand_id = ? AND stage = 'profiles' AND status IN (${PENDING_SQL}) LIMIT 1`)
     .bind(brandId).first<{ id: number }>();
   if (active) return;
   const run = await startRun(apiKey, PROFILE_ENDPOINT, { usernames: pending, includeAboutSection: false });
@@ -277,13 +278,13 @@ async function waitBriefly(apiKey: string, run: MonidRun) {
 }
 
 export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
-  const row = await db.prepare("SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ? AND status IN ('READY','RUNNING')")
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})`)
     .bind(brandId).first<{ count: number }>();
   return Number(row?.count ?? 0) > 0;
 }
 
 export async function countPendingMonidJobs(db: D1Database, brandId: number) {
-  const row = await db.prepare("SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ? AND status IN ('READY','RUNNING')")
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})`)
     .bind(brandId).first<{ count: number }>();
   return Number(row?.count ?? 0);
 }
@@ -301,7 +302,7 @@ export async function refreshSocialFollowerCounts(db: D1Database, brandId: numbe
 export async function collectMonidInstagram(db: D1Database, brandId: number, terms: string[], apiKey: string, startNew: boolean) {
   const candidates: MonitoringCandidate[] = [];
   const pending = await db.prepare(`SELECT id, run_id, stage, status, terms FROM monid_jobs
-    WHERE brand_id = ? AND status IN ('READY','RUNNING') ORDER BY id ASC LIMIT 6`)
+    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 6`)
     .bind(brandId).all<MonidJob>();
   const hadPendingSearch = pending.results.some((job) => job.stage === "search");
   for (const job of pending.results) {

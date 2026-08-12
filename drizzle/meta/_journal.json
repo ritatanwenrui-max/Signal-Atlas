@@ -85,6 +85,13 @@
       "when": 1786518168396,
       "tag": "0011_slimy_kronos",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1786520068787,
+      "tag": "0012_dry_slipstream",
+      "breakpoints": true
     }
   ]
 }

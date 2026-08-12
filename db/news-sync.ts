@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
+import { refreshPublicCommentAnalyses } from "./comments";
 import { collectMonidInstagram, countPendingMonidJobs, hasPendingMonidJobs, refreshSocialFollowerCounts } from "./monid";
 import { ensureDatabase, getActiveBrandForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
@@ -359,12 +360,15 @@ export async function runNewsSync(force = false, userId = "") {
     await backfillMediaSources(db, brandId);
     await rebuildStoryClusters(db, brandId, terms);
     await rebuildPropagationEdges(db, brandId, terms);
+    const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
+    const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", userId);
+    const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 1").bind(brandId).first<SyncRun>();
     const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
     if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
-    if (lastRun && lastRunAge < 15 * 1000) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0 };
-    if (!force && lastRun && lastRunAge < 20 * 60 * 1000) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
+    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh };
+    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh };
 
     const query = gdeltQuery(terms);
     const startedAt = new Date().toISOString();
@@ -376,13 +380,14 @@ export async function runNewsSync(force = false, userId = "") {
       const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error, last_success_at FROM provider_health WHERE provider LIKE ?")
         .bind(`${brandId}:%`).all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
-      const [newsApiKey, monidApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
-        loadConnectorCredential(db, "NewsAPI.ai", userId), loadConnectorCredential(db, "Monid / Instagram", userId),
+      const [newsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
+        loadConnectorCredential(db, "NewsAPI.ai", userId),
         loadConnectorCredential(db, "X", userId), loadConnectorCredential(db, "YouTube", userId),
       ]);
+      const monidApiKey = earlyMonidApiKey;
       const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
       const gdeltDue = !newsApiKey || isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
-      const monidPending = monidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
+      const monidPending = earlyMonidPending;
       const monidDue = force || isDue(health.get("Monid / Instagram")?.last_success_at, SIX_HOURS);
       const providers: ProviderTask[] = [
         ...(discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
@@ -480,7 +485,7 @@ export async function runNewsSync(force = false, userId = "") {
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
-      return { skipped: false, found: candidates.length, inserted, query, socialPending,
+      return { skipped: false, found: candidates.length, inserted, query, socialPending, commentRefresh,
         provider: `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
         warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
     } catch (error) {
