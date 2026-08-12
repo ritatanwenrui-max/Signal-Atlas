@@ -1,7 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { runNewsSync } from "../db/news-sync";
+import { runAllBrandSyncs } from "../db/news-sync";
 
 interface Env {
   ASSETS: Fetcher;
@@ -48,7 +48,7 @@ const worker = {
     return handler.fetch(request, env, ctx);
   },
   async scheduled(_controller: unknown, _env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runNewsSync(false));
+    ctx.waitUntil(runAllBrandSyncs());
   },
 };
 

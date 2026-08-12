@@ -16,9 +16,14 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /事件爆发曲线/);
   assert.match(page, /并列事件对比/);
   assert.match(page, /高度转载率/);
+  assert.match(page, /同一事件扩散路径/);
+  assert.match(page, /network-edge cross/);
+  assert.match(page, /样本不足/);
   assert.match(page, /saveConnectorCredential/);
   assert.match(page, /PERSONAL API VAULT/);
   assert.match(page, /按登录用户隔离/);
+  assert.match(page, /Instagram Business \/ Creator Account ID/);
+  assert.match(page, /Client Secret/);
   assert.match(page, /60 \* 60 \* 1000/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
@@ -35,7 +40,12 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(sync, /titleScore \* 0\.68/);
   assert.match(sync, /ageHours <= 24/);
   assert.match(sync, /rebuildPropagationEdges/);
+  assert.match(sync, /rebuildStoryClusters/);
+  assert.match(sync, /enrichHistoricalMentions/);
+  assert.match(sync, /brand_id = \?/);
   assert.match(sync, /propagation_edges/);
+  assert.match(providers, /inferSourceCountry/);
+  assert.match(providers, /媒体域名 \/ 国家顶级域/);
   assert.match(crawler, /robotsAllows/);
   assert.match(crawler, /parseFeed/);
   assert.match(crawler, /parseSitemap/);
@@ -53,6 +63,8 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.match(credentials, /AES-GCM/);
   assert.match(credentials, /additionalData/);
   assert.match(credentials, /user_id = \? AND provider = \?/);
+  assert.match(credentials, /Meta \/ Instagram/);
+  assert.match(credentials, /TikTok/);
   assert.match(route, /getChatGPTUser/);
   assert.match(route, /请先登录/);
   assert.match(schema, /connectorCredentials/);
@@ -62,6 +74,6 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
 test("worker runs the hybrid monitor hourly", async () => {
   const [worker, vite] = await Promise.all([source("worker/index.ts"), source("vite.config.ts")]);
   assert.match(worker, /async scheduled/);
-  assert.match(worker, /runNewsSync\(false\)/);
+  assert.match(worker, /runAllBrandSyncs\(\)/);
   assert.match(vite, /crons: \["17 \* \* \* \*"\]/);
 });

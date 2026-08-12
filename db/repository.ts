@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     aliases TEXT NOT NULL DEFAULT '',
     website TEXT NOT NULL DEFAULT '',
@@ -12,6 +13,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS mentions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -19,6 +21,8 @@ const tables = [
     source_country TEXT NOT NULL,
     content_country TEXT NOT NULL,
     language TEXT NOT NULL,
+    location_confidence INTEGER NOT NULL DEFAULT 0,
+    location_method TEXT NOT NULL DEFAULT '',
     sentiment TEXT NOT NULL,
     risk INTEGER NOT NULL DEFAULT 20,
     impact INTEGER NOT NULL DEFAULT 50,
@@ -43,10 +47,11 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS media_sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    domain TEXT NOT NULL UNIQUE,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    domain TEXT NOT NULL,
     name TEXT NOT NULL,
-    country TEXT NOT NULL DEFAULT '地区未披露',
-    language TEXT NOT NULL DEFAULT '自动识别',
+    country TEXT NOT NULL DEFAULT '地区待确认',
+    language TEXT NOT NULL DEFAULT '语言待确认',
     homepage_url TEXT NOT NULL,
     feed_url TEXT NOT NULL DEFAULT '',
     sitemap_url TEXT NOT NULL DEFAULT '',
@@ -65,6 +70,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS propagation_edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     cluster_key TEXT NOT NULL,
     from_mention_id INTEGER NOT NULL,
     to_mention_id INTEGER NOT NULL,
@@ -78,6 +84,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS traffic_signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     country TEXT NOT NULL,
     visitors INTEGER NOT NULL,
     views INTEGER NOT NULL,
@@ -89,6 +96,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS tracked_entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     type TEXT NOT NULL,
     value TEXT NOT NULL,
     language TEXT NOT NULL,
@@ -97,6 +105,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     mention_id INTEGER,
     title TEXT NOT NULL,
     severity TEXT NOT NULL,
@@ -107,6 +116,7 @@ const tables = [
   )`,
   `CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
     provider TEXT NOT NULL,
     query TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -144,16 +154,19 @@ const tables = [
 ] as const;
 
 const indexes = [
-  "CREATE INDEX IF NOT EXISTS idx_mentions_published_at ON mentions(published_at)",
-  "CREATE INDEX IF NOT EXISTS idx_mentions_country_platform ON mentions(source_country, platform)",
-  "CREATE INDEX IF NOT EXISTS idx_mentions_cluster_key ON mentions(cluster_key)",
-  "CREATE INDEX IF NOT EXISTS idx_alerts_ack_severity ON alerts(acknowledged, severity)",
-  "CREATE INDEX IF NOT EXISTS idx_traffic_country_recorded ON traffic_signals(country, recorded_at)",
-  "CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at)",
-  "CREATE INDEX IF NOT EXISTS idx_media_sources_next_crawl ON media_sources(status, next_crawl_at)",
-  "CREATE INDEX IF NOT EXISTS idx_media_sources_country ON media_sources(country)",
-  "CREATE INDEX IF NOT EXISTS idx_propagation_edges_cluster ON propagation_edges(cluster_key)",
+  "CREATE INDEX IF NOT EXISTS idx_brand_profiles_user_active ON brand_profiles(user_id, active)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_published ON mentions(brand_id, published_at)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_country_platform ON mentions(brand_id, source_country, platform)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_cluster ON mentions(brand_id, cluster_key)",
+  "CREATE INDEX IF NOT EXISTS idx_alerts_brand_ack_severity ON alerts(brand_id, acknowledged, severity)",
+  "CREATE INDEX IF NOT EXISTS idx_traffic_brand_country_recorded ON traffic_signals(brand_id, country, recorded_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sync_runs_brand_started ON sync_runs(brand_id, started_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_sources_brand_domain ON media_sources(brand_id, domain)",
+  "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_next_crawl ON media_sources(brand_id, status, next_crawl_at)",
+  "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_country ON media_sources(brand_id, country)",
+  "CREATE INDEX IF NOT EXISTS idx_propagation_edges_brand_cluster ON propagation_edges(brand_id, cluster_key)",
   "CREATE INDEX IF NOT EXISTS idx_propagation_edges_to_mention ON propagation_edges(to_mention_id)",
+  "CREATE INDEX IF NOT EXISTS idx_tracked_entities_brand ON tracked_entities(brand_id, active)",
 ] as const;
 
 export async function ensureDatabase() {
@@ -161,38 +174,65 @@ export async function ensureDatabase() {
   await db.batch([...tables, ...indexes].map((statement) => db.prepare(statement)));
 }
 
+export async function getActiveBrandForUser(db: D1Database, userId: string) {
+  if (!userId) return null;
+  let brand = await db.prepare("SELECT * FROM brand_profiles WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1")
+    .bind(userId).first<Record<string, unknown>>();
+  if (brand) return brand;
+  const legacy = await db.prepare("SELECT * FROM brand_profiles WHERE user_id = '' AND active = 1 ORDER BY id DESC LIMIT 1").first<Record<string, unknown>>();
+  if (!legacy) return null;
+  const brandId = Number(legacy.id);
+  await db.batch([
+    db.prepare("UPDATE brand_profiles SET user_id = ?, updated_at = ? WHERE id = ? AND user_id = ''").bind(userId, new Date().toISOString(), brandId),
+    db.prepare("UPDATE mentions SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE traffic_signals SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE tracked_entities SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE alerts SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE sync_runs SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE media_sources SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+    db.prepare("UPDATE propagation_edges SET brand_id = ? WHERE brand_id = 0").bind(brandId),
+  ]);
+  brand = await db.prepare("SELECT * FROM brand_profiles WHERE id = ? AND user_id = ?").bind(brandId, userId).first<Record<string, unknown>>();
+  return brand;
+}
+
 export async function loadDashboardData(userId = "") {
   await ensureDatabase();
   const db = env.DB;
-  const [mentions, traffic, entities, alerts, syncRuns, brand, providerHealth, mediaSources, propagationEdges, credentialRows] = await Promise.all([
-    db.prepare("SELECT * FROM mentions ORDER BY published_at DESC").all(),
-    db.prepare("SELECT * FROM traffic_signals ORDER BY recorded_at DESC").all(),
-    db.prepare("SELECT * FROM tracked_entities ORDER BY id DESC").all(),
-    db.prepare("SELECT * FROM alerts ORDER BY acknowledged ASC, id DESC").all(),
-    db.prepare("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20").all(),
-    db.prepare("SELECT * FROM brand_profiles WHERE active = 1 ORDER BY id DESC LIMIT 1").first(),
-    db.prepare("SELECT * FROM provider_health ORDER BY provider").all<{ provider: string; status: string; retry_after: string; last_error: string; last_success_at: string }>(),
-    db.prepare("SELECT * FROM media_sources ORDER BY last_crawled_at DESC, id DESC").all(),
-    db.prepare("SELECT * FROM propagation_edges ORDER BY cluster_key, time_gap_minutes ASC").all(),
+  const brand = await getActiveBrandForUser(db, userId);
+  const brandId = Number(brand?.id ?? -1);
+  const healthPrefix = `${brandId}:%`;
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows] = await Promise.all([
+    db.prepare("SELECT * FROM mentions WHERE brand_id = ? ORDER BY published_at DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM traffic_signals WHERE brand_id = ? ORDER BY recorded_at DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM tracked_entities WHERE brand_id = ? ORDER BY id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM alerts WHERE brand_id = ? ORDER BY acknowledged ASC, id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 20").bind(brandId).all(),
+    db.prepare("SELECT * FROM provider_health WHERE provider LIKE ? ORDER BY provider").bind(healthPrefix).all<{ provider: string; status: string; retry_after: string; last_error: string; last_success_at: string }>(),
+    db.prepare("SELECT * FROM media_sources WHERE brand_id = ? ORDER BY last_crawled_at DESC, id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM propagation_edges WHERE brand_id = ? ORDER BY cluster_key, time_gap_minutes ASC").bind(brandId).all(),
     db.prepare("SELECT provider, last_four, status, last_test_at, updated_at FROM connector_credentials WHERE user_id = ? ORDER BY provider")
       .bind(userId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
   ]);
-  const gdeltHealth = providerHealth.results.find((item) => item.provider === "GDELT");
+  const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
+  const gdeltHealth = healthByName.get("GDELT");
   const gdeltLimited = Boolean(gdeltHealth?.status === "limited" && gdeltHealth.retry_after && new Date(gdeltHealth.retry_after).getTime() > Date.now());
-  const eventRegistryHealth = providerHealth.results.find((item) => item.provider === "NewsAPI.ai");
+  const eventRegistryHealth = healthByName.get("NewsAPI.ai");
   const eventRegistryLimited = Boolean(eventRegistryHealth?.retry_after && new Date(eventRegistryHealth.retry_after).getTime() > Date.now());
   const storedCredentials = new Map(credentialRows.results.map((item) => [item.provider, item]));
   const newsApiConfigured = Boolean(env.NEWSAPI_AI_KEY || storedCredentials.has("NewsAPI.ai"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
+  const metaConfigured = storedCredentials.has("Meta / Instagram");
+  const tiktokConfigured = storedCredentials.has("TikTok");
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
     ? eventRegistryLimited && gdeltLimited ? "NewsAPI.ai 与 GDELT 均在退避重试"
       : eventRegistryLimited ? "GDELT 正常采集 · NewsAPI.ai 暂时退避"
       : gdeltLimited ? "NewsAPI.ai 正常采集 · GDELT 限流保护中"
-      : "NewsAPI.ai 每 6 小时发现 · 免费媒体源每小时追踪"
-    : gdeltLimited ? "GDELT 限流保护中 · 免费媒体源持续追踪" : "GDELT 每日发现 · 免费媒体源每小时追踪";
+      : "NewsAPI.ai 每 6 小时发现 · 免费源按到期批次追踪"
+    : gdeltLimited ? "GDELT 限流保护中 · 免费媒体源持续追踪" : "GDELT 每日发现 · 免费源按到期批次追踪";
   const retryAt = newsLimited
     ? [eventRegistryHealth?.retry_after, gdeltHealth?.retry_after].filter(Boolean).sort()[0] ?? ""
     : "";
@@ -205,7 +245,7 @@ export async function loadDashboardData(userId = "") {
   const stopwords = new Set(["the", "and", "for", "with", "from", "that", "this", "have", "will", "news", "brand", "company", "their", "about", "into", "after", "more", "latest", "报道", "新闻", "媒体", "公司", "品牌", "一个", "以及", "进行", "表示", "相关", "发布", "今日", "目前", "可以"]);
   const tracked = (entities.results as Array<Record<string, unknown>>).map((item) => String(item.value ?? "").toLowerCase());
   for (const row of mentionRows) {
-    const country = String(row.source_country ?? "地区未披露");
+    const country = String(row.source_country ?? "地区待确认");
     const tone = String(row.sentiment ?? "中性");
     const current = countryMap.get(country) ?? { country, count: 0, positive: 0, neutral: 0, negative: 0, risk: 0, engagement: 0, latest: "" };
     current.count += 1;
@@ -251,7 +291,7 @@ export async function loadDashboardData(userId = "") {
     alerts: alerts.results,
     syncRuns: syncRuns.results,
     brand,
-    providerHealth: providerHealth.results,
+    providerHealth: providerHealth.results.map((item) => ({ ...item, provider: item.provider.replace(/^\d+:/, "") })),
     mediaSources: sourceRows,
     propagationEdges: propagationEdges.results,
     connectorCredentials: credentialRows.results,
@@ -269,8 +309,8 @@ export async function loadDashboardData(userId = "") {
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
-      { id: "meta", name: "Meta / Instagram", status: "approval", detail: "需企业账号授权或数据供应商" },
-      { id: "tiktok", name: "TikTok", status: "approval", detail: "商业监测需合规数据供应商" },
+      { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },
+      { id: "tiktok", provider: "TikTok", configurable: true, configured: tiktokConfigured, lastFour: storedCredentials.get("TikTok")?.last_four ?? "", name: "TikTok", status: tiktokConfigured ? "approval" : "credentials", detail: tiktokConfigured ? "凭证已保存 · Research API 获批后启用公开关键词监测" : "可配置 Research API Client Key 与 Client Secret" },
     ],
   };
 }

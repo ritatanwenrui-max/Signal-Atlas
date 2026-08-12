@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-const supportedProviders = new Set(["NewsAPI.ai", "X", "YouTube"]);
+const supportedProviders = new Set(["NewsAPI.ai", "X", "YouTube", "Meta / Instagram", "TikTok"]);
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -19,7 +19,7 @@ async function encryptionKey() {
   return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
-export async function saveConnectorCredential(db: D1Database, userId: string, provider: string, value: string) {
+export async function saveConnectorCredential(db: D1Database, userId: string, provider: string, value: string, displayLastFour = "") {
   if (!supportedProviders.has(provider)) throw new Error("暂不支持配置该连接器");
   if (!value.trim()) throw new Error("API 密钥不能为空");
   const key = await encryptionKey();
@@ -31,7 +31,7 @@ export async function saveConnectorCredential(db: D1Database, userId: string, pr
     VALUES (?, ?, ?, ?, ?, 'saved', ?)
     ON CONFLICT(user_id, provider) DO UPDATE SET encrypted_value = excluded.encrypted_value, iv = excluded.iv,
       last_four = excluded.last_four, status = 'saved', updated_at = excluded.updated_at`)
-    .bind(userId, provider, bytesToBase64(new Uint8Array(encrypted)), bytesToBase64(iv), value.trim().slice(-4), updatedAt).run();
+    .bind(userId, provider, bytesToBase64(new Uint8Array(encrypted)), bytesToBase64(iv), (displayLastFour || value.trim()).slice(-4), updatedAt).run();
 }
 
 export async function deleteConnectorCredential(db: D1Database, userId: string, provider: string) {

@@ -1,18 +1,20 @@
 import { sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const brandProfiles = sqliteTable("brand_profiles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull().default(""),
   name: text("name").notNull(),
   aliases: text("aliases").notNull().default(""),
   website: text("website").notNull().default(""),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [index("idx_brand_profiles_user_active").on(table.userId, table.active)]);
 
 export const mentions = sqliteTable("mentions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   title: text("title").notNull(),
   url: text("url").notNull(),
   source: text("source").notNull(),
@@ -20,6 +22,8 @@ export const mentions = sqliteTable("mentions", {
   sourceCountry: text("source_country").notNull(),
   contentCountry: text("content_country").notNull(),
   language: text("language").notNull(),
+  locationConfidence: integer("location_confidence").notNull().default(0),
+  locationMethod: text("location_method").notNull().default(""),
   sentiment: text("sentiment").notNull(),
   risk: integer("risk").notNull().default(20),
   impact: integer("impact").notNull().default(50),
@@ -42,13 +46,14 @@ export const mentions = sqliteTable("mentions", {
   publishedAt: text("published_at").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
-  index("idx_mentions_published_at").on(table.publishedAt),
-  index("idx_mentions_country_platform").on(table.sourceCountry, table.platform),
-  index("idx_mentions_cluster_key").on(table.clusterKey),
+  index("idx_mentions_brand_published").on(table.brandId, table.publishedAt),
+  index("idx_mentions_brand_country_platform").on(table.brandId, table.sourceCountry, table.platform),
+  index("idx_mentions_brand_cluster").on(table.brandId, table.clusterKey),
 ]);
 
 export const trafficSignals = sqliteTable("traffic_signals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   country: text("country").notNull(),
   visitors: integer("visitors").notNull(),
   views: integer("views").notNull(),
@@ -57,23 +62,25 @@ export const trafficSignals = sqliteTable("traffic_signals", {
   anomalyRatio: integer("anomaly_ratio").notNull(),
   recordedAt: text("recorded_at").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_traffic_country_recorded").on(table.country, table.recordedAt)]);
+}, (table) => [index("idx_traffic_brand_country_recorded").on(table.brandId, table.country, table.recordedAt)]);
 
 export const trackedEntities = sqliteTable("tracked_entities", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   type: text("type").notNull(),
   value: text("value").notNull(),
   language: text("language").notNull(),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [index("idx_tracked_entities_brand").on(table.brandId, table.active)]);
 
 export const mediaSources = sqliteTable("media_sources", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  domain: text("domain").notNull().unique(),
+  brandId: integer("brand_id").notNull().default(0),
+  domain: text("domain").notNull(),
   name: text("name").notNull(),
-  country: text("country").notNull().default("地区未披露"),
-  language: text("language").notNull().default("自动识别"),
+  country: text("country").notNull().default("地区待确认"),
+  language: text("language").notNull().default("语言待确认"),
   homepageUrl: text("homepage_url").notNull(),
   feedUrl: text("feed_url").notNull().default(""),
   sitemapUrl: text("sitemap_url").notNull().default(""),
@@ -90,12 +97,14 @@ export const mediaSources = sqliteTable("media_sources", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
-  index("idx_media_sources_next_crawl").on(table.status, table.nextCrawlAt),
-  index("idx_media_sources_country").on(table.country),
+  uniqueIndex("idx_media_sources_brand_domain").on(table.brandId, table.domain),
+  index("idx_media_sources_brand_next_crawl").on(table.brandId, table.status, table.nextCrawlAt),
+  index("idx_media_sources_brand_country").on(table.brandId, table.country),
 ]);
 
 export const propagationEdges = sqliteTable("propagation_edges", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   clusterKey: text("cluster_key").notNull(),
   fromMentionId: integer("from_mention_id").notNull(),
   toMentionId: integer("to_mention_id").notNull(),
@@ -107,12 +116,13 @@ export const propagationEdges = sqliteTable("propagation_edges", {
   crossBorder: integer("cross_border", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
-  index("idx_propagation_edges_cluster").on(table.clusterKey),
+  index("idx_propagation_edges_brand_cluster").on(table.brandId, table.clusterKey),
   index("idx_propagation_edges_to_mention").on(table.toMentionId),
 ]);
 
 export const alerts = sqliteTable("alerts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   mentionId: integer("mention_id"),
   title: text("title").notNull(),
   severity: text("severity").notNull(),
@@ -120,10 +130,11 @@ export const alerts = sqliteTable("alerts", {
   reason: text("reason").notNull(),
   acknowledged: integer("acknowledged", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_alerts_ack_severity").on(table.acknowledged, table.severity)]);
+}, (table) => [index("idx_alerts_brand_ack_severity").on(table.brandId, table.acknowledged, table.severity)]);
 
 export const syncRuns = sqliteTable("sync_runs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
   provider: text("provider").notNull(),
   query: text("query").notNull(),
   status: text("status").notNull(),
@@ -132,7 +143,7 @@ export const syncRuns = sqliteTable("sync_runs", {
   error: text("error").notNull().default(""),
   startedAt: text("started_at").notNull(),
   completedAt: text("completed_at"),
-}, (table) => [index("idx_sync_runs_started_at").on(table.startedAt)]);
+}, (table) => [index("idx_sync_runs_brand_started").on(table.brandId, table.startedAt)]);
 
 export const syncLocks = sqliteTable("sync_locks", {
   name: text("name").primaryKey(),

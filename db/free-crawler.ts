@@ -2,6 +2,7 @@ import type { MonitoringCandidate } from "./providers";
 
 type SourceRow = {
   id: number;
+  brand_id: number;
   domain: string;
   name: string;
   country: string;
@@ -147,7 +148,7 @@ function matchesTerms(item: ParsedItem, terms: string[]) {
   return terms.some((term) => haystack.includes(term.toLocaleLowerCase()));
 }
 
-export async function registerMediaSources(db: D1Database, candidates: MonitoringCandidate[]) {
+export async function registerMediaSources(db: D1Database, brandId: number, candidates: MonitoringCandidate[]) {
   const now = new Date().toISOString();
   const statements = candidates.flatMap((candidate) => {
     if (candidate.platform !== "网页新闻" || !safePublicUrl(candidate.url)) return [];
@@ -155,17 +156,29 @@ export async function registerMediaSources(db: D1Database, candidates: Monitorin
     const domain = article.hostname.replace(/^www\./, "").toLowerCase();
     const homepage = `${article.protocol}//${article.host}/`;
     return [db.prepare(`INSERT INTO media_sources
-      (domain, name, country, language, homepage_url, last_discovered_at, next_crawl_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(domain) DO UPDATE SET
+      (brand_id, domain, name, country, language, homepage_url, last_discovered_at, next_crawl_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(brand_id, domain) DO UPDATE SET
         name = CASE WHEN excluded.name != '' THEN excluded.name ELSE media_sources.name END,
-        country = CASE WHEN media_sources.country = '地区未披露' THEN excluded.country ELSE media_sources.country END,
-        language = CASE WHEN media_sources.language = '自动识别' THEN excluded.language ELSE media_sources.language END,
+        country = CASE WHEN media_sources.country IN ('地区未披露', '地区待确认') THEN excluded.country ELSE media_sources.country END,
+        language = CASE WHEN media_sources.language IN ('自动识别', '语言待确认') THEN excluded.language ELSE media_sources.language END,
         last_discovered_at = excluded.last_discovered_at,
         updated_at = excluded.last_discovered_at`)
-      .bind(domain, candidate.source, candidate.sourceCountry, candidate.language, homepage, now, now)];
+      .bind(brandId, domain, candidate.source, candidate.sourceCountry, candidate.language, homepage, now, now)];
   });
   for (let index = 0; index < statements.length; index += 50) await db.batch(statements.slice(index, index + 50));
+}
+
+export async function backfillMediaSources(db: D1Database, brandId: number) {
+  const rows = await db.prepare(`SELECT title, url, source, platform, source_country, language, published_at
+    FROM mentions WHERE brand_id = ? AND platform = '网页新闻' ORDER BY published_at DESC LIMIT 1000`)
+    .bind(brandId).all<{ title: string; url: string; source: string; platform: "网页新闻"; source_country: string; language: string; published_at: string }>();
+  const candidates = rows.results.map((row) => ({
+    title: row.title, url: row.url, source: row.source, platform: row.platform, sourceCountry: row.source_country,
+    language: row.language, publishedAt: row.published_at, engagement: 0, discussionText: "", commentsAnalyzed: 0,
+    parentUrl: "", relation: "", provider: "历史档案", discoveredVia: "global_discovery" as const,
+  }));
+  await registerMediaSources(db, brandId, candidates);
 }
 
 async function loadRobots(db: D1Database, source: SourceRow) {
@@ -263,11 +276,11 @@ async function crawlOneSource(db: D1Database, source: SourceRow, terms: string[]
   }
 }
 
-export async function crawlMediaSources(db: D1Database, terms: string[]) {
+export async function crawlMediaSources(db: D1Database, brandId: number, terms: string[]) {
   const now = new Date().toISOString();
   const rows = await db.prepare(`SELECT id, domain, name, country, language, homepage_url, feed_url, sitemap_url,
-    robots_policy, robots_checked_at, etag, last_modified FROM media_sources
-    WHERE status != 'blocked' AND next_crawl_at <= ? ORDER BY next_crawl_at ASC LIMIT 10`).bind(now).all<SourceRow>();
+    brand_id, robots_policy, robots_checked_at, etag, last_modified FROM media_sources
+    WHERE brand_id = ? AND status != 'blocked' AND next_crawl_at <= ? ORDER BY next_crawl_at ASC LIMIT 10`).bind(brandId, now).all<SourceRow>();
   const settled = await Promise.allSettled(rows.results.map((source) => crawlOneSource(db, source, terms)));
   return {
     candidates: settled.flatMap((result) => result.status === "fulfilled" ? result.value : []),

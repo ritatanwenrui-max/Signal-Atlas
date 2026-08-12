@@ -79,6 +79,56 @@ const countryCodes: Record<string, string> = {
 
 const relationNames = { retweeted: "直接转发", quoted: "引用传播", replied_to: "回复讨论" } as const;
 
+const domainCountryRules: Array<[RegExp, string]> = [
+  [/\.tw$/i, "台湾"], [/\.hk$/i, "香港"], [/\.th$/i, "泰国"], [/\.jp$/i, "日本"], [/\.kr$/i, "韩国"],
+  [/\.sg$/i, "新加坡"], [/\.my$/i, "马来西亚"], [/\.vn$/i, "越南"], [/\.ph$/i, "菲律宾"], [/\.id$/i, "印度尼西亚"],
+  [/\.cn$/i, "中国"], [/\.uk$/i, "英国"], [/\.au$/i, "澳大利亚"], [/\.ca$/i, "加拿大"], [/\.de$/i, "德国"],
+  [/\.fr$/i, "法国"], [/\.it$/i, "意大利"], [/\.es$/i, "西班牙"], [/\.in$/i, "印度"],
+  [/^(tw\.|tw-)|\.com\.tw$|ettoday\.net$|ebc\.net\.tw$|taiwanhot\.net$/i, "台湾"],
+  [/^(hk\.)|scmp\.com$|thestandard\.com\.hk$/i, "香港"], [/bangkokpost\.com$|nationthailand\.com$/i, "泰国"],
+  [/straitstimes\.com$|channelnewsasia\.com$/i, "新加坡"], [/malaymail\.com$|thestar\.com\.my$/i, "马来西亚"],
+  [/reuters\.com$|apnews\.com$|cnn\.com$|nytimes\.com$|washingtonpost\.com$/i, "美国"],
+  [/bbc\.(com|co\.uk)$|theguardian\.com$|ft\.com$/i, "英国"],
+];
+
+const sourceCountryCues: Array<[RegExp, string]> = [
+  [/(台灣|台湾|臺灣|taiwan|台北|臺北)/i, "台湾"], [/(香港|hong kong|港媒)/i, "香港"], [/(泰國|泰国|thailand|bangkok|ประเทศไทย)/i, "泰国"],
+  [/(日本|japan|東京|tokyo)/i, "日本"], [/(韓國|韩国|south korea|seoul|서울)/i, "韩国"], [/(新加坡|singapore)/i, "新加坡"],
+  [/(馬來西亞|马来西亚|malaysia)/i, "马来西亚"], [/(美國|美国|united states|\busa\b)/i, "美国"], [/(英國|英国|united kingdom|\buk\b)/i, "英国"],
+  [/(中國|中国|mainland china|beijing)/i, "中国"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
+];
+
+export function inferLanguage(text: string, declared = "") {
+  const normalized = languageNames[declared] ?? declared;
+  if (normalized && !["自动识别", "语言待确认", "未知", "und", "unknown"].includes(normalized.toLowerCase())) return { language: normalized, confidence: 98, method: "来源元数据" };
+  if (/\p{Script=Thai}/u.test(text)) return { language: "泰语", confidence: 99, method: "文字脚本识别" };
+  if (/\p{Script=Hiragana}|\p{Script=Katakana}/u.test(text)) return { language: "日语", confidence: 99, method: "文字脚本识别" };
+  if (/\p{Script=Hangul}/u.test(text)) return { language: "韩语", confidence: 99, method: "文字脚本识别" };
+  if (/\p{Script=Han}/u.test(text)) {
+    const traditional = (text.match(/[臺灣體機器這個為與會來開發聞報導產業國際]/g) ?? []).length;
+    const simplified = (text.match(/[台湾体机器这个为与会来开发闻报道产业国际]/g) ?? []).length;
+    return { language: traditional > simplified ? "繁体中文" : "简体中文", confidence: 84, method: "汉字字形识别" };
+  }
+  if (/[A-Za-z]{12,}/.test(text)) return { language: "英文", confidence: 78, method: "文字脚本识别" };
+  return { language: "语言待确认", confidence: 25, method: "信息不足" };
+}
+
+export function inferSourceCountry(url: string, source: string, text: string, declared = "") {
+  const normalized = countryNames[declared] ?? countryCodes[declared] ?? declared;
+  if (normalized && !["地区未披露", "地区待确认", "未知", "unknown"].includes(normalized.toLowerCase())) return { country: normalized, confidence: 98, method: "来源元数据" };
+  let host = "";
+  try { host = new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { /* keep empty */ }
+  for (const [pattern, country] of domainCountryRules) if (pattern.test(host)) return { country, confidence: 95, method: "媒体域名 / 国家顶级域" };
+  const context = `${source} ${text}`;
+  for (const [pattern, country] of sourceCountryCues) if (pattern.test(context)) return { country, confidence: 82, method: "媒体名称与地域线索" };
+  const language = inferLanguage(context).language;
+  if (language === "泰语") return { country: "泰国", confidence: 76, method: "主要语言推断" };
+  if (language === "日语") return { country: "日本", confidence: 76, method: "主要语言推断" };
+  if (language === "韩语") return { country: "韩国", confidence: 76, method: "主要语言推断" };
+  if (language === "繁体中文") return { country: "华语地区", confidence: 45, method: "语言区域推断（待复核）" };
+  return { country: "地区待确认", confidence: 20, method: "缺少可验证地域信号" };
+}
+
 function isoDate(value?: string) {
   if (!value) return new Date().toISOString();
   const compact = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
@@ -141,8 +191,8 @@ export async function fetchEventRegistry(terms: string[], credential?: string): 
       url: item.url!,
       source: item.source?.title ?? item.source?.uri ?? new URL(item.url!).hostname.replace(/^www\./, ""),
       platform: "网页新闻" as const,
-      sourceCountry: sourceLocation ? countryNames[sourceLocation] ?? sourceLocation : "地区未披露",
-      language: item.lang ? languageNames[item.lang] ?? item.lang : "自动识别",
+      sourceCountry: sourceLocation ? countryNames[sourceLocation] ?? sourceLocation : "地区待确认",
+      language: item.lang ? languageNames[item.lang] ?? item.lang : "语言待确认",
       publishedAt: isoDate(item.dateTime ?? [item.date, item.time].filter(Boolean).join("T")),
       engagement,
       discussionText: [item.body ?? "", item.sentiment == null ? "" : `provider-sentiment:${item.sentiment}`].join(" "),
@@ -169,8 +219,8 @@ export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> 
   const payload = await response.json() as { articles?: GdeltArticle[] };
   return (payload.articles ?? []).filter((item) => item.url && item.title).map((item) => ({
     title: item.title!.trim(), url: item.url!, source: item.domain?.replace(/^www\./, "") ?? new URL(item.url!).hostname.replace(/^www\./, ""),
-    platform: "网页新闻", sourceCountry: countryNames[item.sourcecountry ?? ""] ?? item.sourcecountry ?? "地区未披露",
-    language: languageNames[item.language ?? ""] ?? item.language ?? "自动识别", publishedAt: isoDate(item.seendate), engagement: 0,
+    platform: "网页新闻", sourceCountry: countryNames[item.sourcecountry ?? ""] ?? item.sourcecountry ?? "地区待确认",
+    language: languageNames[item.language ?? ""] ?? item.language ?? "语言待确认", publishedAt: isoDate(item.seendate), engagement: 0,
     discussionText: "", commentsAnalyzed: 0, parentUrl: "", relation: "",
     author: "", provider: "GDELT", discoveredVia: "global_discovery",
   }));
@@ -205,7 +255,7 @@ export async function fetchX(terms: string[], credential?: string): Promise<Moni
     const reference = post.referenced_tweets?.[0];
     return {
       title: post.text, url: `https://x.com/${user?.username ?? "i"}/status/${post.id}`, source: user?.username ? `@${user.username}` : "X 用户",
-      platform: "X", sourceCountry: placeCountry ? countryNames[placeCountry] ?? placeCountry : "地区未披露", language: postLanguage ? languageNames[postLanguage] ?? postLanguage : "自动识别",
+      platform: "X", sourceCountry: placeCountry ? countryNames[placeCountry] ?? placeCountry : "地区待确认", language: postLanguage ? languageNames[postLanguage] ?? postLanguage : "语言待确认",
       publishedAt: isoDate(post.created_at), engagement: Number(metrics.like_count ?? 0) + Number(metrics.reply_count ?? 0) + Number(metrics.retweet_count ?? 0) + Number(metrics.quote_count ?? 0),
       discussionText: "", commentsAnalyzed: 0, parentUrl: reference ? `https://x.com/i/status/${reference.id}` : "",
       relation: reference ? relationNames[reference.type] : "",
@@ -265,7 +315,7 @@ export async function fetchYouTube(terms: string[], credential?: string): Promis
     return [{
       title: item.snippet?.title ?? "YouTube 视频", url: `https://www.youtube.com/watch?v=${videoId}`,
       source: item.snippet?.channelTitle ?? "YouTube 频道", platform: "YouTube" as const,
-      sourceCountry: channelCountry ? countryCodes[channelCountry] ?? channelCountry : "地区未披露",
+      sourceCountry: channelCountry ? countryCodes[channelCountry] ?? channelCountry : "地区待确认",
       language: "自动识别", publishedAt: isoDate(item.snippet?.publishedAt), engagement,
       discussionText: [item.snippet?.description ?? "", ...videoComments].join(" "), commentsAnalyzed: videoComments.length,
       parentUrl: "", relation: "",
