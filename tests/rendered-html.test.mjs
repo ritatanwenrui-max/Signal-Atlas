@@ -12,6 +12,10 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /导出 CSV/);
   assert.match(page, /const platformCatalog = \["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"\]/);
   assert.match(page, /platformCounts\[item\] \?\? 0/);
+  assert.match(page, /配置监测品牌/);
+  assert.match(page, /监测概览/);
+  assert.match(page, /采集计划/);
+  assert.doesNotMatch(page, /少量付费发现|大部分追踪免费完成|正在被归档和溯源|输入一次品牌名/);
   assert.match(page, /全球报道热力分布/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
