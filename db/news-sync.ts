@@ -12,7 +12,8 @@ type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> }
 
 const SIX_HOURS = 6 * 3600_000;
 const ONE_DAY = 24 * 3600_000;
-const EVENT_MAX_GAP = 14 * ONE_DAY;
+// A quiet period closes the media event even when a later story reuses the same product details.
+const EVENT_INACTIVITY_GAP = 96 * 3600_000;
 const BURST_CONTINUATION = 48 * 3600_000;
 
 function providerKey(brandId: number, provider: string) { return `${brandId}:${provider}`; }
@@ -134,7 +135,7 @@ function findCluster(candidate: MonitoringCandidate, terms: string[], known: Exi
   const candidateTime = new Date(candidate.publishedAt).getTime();
   for (const [clusterKey, items] of clusters) {
     const gap = clusterDistance(candidateTime, items);
-    if (gap > EVENT_MAX_GAP) continue;
+    if (gap > EVENT_INACTIVITY_GAP) continue;
     let maxTitle = 0;
     let maxBody = 0;
     let maxCombined = 0;
@@ -150,8 +151,8 @@ function findCluster(candidate: MonitoringCandidate, terms: string[], known: Exi
     const timeBoost = gap <= 24 * 3600_000 ? 0.16 : gap <= BURST_CONTINUATION ? 0.1 : gap <= 7 * ONE_DAY ? 0.03 : 0;
     const score = maxTitle * 0.45 + maxBody * 0.15 + maxCombined * 0.15 + anchorScore * 0.25 + timeBoost + (sharedNumber ? 0.22 : 0);
     const eventContinuation = gap <= BURST_CONTINUATION && items.length >= 2 && (anchorScore > 0 || maxTitle >= 0.05 || maxCombined >= 0.05);
-    const translatedReprint = sharedNumber && gap <= 10 * ONE_DAY && (anchorScore > 0 || maxTitle >= 0.02);
-    const similarRewrite = gap <= 7 * ONE_DAY && (maxTitle >= 0.2 || maxCombined >= 0.18);
+    const translatedReprint = sharedNumber && gap <= EVENT_INACTIVITY_GAP && (anchorScore > 0 || maxTitle >= 0.02);
+    const similarRewrite = gap <= EVENT_INACTIVITY_GAP && (maxTitle >= 0.2 || maxCombined >= 0.18);
     const qualifies = score >= 0.31 || eventContinuation || translatedReprint || similarRewrite;
     if (qualifies && score > bestScore) { bestCluster = clusterKey; bestScore = score; }
   }

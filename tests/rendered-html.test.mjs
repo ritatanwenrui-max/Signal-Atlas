@@ -37,7 +37,8 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(providers, /forceMaxDataTimeWindow: 31/);
   assert.match(sync, /const SIX_HOURS/);
   assert.match(sync, /const gdeltDue/);
-  assert.match(sync, /EVENT_MAX_GAP = 14 \* ONE_DAY/);
+  assert.match(sync, /EVENT_INACTIVITY_GAP = 96 \* 3600_000/);
+  assert.match(sync, /gap > EVENT_INACTIVITY_GAP/);
   assert.match(sync, /BURST_CONTINUATION = 48 \* 3600_000/);
   assert.match(sync, /translatedReprint/);
   assert.match(sync, /eventAnchors/);
