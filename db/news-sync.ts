@@ -259,11 +259,13 @@ async function rebuildPropagationEdges(db: D1Database, brandId: number, terms: s
   for (const item of all.results) byCluster.set(item.cluster_key, [...(byCluster.get(item.cluster_key) ?? []), item]);
   const inserts: D1PreparedStatement[] = [];
   for (const [clusterKey, items] of byCluster) {
+    const origin = items[0];
     for (let index = 1; index < items.length; index += 1) {
       const child = items[index];
       const explicit = child.parent_url ? byUrl.get(canonicalUrl(child.parent_url)) : undefined;
       let parent = explicit && explicit.published_at <= child.published_at ? explicit : undefined;
       let score = parent ? 1 : 0;
+      let originScore = 0;
       if (!parent) {
         const childTitle = textTokens(child.title, terms);
         const childBody = textTokens(child.excerpt ?? "", terms);
@@ -276,8 +278,15 @@ async function rebuildPropagationEdges(db: D1Database, brandId: number, terms: s
           const anchorScore = similarity(childAnchors, priorAnchors);
           const multilingualScore = anchorScore * 0.7 + (sharedNumericAnchor(childAnchors, priorAnchors) ? 0.22 : 0);
           const candidateScore = Math.max(titleScore, bodyScore, combinedScore, multilingualScore);
+          if (prior.id === origin.id) originScore = candidateScore;
           if (candidateScore > score) { parent = prior; score = candidateScore; }
         }
+      }
+      // Prefer the verified earliest publication when its evidence is close to an intermediate candidate.
+      // This avoids presenting a speculative country-to-country chain as the event's origin.
+      if (!explicit && parent && parent.id !== origin.id && originScore >= 0.18 && originScore >= score - 0.12) {
+        parent = origin;
+        score = originScore;
       }
       if (!parent) {
         parent = items[index - 1];

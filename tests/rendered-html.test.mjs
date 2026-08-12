@@ -17,6 +17,8 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /并列事件对比/);
   assert.match(page, /高度转载率/);
   assert.match(page, /同一事件扩散路径/);
+  assert.match(page, /起点：\{cluster\.originSource\}/);
+  assert.doesNotMatch(page, /cluster\.countries\.join\(" → "\)/);
   assert.match(page, /network-edge cross/);
   assert.match(page, /样本不足/);
   assert.match(page, /saveConnectorCredential/);
@@ -43,6 +45,7 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(sync, /translatedReprint/);
   assert.match(sync, /eventAnchors/);
   assert.match(sync, /sharedNumericAnchor/);
+  assert.match(sync, /originScore >= score - 0\.12/);
   assert.match(sync, /rebuildPropagationEdges/);
   assert.match(sync, /rebuildStoryClusters/);
   assert.match(sync, /enrichHistoricalMentions/);
