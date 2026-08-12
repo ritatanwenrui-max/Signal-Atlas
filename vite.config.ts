@@ -32,7 +32,7 @@ const localBindingConfig = {
       ]
     : [],
   triggers: {
-    crons: ["*/10 * * * *"],
+    crons: ["17 * * * *"],
   },
 };
 

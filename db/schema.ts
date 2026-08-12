@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const brandProfiles = sqliteTable("brand_profiles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -28,6 +28,17 @@ export const mentions = sqliteTable("mentions", {
   parentUrl: text("parent_url").notNull().default(""),
   relation: text("relation").notNull().default(""),
   engagement: integer("engagement").notNull().default(0),
+  excerpt: text("excerpt").notNull().default(""),
+  author: text("author").notNull().default(""),
+  provider: text("provider").notNull().default(""),
+  discoveredVia: text("discovered_via").notNull().default("global_discovery"),
+  contentHash: text("content_hash").notNull().default(""),
+  wordCount: integer("word_count").notNull().default(0),
+  sentimentScore: integer("sentiment_score").notNull().default(0),
+  topics: text("topics").notNull().default(""),
+  keywords: text("keywords").notNull().default(""),
+  firstSeenAt: text("first_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  archivedAt: text("archived_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   publishedAt: text("published_at").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
@@ -56,6 +67,49 @@ export const trackedEntities = sqliteTable("tracked_entities", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const mediaSources = sqliteTable("media_sources", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  domain: text("domain").notNull().unique(),
+  name: text("name").notNull(),
+  country: text("country").notNull().default("地区未披露"),
+  language: text("language").notNull().default("自动识别"),
+  homepageUrl: text("homepage_url").notNull(),
+  feedUrl: text("feed_url").notNull().default(""),
+  sitemapUrl: text("sitemap_url").notNull().default(""),
+  robotsPolicy: text("robots_policy").notNull().default(""),
+  robotsCheckedAt: text("robots_checked_at").notNull().default(""),
+  status: text("status").notNull().default("discovered"),
+  errorCount: integer("error_count").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  lastDiscoveredAt: text("last_discovered_at").notNull(),
+  lastCrawledAt: text("last_crawled_at").notNull().default(""),
+  nextCrawlAt: text("next_crawl_at").notNull(),
+  etag: text("etag").notNull().default(""),
+  lastModified: text("last_modified").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("idx_media_sources_next_crawl").on(table.status, table.nextCrawlAt),
+  index("idx_media_sources_country").on(table.country),
+]);
+
+export const propagationEdges = sqliteTable("propagation_edges", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  clusterKey: text("cluster_key").notNull(),
+  fromMentionId: integer("from_mention_id").notNull(),
+  toMentionId: integer("to_mention_id").notNull(),
+  similarity: integer("similarity").notNull(),
+  confidence: integer("confidence").notNull(),
+  method: text("method").notNull(),
+  evidence: text("evidence").notNull(),
+  timeGapMinutes: integer("time_gap_minutes").notNull(),
+  crossBorder: integer("cross_border", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("idx_propagation_edges_cluster").on(table.clusterKey),
+  index("idx_propagation_edges_to_mention").on(table.toMentionId),
+]);
 
 export const alerts = sqliteTable("alerts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -95,3 +149,14 @@ export const providerHealth = sqliteTable("provider_health", {
   lastSuccessAt: text("last_success_at").notNull().default(""),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const connectorCredentials = sqliteTable("connector_credentials", {
+  userId: text("user_id").notNull(),
+  provider: text("provider").notNull(),
+  encryptedValue: text("encrypted_value").notNull(),
+  iv: text("iv").notNull(),
+  lastFour: text("last_four").notNull(),
+  status: text("status").notNull().default("saved"),
+  lastTestAt: text("last_test_at").notNull().default(""),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ columns: [table.userId, table.provider] })]);

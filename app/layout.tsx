@@ -20,18 +20,18 @@ export async function generateMetadata(): Promise<Metadata> {
   const origin = `${protocol}://${host}`;
   return {
     title: "Signal Atlas · 全球舆情雷达",
-    description: "跨国家、跨语言、跨平台的企业舆情监测与传播归因平台。",
+    description: "全球品牌新闻自动发现、长期归档、传播溯源与舆情分析平台。",
     metadataBase: new URL(origin),
     openGraph: {
       title: "Signal Atlas · 全球舆情雷达",
-      description: "全球媒体与社交舆情监测、传播聚类和流量归因。",
-      images: [`${origin}/og.png`],
+      description: "少量全球发现、免费媒体持续追踪、新闻长期归档、传播链路与情绪分析。",
+      images: [`${origin}/og-v2.png`],
     },
     twitter: {
       card: "summary_large_image",
       title: "Signal Atlas · 全球舆情雷达",
-      description: "全球媒体与社交舆情监测、传播聚类和流量归因。",
-      images: [`${origin}/og.png`],
+      description: "少量全球发现、免费媒体持续追踪、新闻长期归档、传播链路与情绪分析。",
+      images: [`${origin}/og-v2.png`],
     },
   };
 }

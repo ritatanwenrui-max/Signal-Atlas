@@ -1,12 +1,17 @@
 import { env } from "cloudflare:workers";
+import { loadConnectorCredential } from "./credentials";
+import { crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { ensureDatabase } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, ProviderRequestError, type MonitoringCandidate } from "./providers";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
-type ExistingMention = { title: string; cluster_key: string; url: string; source_country: string };
-type ProviderHealth = { provider: string; status: string; consecutive_failures: number; retry_after: string; last_error: string };
+type ExistingMention = { id?: number; title: string; excerpt?: string; cluster_key: string; url: string; source_country: string; published_at?: string; parent_url?: string };
+type ProviderHealth = { provider: string; status: string; consecutive_failures: number; retry_after: string; last_error: string; last_success_at: string };
 type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> };
+
+const SIX_HOURS = 6 * 3600_000;
+const ONE_DAY = 24 * 3600_000;
 
 function termsFrom(entities: TrackedEntity[]) {
   return [...new Set(entities.filter((item) => item.active && item.type !== "排除词" && item.type !== "官网域名")
@@ -17,31 +22,23 @@ function gdeltQuery(terms: string[]) {
   return terms.map((term) => /\s|[^\x00-\x7F]/.test(term) ? `"${term.replaceAll('"', "")}"` : term).join(" OR ");
 }
 
-function analyzeText(text: string) {
-  const negative = ["危机", "投诉", "欺诈", "造假", "召回", "抵制", "泄露", "诉讼", "违规", "事故", "风险", "批评", "差评", "scam", "fraud", "breach", "lawsuit", "recall", "boycott", "crisis", "unsafe", "controversy"];
-  const positive = ["增长", "获奖", "领先", "创新", "推荐", "突破", "合作", "发布", "好评", "growth", "award", "leading", "innovative", "recommended", "launch", "partnership"];
-  const crisis = ["欺诈", "召回", "泄露", "诉讼", "事故", "scam", "fraud", "breach", "lawsuit", "recall", "crisis"];
-  const lower = text.toLowerCase();
-  const negativeHits = negative.filter((word) => lower.includes(word)).length;
-  const positiveHits = positive.filter((word) => lower.includes(word)).length;
-  const crisisHits = crisis.filter((word) => lower.includes(word)).length;
-  const sentiment = negativeHits > positiveHits ? "负面" : positiveHits > negativeHits ? "正面" : "中性";
-  const risk = Math.min(95, 22 + negativeHits * 12 + crisisHits * 20);
-  const topic = crisisHits ? "危机风险" : negativeHits ? "争议反馈" : positiveHits ? "品牌进展" : "一般提及";
-  return { sentiment, risk, topic };
+function compactText(value: string) {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function titleTokens(title: string, brandTerms: string[]) {
-  let normalized = title.toLowerCase();
+function textTokens(text: string, brandTerms: string[] = []) {
+  let normalized = text.toLowerCase();
   for (const term of brandTerms) normalized = normalized.replaceAll(term.toLowerCase(), " ");
   normalized = normalized.replace(/https?:\/\/\S+/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ");
+  const stopwords = new Set(["the", "and", "for", "with", "from", "news", "brand", "official", "that", "this", "are", "was", "were", "have", "has", "will", "报道", "新闻", "媒体", "公司", "品牌", "发布", "以及", "相关", "一个", "表示"]);
   const tokens = new Set<string>();
-  for (const word of normalized.match(/[a-z0-9]{3,}/g) ?? []) {
-    if (!new Set(["the", "and", "for", "with", "from", "news", "brand", "official"]).has(word)) tokens.add(word);
-  }
+  for (const word of normalized.match(/[a-z0-9][a-z0-9-]{2,}/g) ?? []) if (!stopwords.has(word)) tokens.add(word);
   for (const sequence of normalized.match(/\p{Script=Han}{2,}/gu) ?? []) {
-    if (sequence.length === 2) tokens.add(sequence);
-    else for (let index = 0; index < sequence.length - 1; index += 1) tokens.add(sequence.slice(index, index + 2));
+    if (sequence.length === 2 && !stopwords.has(sequence)) tokens.add(sequence);
+    else for (let index = 0; index < sequence.length - 1; index += 1) {
+      const token = sequence.slice(index, index + 2);
+      if (!stopwords.has(token)) tokens.add(token);
+    }
   }
   return tokens;
 }
@@ -53,19 +50,28 @@ function similarity(left: Set<string>, right: Set<string>) {
   return intersection / (left.size + right.size - intersection);
 }
 
+function simpleHash(value: string) {
+  let hash = 2166136261;
+  for (const char of value) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  return Math.abs(hash >>> 0).toString(36);
+}
+
 function hashKey(tokens: Set<string>, title: string) {
-  const signature = [...tokens].sort().slice(0, 12).join("|") || title.toLowerCase();
-  let hash = 0;
-  for (const char of signature) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-  return `story-${Math.abs(hash).toString(36)}`;
+  const signature = [...tokens].sort().slice(0, 16).join("|") || title.toLowerCase();
+  return `story-${simpleHash(signature)}`;
 }
 
 function canonicalUrl(value: string) {
-  const xPost = value.match(/x\.com\/[^/]+\/status\/(\d+)/);
-  if (xPost) return `x:${xPost[1]}`;
-  const youtube = value.match(/[?&]v=([^&]+)/);
-  if (youtube) return `youtube:${youtube[1]}`;
-  return value.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
+  try {
+    const url = new URL(value);
+    const xPost = url.href.match(/x\.com\/[^/]+\/status\/(\d+)/);
+    if (xPost) return `x:${xPost[1]}`;
+    const youtube = url.searchParams.get("v");
+    if (youtube) return `youtube:${youtube}`;
+    for (const key of [...url.searchParams.keys()]) if (/^(utm_|fbclid|gclid|ref$|source$)/i.test(key)) url.searchParams.delete(key);
+    url.hash = "";
+    return `${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}${url.search}`.toLowerCase();
+  } catch { return value.trim().toLowerCase(); }
 }
 
 function findCluster(candidate: MonitoringCandidate, terms: string[], known: ExistingMention[]) {
@@ -73,14 +79,36 @@ function findCluster(candidate: MonitoringCandidate, terms: string[], known: Exi
     const upstream = known.find((mention) => canonicalUrl(mention.url) === canonicalUrl(candidate.parentUrl));
     if (upstream) return upstream.cluster_key;
   }
-  const incoming = titleTokens(candidate.title, terms);
+  const incomingTitle = textTokens(candidate.title, terms);
+  const incomingBody = textTokens(candidate.discussionText.slice(0, 1000), terms);
   let best: ExistingMention | undefined;
   let bestScore = 0;
   for (const mention of known) {
-    const score = similarity(incoming, titleTokens(mention.title, terms));
+    const ageHours = Math.abs(new Date(candidate.publishedAt).getTime() - new Date(mention.published_at ?? candidate.publishedAt).getTime()) / 3600_000;
+    if (ageHours > 24 * 7) continue;
+    const titleScore = similarity(incomingTitle, textTokens(mention.title, terms));
+    const bodyScore = incomingBody.size && mention.excerpt ? similarity(incomingBody, textTokens(mention.excerpt, terms)) : 0;
+    const burstBoost = ageHours <= 24 ? 0.12 : ageHours <= 72 ? 0.06 : 0;
+    const score = titleScore * 0.68 + bodyScore * 0.32 + burstBoost;
     if (score > bestScore) { best = mention; bestScore = score; }
   }
-  return best && bestScore >= 0.38 ? best.cluster_key : hashKey(incoming, candidate.title);
+  return best && bestScore >= 0.42 ? best.cluster_key : hashKey(incomingTitle, candidate.title);
+}
+
+function analyzeText(text: string, terms: string[]) {
+  const negative = ["危机", "投诉", "欺诈", "造假", "召回", "抵制", "泄露", "诉讼", "违规", "事故", "风险", "批评", "差评", "争议", "scam", "fraud", "breach", "lawsuit", "recall", "boycott", "crisis", "unsafe", "controversy", "backlash", "complaint"];
+  const positive = ["增长", "获奖", "领先", "创新", "推荐", "突破", "合作", "发布", "好评", "成功", "growth", "award", "leading", "innovative", "recommended", "launch", "partnership", "success", "breakthrough"];
+  const crisis = ["欺诈", "召回", "泄露", "诉讼", "事故", "scam", "fraud", "breach", "lawsuit", "recall", "crisis"];
+  const lower = text.toLowerCase();
+  const negativeHits = negative.filter((word) => lower.includes(word));
+  const positiveHits = positive.filter((word) => lower.includes(word));
+  const crisisHits = crisis.filter((word) => lower.includes(word));
+  const score = Math.max(-100, Math.min(100, positiveHits.length * 18 - negativeHits.length * 22 - crisisHits.length * 18));
+  const sentiment = score <= -15 ? "负面" : score >= 15 ? "正面" : positiveHits.length && negativeHits.length ? "混合" : "中性";
+  const risk = Math.min(98, 18 + negativeHits.length * 13 + crisisHits.length * 22);
+  const topic = crisisHits.length ? "危机风险" : negativeHits.length ? "争议反馈" : positiveHits.length ? "品牌进展" : "一般提及";
+  const keywords = [...textTokens(text, terms)].slice(0, 12);
+  return { sentiment, score, risk, topic, keywords };
 }
 
 function impactFor(candidate: MonitoringCandidate) {
@@ -90,10 +118,11 @@ function impactFor(candidate: MonitoringCandidate) {
 
 function retryDelay(error: unknown, failureCount: number) {
   const rateLimited = error instanceof ProviderRequestError && error.status === 429;
-  const base = rateLimited ? 10 * 60 * 1000 : 5 * 60 * 1000;
+  const providerFloor = error instanceof ProviderRequestError && error.provider === "GDELT" ? SIX_HOURS : 10 * 60 * 1000;
+  const base = rateLimited ? providerFloor : 5 * 60 * 1000;
   const exponential = base * 2 ** Math.min(3, Math.max(0, failureCount - 1));
   const serverHint = error instanceof ProviderRequestError ? error.retryAfterMs ?? 0 : 0;
-  return Math.min(60 * 60 * 1000, Math.max(base, exponential, serverHint));
+  return Math.min(ONE_DAY, Math.max(base, exponential, serverHint));
 }
 
 async function markProviderHealthy(db: D1Database, provider: string, attemptedAt: string) {
@@ -119,11 +148,52 @@ async function markProviderFailed(db: D1Database, provider: string, error: unkno
   return { retryAt, message, limited };
 }
 
-export async function runNewsSync(force = false) {
+function isDue(lastSuccessAt: string | undefined, interval: number) {
+  return !lastSuccessAt || Date.now() - new Date(lastSuccessAt).getTime() >= interval;
+}
+
+async function rebuildPropagationEdges(db: D1Database, terms: string[]) {
+  const all = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source_country, published_at, parent_url
+    FROM mentions ORDER BY published_at ASC, id ASC LIMIT 5000`).all<Required<ExistingMention>>();
+  const byCluster = new Map<string, Required<ExistingMention>[]>();
+  const byUrl = new Map(all.results.map((item) => [canonicalUrl(item.url), item]));
+  for (const item of all.results) byCluster.set(item.cluster_key, [...(byCluster.get(item.cluster_key) ?? []), item]);
+  const inserts: D1PreparedStatement[] = [];
+  for (const [clusterKey, items] of byCluster) {
+    for (let index = 1; index < items.length; index += 1) {
+      const child = items[index];
+      const explicit = child.parent_url ? byUrl.get(canonicalUrl(child.parent_url)) : undefined;
+      let parent = explicit && explicit.published_at <= child.published_at ? explicit : undefined;
+      let score = parent ? 1 : 0;
+      if (!parent) {
+        const childTokens = textTokens(`${child.title} ${child.excerpt}`, terms);
+        for (const prior of items.slice(0, index)) {
+          const candidateScore = similarity(childTokens, textTokens(`${prior.title} ${prior.excerpt}`, terms));
+          if (candidateScore > score) { parent = prior; score = candidateScore; }
+        }
+      }
+      if (!parent) continue;
+      const crossBorder = parent.source_country !== child.source_country && parent.source_country !== "地区未披露" && child.source_country !== "地区未披露";
+      const similarityPercent = Math.round(score * 100);
+      const confidence = explicit ? 98 : Math.min(94, Math.max(52, Math.round(54 + score * 38 + (crossBorder ? 2 : 0))));
+      const method = explicit ? "显式引用" : score >= 0.62 ? "高度文本复用" : score >= 0.34 ? "标题与正文相似" : "发布时间与主题聚类";
+      const gap = Math.max(0, Math.round((new Date(child.published_at).getTime() - new Date(parent.published_at).getTime()) / 60000));
+      const evidence = explicit ? "来源元数据包含原文链接" : `${similarityPercent}% 文本特征相似，且晚发布 ${gap < 60 ? `${gap} 分钟` : `${Math.round(gap / 60)} 小时`}`;
+      inserts.push(db.prepare(`INSERT INTO propagation_edges
+        (cluster_key, from_mention_id, to_mention_id, similarity, confidence, method, evidence, time_gap_minutes, cross_border)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(clusterKey, parent.id, child.id, similarityPercent, confidence, method, evidence, gap, crossBorder ? 1 : 0));
+    }
+  }
+  await db.prepare("DELETE FROM propagation_edges").run();
+  for (let index = 0; index < inserts.length; index += 75) await db.batch(inserts.slice(index, index + 75));
+}
+
+export async function runNewsSync(force = false, userId = "") {
   await ensureDatabase();
   const db = env.DB;
   const now = new Date().toISOString();
-  const lockedUntil = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+  const lockedUntil = new Date(Date.now() + 3 * 60 * 1000).toISOString();
   const lease = await db.prepare(`INSERT INTO sync_locks (name, locked_until) VALUES (?, ?)
     ON CONFLICT(name) DO UPDATE SET locked_until = excluded.locked_until
     WHERE sync_locks.locked_until < ?`).bind("monitoring", lockedUntil, now).run();
@@ -132,28 +202,33 @@ export async function runNewsSync(force = false) {
   try {
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs ORDER BY id DESC LIMIT 1").first<SyncRun>();
     const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
-    if (lastRun?.status === "running" && lastRunAge < 2 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
+    if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
     if (lastRun && lastRunAge < 15 * 1000) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0 };
-    if (!force && lastRun && lastRunAge < 8 * 60 * 1000) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
+    if (!force && lastRun && lastRunAge < 20 * 60 * 1000) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0 };
 
     const entities = await db.prepare("SELECT type, value, active FROM tracked_entities WHERE active = 1 ORDER BY id ASC").all<TrackedEntity>();
     const terms = termsFrom(entities.results);
     if (!terms.length) return { skipped: true, reason: "brand_not_configured", inserted: 0, found: 0 };
     const query = gdeltQuery(terms);
     const startedAt = new Date().toISOString();
-    const run = await db.prepare(`INSERT INTO sync_runs (provider, query, status, started_at) VALUES (?, ?, ?, ?)`)
-      .bind("Global media + social", query, "running", startedAt).run();
+    const run = await db.prepare("INSERT INTO sync_runs (provider, query, status, started_at) VALUES (?, ?, ?, ?)")
+      .bind("Hybrid discovery + free crawler", query, "running", startedAt).run();
     const runId = run.meta.last_row_id;
 
     try {
-      const providers: ProviderTask[] = [
-        ...(env.NEWSAPI_AI_KEY ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms) }] : []),
-        { name: "GDELT", load: () => fetchGdelt(query) },
-        ...(env.X_BEARER_TOKEN ? [{ name: "X", load: () => fetchX(terms) }] : []),
-        ...(env.YOUTUBE_API_KEY ? [{ name: "YouTube", load: () => fetchYouTube(terms) }] : []),
-      ];
-      const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error FROM provider_health").all<ProviderHealth>();
+      const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error, last_success_at FROM provider_health").all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider, item]));
+      const [newsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
+        loadConnectorCredential(db, "NewsAPI.ai", userId), loadConnectorCredential(db, "X", userId), loadConnectorCredential(db, "YouTube", userId),
+      ]);
+      const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
+      const gdeltDue = !newsApiKey || isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
+      const providers: ProviderTask[] = [
+        ...(discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
+        ...(discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
+        ...(xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
+        ...(youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
+      ];
       const deferred = providers.filter((provider) => {
         const retryAt = health.get(provider.name)?.retry_after;
         return Boolean(retryAt && new Date(retryAt).getTime() > Date.now());
@@ -161,25 +236,15 @@ export async function runNewsSync(force = false) {
       const ready = providers.filter((provider) => !deferred.some((item) => item.name === provider.name));
       const errors = deferred.map((provider) => `${provider.name}: ${health.get(provider.name)?.last_error || "等待自动重试"}`);
       const retryTimes = deferred.flatMap((provider) => health.get(provider.name)?.retry_after ? [health.get(provider.name)!.retry_after] : []);
-
-      if (!ready.length) {
-        const retryAt = retryTimes.sort()[0] ?? "";
-        await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")
-          .bind("deferred", errors.join("；"), new Date().toISOString(), runId).run();
-        const rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
-        return { skipped: true, reason: "provider_backoff", found: 0, inserted: 0, query, warnings: errors, rateLimited, retryAt };
-      }
-
       const settled = await Promise.allSettled(ready.map((provider) => provider.load()));
-      const candidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+      const discoveryCandidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
       let rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
       const attemptedAt = new Date().toISOString();
       for (let index = 0; index < settled.length; index += 1) {
         const result = settled[index];
         const provider = ready[index];
-        if (result.status === "fulfilled") {
-          await markProviderHealthy(db, provider.name, attemptedAt);
-        } else {
+        if (result.status === "fulfilled") await markProviderHealthy(db, provider.name, attemptedAt);
+        else {
           const failure = await markProviderFailed(db, provider.name, result.reason, health.get(provider.name)?.consecutive_failures ?? 0, attemptedAt);
           errors.push(`${provider.name}: ${failure.message}`);
           retryTimes.push(failure.retryAt);
@@ -187,27 +252,40 @@ export async function runNewsSync(force = false) {
         }
       }
 
-      const existing = await db.prepare("SELECT title, cluster_key, url, source_country FROM mentions ORDER BY published_at DESC LIMIT 1000").all<ExistingMention>();
+      await registerMediaSources(db, discoveryCandidates);
+      const crawler = await crawlMediaSources(db, terms);
+      await markProviderHealthy(db, "Free media crawler", attemptedAt);
+      const candidates = [...discoveryCandidates, ...crawler.candidates];
+      const existing = await db.prepare("SELECT id, title, excerpt, cluster_key, url, source_country, published_at, parent_url FROM mentions ORDER BY published_at DESC LIMIT 5000").all<ExistingMention>();
       const known = [...existing.results];
-      const knownUrls = new Set(known.map((item) => item.url));
+      const knownUrls = new Set(known.map((item) => canonicalUrl(item.url)));
       const knownCountries = new Set(known.map((item) => item.source_country));
       const newCountries = new Set<string>();
       let inserted = 0;
 
       for (const candidate of candidates.sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))) {
-        if (knownUrls.has(candidate.url)) continue;
+        const canonical = canonicalUrl(candidate.url);
+        if (!canonical || knownUrls.has(canonical)) continue;
+        const excerpt = compactText(candidate.discussionText).slice(0, 2000);
         const cluster = findCluster(candidate, terms, known);
-        const analysis = analyzeText(`${candidate.title} ${candidate.discussionText}`);
+        const analysis = analyzeText(`${candidate.title} ${excerpt}`, terms);
         const impact = impactFor(candidate);
+        const contentHash = simpleHash(`${candidate.title.toLowerCase()}|${excerpt.toLowerCase()}`);
+        const firstSeen = new Date().toISOString();
         const result = await db.prepare(`INSERT INTO mentions
-          (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, parent_url, relation, engagement, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key,
+           parent_url, relation, engagement, excerpt, author, provider, discovered_via, content_hash, word_count, sentiment_score,
+           topics, keywords, first_seen_at, archived_at, published_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(candidate.title, candidate.url, candidate.source, candidate.platform, candidate.sourceCountry, candidate.sourceCountry,
             candidate.language, analysis.sentiment, analysis.risk, impact,
-            `自动分析 · ${analysis.topic} · ${candidate.platform} · ${candidate.engagement ? `${candidate.engagement.toLocaleString()} 次公开互动` : "互动数据未披露"}${candidate.commentsAnalyzed ? ` · 已分析 ${candidate.commentsAnalyzed} 条高相关评论` : ""}`,
-            cluster, candidate.parentUrl, candidate.relation, candidate.engagement, candidate.publishedAt).run();
-        known.push({ title: candidate.title, cluster_key: cluster, url: candidate.url, source_country: candidate.sourceCountry });
-        knownUrls.add(candidate.url); inserted += 1;
+            `自动归档 · ${analysis.topic} · ${candidate.platform} · ${candidate.engagement ? `${candidate.engagement.toLocaleString()} 次公开互动` : "互动数据未披露"}${candidate.commentsAnalyzed ? ` · 已分析 ${candidate.commentsAnalyzed} 条高相关评论` : ""}`,
+            cluster, candidate.parentUrl, candidate.relation, candidate.engagement, excerpt, candidate.author ?? "", candidate.provider ?? "公开网页",
+            candidate.discoveredVia ?? "global_discovery", contentHash, textTokens(`${candidate.title} ${excerpt}`).size, analysis.score,
+            analysis.topic, analysis.keywords.join(","), firstSeen, firstSeen, candidate.publishedAt).run();
+        known.push({ id: Number(result.meta.last_row_id), title: candidate.title, excerpt, cluster_key: cluster, url: candidate.url, source_country: candidate.sourceCountry, published_at: candidate.publishedAt, parent_url: candidate.parentUrl });
+        knownUrls.add(canonical);
+        inserted += 1;
         if (!knownCountries.has(candidate.sourceCountry) && candidate.sourceCountry !== "地区未披露") newCountries.add(candidate.sourceCountry);
         if (analysis.risk >= 70 || impact >= 90) {
           await db.prepare("INSERT INTO alerts (mention_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?)")
@@ -220,11 +298,13 @@ export async function runNewsSync(force = false) {
         await db.prepare("INSERT INTO alerts (title, severity, country, reason) VALUES (?, ?, ?, ?)")
           .bind(`品牌首次进入${country}的信息环境`, "High", country, "系统首次观察到该国家或地区的相关内容").run();
       }
+      await rebuildPropagationEdges(db, terms);
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
-      return { skipped: false, found: candidates.length, inserted, query, provider: providers.map((item) => item.name).join(" + "), warnings: errors,
-        rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
+      return { skipped: false, found: candidates.length, inserted, query,
+        provider: `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
+        warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知同步错误";
       await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")

@@ -1,10 +1,13 @@
 import { env } from "cloudflare:workers";
+import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
 import { ensureDatabase, loadDashboardData } from "../../../db/repository";
+import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
 
 export async function GET() {
-  return Response.json(await loadDashboardData());
+  const user = await getChatGPTUser();
+  return Response.json(await loadDashboardData(user?.userId));
 }
 
 export async function POST(request: Request) {
@@ -12,6 +15,7 @@ export async function POST(request: Request) {
   const db = env.DB;
   const payload = await request.json() as Record<string, unknown>;
   const action = String(payload.action ?? "");
+  const user = await getChatGPTUser();
 
   if (action === "saveBrandProfile") {
     const brandName = String(payload.brandName ?? "").trim();
@@ -24,7 +28,8 @@ export async function POST(request: Request) {
     if (existing && existing.name !== brandName) {
       await db.batch([
         db.prepare("DELETE FROM mentions"), db.prepare("DELETE FROM alerts"), db.prepare("DELETE FROM traffic_signals"),
-        db.prepare("DELETE FROM sync_runs"), db.prepare("DELETE FROM sync_locks"),
+        db.prepare("DELETE FROM sync_runs"), db.prepare("DELETE FROM sync_locks"), db.prepare("DELETE FROM propagation_edges"),
+        db.prepare("DELETE FROM media_sources"), db.prepare("DELETE FROM provider_health"),
       ]);
     }
     await db.batch([
@@ -94,9 +99,15 @@ export async function POST(request: Request) {
       .run();
   } else if (action === "acknowledgeAlert") {
     await db.prepare("UPDATE alerts SET acknowledged = 1 WHERE id = ?").bind(Number(payload.id)).run();
+  } else if (action === "saveConnectorCredential") {
+    if (!user) return Response.json({ error: "请先登录后再保存个人 API 密钥" }, { status: 401 });
+    await saveConnectorCredential(db, user.userId, String(payload.provider ?? ""), String(payload.credential ?? ""));
+  } else if (action === "deleteConnectorCredential") {
+    if (!user) return Response.json({ error: "请先登录后再删除个人 API 密钥" }, { status: 401 });
+    await deleteConnectorCredential(db, user.userId, String(payload.provider ?? ""));
   } else {
     return Response.json({ error: "未知操作" }, { status: 400 });
   }
 
-  return Response.json(await loadDashboardData());
+  return Response.json(await loadDashboardData(user?.userId));
 }

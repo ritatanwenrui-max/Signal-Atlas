@@ -13,6 +13,9 @@ export type MonitoringCandidate = {
   commentsAnalyzed: number;
   parentUrl: string;
   relation: string;
+  author?: string;
+  provider?: string;
+  discoveredVia?: "global_discovery" | "free_crawler" | "official_api" | "manual";
 };
 
 type GdeltArticle = { url?: string; title?: string; seendate?: string; domain?: string; language?: string; sourcecountry?: string };
@@ -97,8 +100,9 @@ function englishLabel(value?: EventRegistryLabel) {
   return typeof value === "string" ? value : value?.eng;
 }
 
-export async function fetchEventRegistry(terms: string[]): Promise<MonitoringCandidate[]> {
-  if (!env.NEWSAPI_AI_KEY) return [];
+export async function fetchEventRegistry(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.NEWSAPI_AI_KEY;
+  if (!apiKey) return [];
   const response = await fetch("https://eventregistry.org/api/v1/article/getArticles", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
@@ -119,7 +123,7 @@ export async function fetchEventRegistry(terms: string[]): Promise<MonitoringCan
       includeSourceLocation: true,
       includeArticleSocialScore: true,
       includeArticleOriginalArticle: true,
-      apiKey: env.NEWSAPI_AI_KEY,
+      apiKey,
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -145,6 +149,9 @@ export async function fetchEventRegistry(terms: string[]): Promise<MonitoringCan
       commentsAnalyzed: 0,
       parentUrl: item.originalArticle?.url ?? "",
       relation: item.originalArticle?.url ? "原始报道" : "",
+      author: "",
+      provider: "NewsAPI.ai",
+      discoveredVia: "global_discovery",
     };
   });
 }
@@ -165,11 +172,13 @@ export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> 
     platform: "网页新闻", sourceCountry: countryNames[item.sourcecountry ?? ""] ?? item.sourcecountry ?? "地区未披露",
     language: languageNames[item.language ?? ""] ?? item.language ?? "自动识别", publishedAt: isoDate(item.seendate), engagement: 0,
     discussionText: "", commentsAnalyzed: 0, parentUrl: "", relation: "",
+    author: "", provider: "GDELT", discoveredVia: "global_discovery",
   }));
 }
 
-export async function fetchX(terms: string[]): Promise<MonitoringCandidate[]> {
-  if (!env.X_BEARER_TOKEN) return [];
+export async function fetchX(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const bearerToken = credential ?? env.X_BEARER_TOKEN;
+  if (!bearerToken) return [];
   const endpoint = new URL("https://api.x.com/2/tweets/search/recent");
   endpoint.searchParams.set("query", `(${terms.slice(0, 8).map((term) => `"${term.replaceAll('"', "")}"`).join(" OR ")})`);
   endpoint.searchParams.set("max_results", "100");
@@ -178,7 +187,7 @@ export async function fetchX(terms: string[]): Promise<MonitoringCandidate[]> {
   endpoint.searchParams.set("expansions", "author_id,geo.place_id,referenced_tweets.id,referenced_tweets.id.author_id");
   endpoint.searchParams.set("user.fields", "username,name,location");
   endpoint.searchParams.set("place.fields", "country,country_code,full_name");
-  const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${env.X_BEARER_TOKEN}` }, signal: AbortSignal.timeout(15_000) });
+  const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`X API HTTP ${response.status}`);
   const payload = await response.json() as XPayload;
   const users = new Map<string, XUser>();
@@ -200,16 +209,20 @@ export async function fetchX(terms: string[]): Promise<MonitoringCandidate[]> {
       publishedAt: isoDate(post.created_at), engagement: Number(metrics.like_count ?? 0) + Number(metrics.reply_count ?? 0) + Number(metrics.retweet_count ?? 0) + Number(metrics.quote_count ?? 0),
       discussionText: "", commentsAnalyzed: 0, parentUrl: reference ? `https://x.com/i/status/${reference.id}` : "",
       relation: reference ? relationNames[reference.type] : "",
+      author: user?.name ?? user?.username ?? "",
+      provider: "X API",
+      discoveredVia: "official_api",
     } as MonitoringCandidate;
   });
 }
 
-export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate[]> {
-  if (!env.YOUTUBE_API_KEY) return [];
+export async function fetchYouTube(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.YOUTUBE_API_KEY;
+  if (!apiKey) return [];
   const endpoint = new URL("https://www.googleapis.com/youtube/v3/search");
   endpoint.searchParams.set("part", "snippet"); endpoint.searchParams.set("type", "video"); endpoint.searchParams.set("order", "date");
   endpoint.searchParams.set("maxResults", "50"); endpoint.searchParams.set("q", terms.slice(0, 8).join("|"));
-  endpoint.searchParams.set("publishedAfter", new Date(Date.now() - 30 * 86400_000).toISOString()); endpoint.searchParams.set("key", env.YOUTUBE_API_KEY);
+  endpoint.searchParams.set("publishedAfter", new Date(Date.now() - 30 * 86400_000).toISOString()); endpoint.searchParams.set("key", apiKey);
   const response = await fetch(endpoint, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`YouTube API HTTP ${response.status}`);
   const payload = await response.json() as YouTubePayload;
@@ -218,9 +231,9 @@ export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate
   const channelIds = [...new Set(items.flatMap((item) => item.snippet?.channelId ? [item.snippet.channelId] : []))];
 
   const statsUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
-  statsUrl.searchParams.set("part", "statistics"); statsUrl.searchParams.set("id", videoIds.join(",")); statsUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
+  statsUrl.searchParams.set("part", "statistics"); statsUrl.searchParams.set("id", videoIds.join(",")); statsUrl.searchParams.set("key", apiKey);
   const channelsUrl = new URL("https://www.googleapis.com/youtube/v3/channels");
-  channelsUrl.searchParams.set("part", "snippet"); channelsUrl.searchParams.set("id", channelIds.join(",")); channelsUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
+  channelsUrl.searchParams.set("part", "snippet"); channelsUrl.searchParams.set("id", channelIds.join(",")); channelsUrl.searchParams.set("key", apiKey);
   const [statsResponse, channelsResponse, commentResults] = await Promise.all([
     videoIds.length ? fetch(statsUrl, { signal: AbortSignal.timeout(15_000) }) : null,
     channelIds.length ? fetch(channelsUrl, { signal: AbortSignal.timeout(15_000) }) : null,
@@ -228,7 +241,7 @@ export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate
       const commentsUrl = new URL("https://www.googleapis.com/youtube/v3/commentThreads");
       commentsUrl.searchParams.set("part", "snippet"); commentsUrl.searchParams.set("videoId", videoId);
       commentsUrl.searchParams.set("maxResults", "20"); commentsUrl.searchParams.set("order", "relevance");
-      commentsUrl.searchParams.set("textFormat", "plainText"); commentsUrl.searchParams.set("key", env.YOUTUBE_API_KEY!);
+      commentsUrl.searchParams.set("textFormat", "plainText"); commentsUrl.searchParams.set("key", apiKey);
       const commentsResponse = await fetch(commentsUrl, { signal: AbortSignal.timeout(12_000) });
       if (!commentsResponse.ok) return { videoId, comments: [] as string[] };
       const commentsPayload = await commentsResponse.json() as YouTubeCommentsPayload;
@@ -256,6 +269,9 @@ export async function fetchYouTube(terms: string[]): Promise<MonitoringCandidate
       language: "自动识别", publishedAt: isoDate(item.snippet?.publishedAt), engagement,
       discussionText: [item.snippet?.description ?? "", ...videoComments].join(" "), commentsAnalyzed: videoComments.length,
       parentUrl: "", relation: "",
+      author: item.snippet?.channelTitle ?? "",
+      provider: "YouTube API",
+      discoveredVia: "official_api",
     }];
   });
 }
