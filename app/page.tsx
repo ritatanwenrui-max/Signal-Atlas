@@ -38,6 +38,7 @@ const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "舆情分析", "04"], ["coverage", "来源覆盖", "05"], ["settings", "品牌配置", "06"],
 ] as const;
+const platformCatalog = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"] as const;
 
 const countryCode: Record<string, string> = {
   台湾: "TW", 香港: "HK", 泰国: "TH", 美国: "US", 日本: "JP", 全球: "GL", 中国: "CN", 新加坡: "SG", 英国: "GB",
@@ -152,7 +153,12 @@ export default function Home() {
 
   const activeAlerts = data.alerts.filter((item) => !item.acknowledged);
   const countries = ["全球", ...new Set(data.mentions.map((item) => item.source_country))];
-  const platforms = ["全部平台", ...new Set(data.mentions.map((item) => item.platform))];
+  const platformCounts = data.mentions.reduce<Record<string, number>>((counts, item) => {
+    counts[item.platform] = (counts[item.platform] ?? 0) + 1;
+    return counts;
+  }, {});
+  const uncataloguedPlatforms = [...new Set(data.mentions.map((item) => item.platform))].filter((item) => !platformCatalog.includes(item as typeof platformCatalog[number]));
+  const platforms = ["全部平台", ...platformCatalog, ...uncataloguedPlatforms];
   const selected = clusters.find((item) => item.key === selectedCluster) ?? clusters.find((item) => item.items.length > 1) ?? clusters[0];
   const lastSync = data.syncRuns[0];
   const initials = data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR";
@@ -184,7 +190,7 @@ export default function Home() {
       <div className="content-area">
         {loading ? <LoadingState /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
           {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} />}
-          {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} />}
+          {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
           {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} />}
@@ -251,7 +257,7 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   </div>;
 }
 
-function ArchiveView({ mentions, allCount, countries, platforms, country, platform, sentiment, setCountry, setPlatform, setSentiment }: { mentions: Mention[]; allCount: number; countries: string[]; platforms: string[]; country: string; platform: string; sentiment: string; setCountry: (value: string) => void; setPlatform: (value: string) => void; setSentiment: (value: string) => void }) {
+function ArchiveView({ mentions, allCount, countries, platforms, platformCounts, country, platform, sentiment, setCountry, setPlatform, setSentiment }: { mentions: Mention[]; allCount: number; countries: string[]; platforms: string[]; platformCounts: Record<string, number>; country: string; platform: string; sentiment: string; setCountry: (value: string) => void; setPlatform: (value: string) => void; setSentiment: (value: string) => void }) {
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<"newest" | "oldest" | "risk">("newest");
   const pageSize = 20;
@@ -266,7 +272,7 @@ function ArchiveView({ mentions, allCount, countries, platforms, country, platfo
   return <div className="archive-page">
     <section className="archive-intro"><div><p className="eyebrow">LIFETIME NEWS ARCHIVE</p><h2>品牌历史新闻档案</h2><p>每条自动发现的报道都会保留发布时间、来源地区、媒体、情绪、风险、发现方式与传播事件编号。旧记录不会被下一次搜索覆盖。</p></div><div className="archive-total"><small>ARCHIVED</small><strong>{allCount}</strong><span>有史以来全部记录</span></div></section>
     <section className="surface archive-table-card">
-      <div className="archive-toolbar"><div className="filters"><select value={country} onChange={(event) => { setCountry(event.target.value); setPage(1); }}>{countries.map((item) => <option key={item}>{item}</option>)}</select><select value={platform} onChange={(event) => { setPlatform(event.target.value); setPage(1); }}>{platforms.map((item) => <option key={item}>{item}</option>)}</select><select value={sentiment} onChange={(event) => { setSentiment(event.target.value); setPage(1); }}>{["全部情绪", "正面", "中性", "负面", "混合"].map((item) => <option key={item}>{item}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="risk">风险优先</option></select></div><button className="secondary-button" onClick={exportCsv}>↓ 导出 CSV</button></div>
+      <div className="archive-toolbar"><div className="filters"><select value={country} onChange={(event) => { setCountry(event.target.value); setPage(1); }}>{countries.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按平台筛选档案" value={platform} onChange={(event) => { setPlatform(event.target.value); setPage(1); }}>{platforms.map((item) => <option key={item} value={item}>{item === "全部平台" ? `全部平台（${allCount}）` : `${item}（${platformCounts[item] ?? 0}）`}</option>)}</select><select value={sentiment} onChange={(event) => { setSentiment(event.target.value); setPage(1); }}>{["全部情绪", "正面", "中性", "负面", "混合"].map((item) => <option key={item}>{item}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="risk">风险优先</option></select></div><button className="secondary-button" onClick={exportCsv}>↓ 导出 CSV</button></div>
       <div className="table-scroll"><table className="archive-table"><thead><tr><th>发布时间</th><th>新闻标题 / 原文</th><th>媒体</th><th>地区</th><th>平台</th><th>语言</th><th>情绪</th><th>风险</th><th>发现方式</th><th>事件</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td className="date-cell">{formatDate(item.published_at, true)}</td><td className="title-cell"><a href={item.url} target="_blank" rel="noreferrer">{item.title}<span>↗</span></a><small>{item.excerpt || item.summary}</small></td><td><strong>{item.source}</strong>{item.author && item.author !== item.source && <small>{item.author}</small>}</td><td><span className="country-tag">{countryCode[item.source_country] ?? "GL"}</span>{item.source_country}<small title={item.location_method || "来源字段"}>{item.location_confidence ? `${item.location_method} · ${item.location_confidence}%` : "来源字段"}</small></td><td>{item.platform}</td><td>{item.language}</td><td><span className={`sentiment-pill ${sentimentClass(item.sentiment)}`}>{item.sentiment}</span></td><td><span className={`risk-score ${riskClass(item.risk)}`}>{item.risk}</span></td><td><span className="discovery-badge">{discoveryLabel(item.discovered_via)}</span></td><td><code>{item.cluster_key.replace("story-", "#")}</code></td></tr>)}</tbody></table></div>
       {!rows.length && <div className="empty-table">当前筛选条件下暂无档案</div>}
       <div className="pagination"><span>显示 {ordered.length} 条结果 · 第 {Math.min(page, pages)} / {pages} 页</span><div><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>← 上一页</button><button disabled={page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>下一页 →</button></div></div>
