@@ -171,3 +171,53 @@ export const connectorCredentials = sqliteTable("connector_credentials", {
   lastTestAt: text("last_test_at").notNull().default(""),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [primaryKey({ columns: [table.userId, table.provider] })]);
+
+export const monidJobs = sqliteTable("monid_jobs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull(),
+  runId: text("run_id").notNull(),
+  stage: text("stage").notNull(),
+  status: text("status").notNull().default("RUNNING"),
+  terms: text("terms").notNull().default("[]"),
+  cost: integer("cost").notNull().default(0),
+  error: text("error").notNull().default(""),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at").notNull().default(""),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_monid_jobs_run_id").on(table.runId),
+  index("idx_monid_jobs_brand_status").on(table.brandId, table.status),
+]);
+
+export const socialPostMetrics = sqliteTable("social_post_metrics", {
+  mentionId: integer("mention_id").primaryKey(),
+  brandId: integer("brand_id").notNull(),
+  platform: text("platform").notNull(),
+  postId: text("post_id").notNull().default(""),
+  authorId: text("author_id").notNull().default(""),
+  authorUsername: text("author_username").notNull().default(""),
+  authorName: text("author_name").notNull().default(""),
+  followerCount: integer("follower_count").notNull().default(0),
+  likes: integer("likes").notNull().default(0),
+  comments: integer("comments").notNull().default(0),
+  shares: integer("shares").notNull().default(0),
+  views: integer("views").notNull().default(0),
+  plays: integer("plays").notNull().default(0),
+  matchedTerms: text("matched_terms").notNull().default("[]"),
+  metricsUpdatedAt: text("metrics_updated_at").notNull(),
+}, (table) => [
+  index("idx_social_metrics_brand_platform").on(table.brandId, table.platform),
+  index("idx_social_metrics_author").on(table.brandId, table.authorUsername),
+]);
+
+export const socialAuthorSnapshots = sqliteTable("social_author_snapshots", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull(),
+  platform: text("platform").notNull(),
+  authorId: text("author_id").notNull().default(""),
+  username: text("username").notNull(),
+  followerCount: integer("follower_count").notNull().default(0),
+  followingCount: integer("following_count").notNull().default(0),
+  verified: integer("verified", { mode: "boolean" }).notNull().default(false),
+  capturedAt: text("captured_at").notNull(),
+}, (table) => [index("idx_social_authors_brand_user_time").on(table.brandId, table.username, table.capturedAt)]);

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-const supportedProviders = new Set(["NewsAPI.ai", "X", "YouTube", "Meta / Instagram", "TikTok"]);
+const supportedProviders = new Set(["NewsAPI.ai", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok"]);
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -40,7 +40,8 @@ export async function deleteConnectorCredential(db: D1Database, userId: string, 
 }
 
 export async function loadConnectorCredential(db: D1Database, provider: string, userId = "") {
-  const environmentValue = provider === "NewsAPI.ai" ? env.NEWSAPI_AI_KEY : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY : undefined;
+  const environmentValue = provider === "NewsAPI.ai" ? env.NEWSAPI_AI_KEY : provider === "Monid / Instagram" ? env.MONID_API_KEY
+    : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY : undefined;
   if (!userId) return environmentValue;
   const row = await db.prepare("SELECT encrypted_value, iv FROM connector_credentials WHERE user_id = ? AND provider = ?").bind(userId, provider)
     .first<{ encrypted_value: string; iv: string }>();

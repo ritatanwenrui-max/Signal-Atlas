@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
+import { collectMonidInstagram, countPendingMonidJobs, hasPendingMonidJobs, refreshSocialFollowerCounts } from "./monid";
 import { ensureDatabase, getActiveBrandForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 
@@ -180,6 +181,28 @@ function impactFor(candidate: MonitoringCandidate) {
   return Math.min(98, base + Math.round(Math.log10(candidate.engagement + 1) * 12));
 }
 
+async function upsertSocialMetrics(db: D1Database, brandId: number, mentionId: number, candidate: MonitoringCandidate) {
+  const metrics = candidate.socialMetrics;
+  if (!metrics) return;
+  const updatedAt = new Date().toISOString();
+  await db.prepare(`INSERT INTO social_post_metrics
+    (mention_id, brand_id, platform, post_id, author_id, author_username, author_name, follower_count,
+     likes, comments, shares, views, plays, matched_terms, metrics_updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(mention_id) DO UPDATE SET post_id = excluded.post_id,
+      author_id = CASE WHEN excluded.author_id != '' THEN excluded.author_id ELSE social_post_metrics.author_id END,
+      author_username = CASE WHEN excluded.author_username != '' THEN excluded.author_username ELSE social_post_metrics.author_username END,
+      author_name = CASE WHEN excluded.author_name != '' THEN excluded.author_name ELSE social_post_metrics.author_name END,
+      follower_count = MAX(social_post_metrics.follower_count, excluded.follower_count), likes = excluded.likes,
+      comments = excluded.comments, shares = excluded.shares, views = excluded.views, plays = excluded.plays,
+      matched_terms = excluded.matched_terms, metrics_updated_at = excluded.metrics_updated_at`)
+    .bind(mentionId, brandId, candidate.platform, metrics.postId, metrics.authorId, metrics.authorUsername, metrics.authorName,
+      metrics.followerCount, metrics.likes, metrics.comments, metrics.shares, metrics.views, metrics.plays,
+      JSON.stringify(metrics.matchedTerms), updatedAt).run();
+  await db.prepare("UPDATE mentions SET engagement = ?, author = CASE WHEN ? != '' THEN ? ELSE author END WHERE id = ? AND brand_id = ?")
+    .bind(candidate.engagement, metrics.authorUsername, metrics.authorUsername ? `@${metrics.authorUsername}` : metrics.authorName, mentionId, brandId).run();
+}
+
 function retryDelay(error: unknown, failureCount: number) {
   const rateLimited = error instanceof ProviderRequestError && error.status === 429;
   const providerFloor = error instanceof ProviderRequestError && error.provider === "GDELT" ? SIX_HOURS : 10 * 60 * 1000;
@@ -353,14 +376,18 @@ export async function runNewsSync(force = false, userId = "") {
       const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error, last_success_at FROM provider_health WHERE provider LIKE ?")
         .bind(`${brandId}:%`).all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
-      const [newsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
-        loadConnectorCredential(db, "NewsAPI.ai", userId), loadConnectorCredential(db, "X", userId), loadConnectorCredential(db, "YouTube", userId),
+      const [newsApiKey, monidApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
+        loadConnectorCredential(db, "NewsAPI.ai", userId), loadConnectorCredential(db, "Monid / Instagram", userId),
+        loadConnectorCredential(db, "X", userId), loadConnectorCredential(db, "YouTube", userId),
       ]);
       const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
       const gdeltDue = !newsApiKey || isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
+      const monidPending = monidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
+      const monidDue = force || isDue(health.get("Monid / Instagram")?.last_success_at, SIX_HOURS);
       const providers: ProviderTask[] = [
         ...(discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
         ...(discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
+        ...(monidApiKey && (monidDue || monidPending) ? [{ name: "Monid / Instagram", load: () => collectMonidInstagram(db, brandId, terms, monidApiKey, monidDue) }] : []),
         ...(xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
         ...(youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
       ];
@@ -394,14 +421,19 @@ export async function runNewsSync(force = false, userId = "") {
       const existing = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source, source_country, content_country, language, published_at, parent_url
         FROM mentions WHERE brand_id = ? ORDER BY published_at DESC LIMIT 5000`).bind(brandId).all<ExistingMention>();
       const known = [...existing.results];
-      const knownUrls = new Set(known.map((item) => canonicalUrl(item.url)));
+      const knownByUrl = new Map(known.map((item) => [canonicalUrl(item.url), item]));
       const knownCountries = new Set(known.map((item) => item.source_country));
       const newCountries = new Set<string>();
       let inserted = 0;
 
       for (const candidate of candidates.sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))) {
         const canonical = canonicalUrl(candidate.url);
-        if (!canonical || knownUrls.has(canonical)) continue;
+        if (!canonical) continue;
+        const archived = knownByUrl.get(canonical);
+        if (archived) {
+          if (archived.id && candidate.socialMetrics) await upsertSocialMetrics(db, brandId, archived.id, candidate);
+          continue;
+        }
         const excerpt = compactText(candidate.discussionText).slice(0, 2000);
         const inferredLanguage = inferLanguage(`${candidate.title} ${excerpt}`, candidate.language);
         const inferredLocation = inferSourceCountry(candidate.url, candidate.source, `${candidate.title} ${excerpt}`, candidate.sourceCountry);
@@ -422,8 +454,11 @@ export async function runNewsSync(force = false, userId = "") {
             cluster, candidate.parentUrl, candidate.relation, candidate.engagement, excerpt, candidate.author ?? "", candidate.provider ?? "公开网页",
             candidate.discoveredVia ?? "global_discovery", contentHash, textTokens(`${candidate.title} ${excerpt}`).size, analysis.score,
             analysis.topic, analysis.keywords.join(","), firstSeen, firstSeen, candidate.publishedAt).run();
-        known.push({ id: Number(result.meta.last_row_id), title: candidate.title, excerpt, cluster_key: cluster, url: candidate.url, source: candidate.source, source_country: inferredLocation.country, content_country: inferredLocation.country, language: inferredLanguage.language, published_at: candidate.publishedAt, parent_url: candidate.parentUrl });
-        knownUrls.add(canonical);
+        const mentionId = Number(result.meta.last_row_id);
+        const knownMention = { id: mentionId, title: candidate.title, excerpt, cluster_key: cluster, url: candidate.url, source: candidate.source, source_country: inferredLocation.country, content_country: inferredLocation.country, language: inferredLanguage.language, published_at: candidate.publishedAt, parent_url: candidate.parentUrl };
+        known.push(knownMention);
+        knownByUrl.set(canonical, knownMention);
+        await upsertSocialMetrics(db, brandId, mentionId, candidate);
         inserted += 1;
         if (!knownCountries.has(inferredLocation.country) && !["地区未披露", "地区待确认", "华语地区"].includes(inferredLocation.country)) newCountries.add(inferredLocation.country);
         if (analysis.risk >= 70 || impact >= 90) {
@@ -432,6 +467,8 @@ export async function runNewsSync(force = false, userId = "") {
               analysis.risk >= 70 ? `负面或危机词触发，风险分 ${analysis.risk}` : `公开互动快速增长，影响力 ${impact}`).run();
         }
       }
+
+      await refreshSocialFollowerCounts(db, brandId);
 
       for (const country of newCountries) {
         await db.prepare("INSERT INTO alerts (brand_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?)")
@@ -442,7 +479,8 @@ export async function runNewsSync(force = false, userId = "") {
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
-      return { skipped: false, found: candidates.length, inserted, query,
+      const socialPending = await countPendingMonidJobs(db, brandId);
+      return { skipped: false, found: candidates.length, inserted, query, socialPending,
         provider: `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
         warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
     } catch (error) {

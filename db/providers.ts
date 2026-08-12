@@ -4,7 +4,7 @@ export type MonitoringCandidate = {
   title: string;
   url: string;
   source: string;
-  platform: "网页新闻" | "X" | "YouTube";
+  platform: "网页新闻" | "Instagram" | "X" | "YouTube";
   sourceCountry: string;
   language: string;
   publishedAt: string;
@@ -15,7 +15,20 @@ export type MonitoringCandidate = {
   relation: string;
   author?: string;
   provider?: string;
-  discoveredVia?: "global_discovery" | "free_crawler" | "official_api" | "manual";
+  discoveredVia?: "global_discovery" | "free_crawler" | "official_api" | "monid_public_search" | "manual";
+  socialMetrics?: {
+    postId: string;
+    authorId: string;
+    authorUsername: string;
+    authorName: string;
+    followerCount: number;
+    likes: number;
+    comments: number;
+    shares: number;
+    views: number;
+    plays: number;
+    matchedTerms: string[];
+  };
 };
 
 type GdeltArticle = { url?: string; title?: string; seendate?: string; domain?: string; language?: string; sourcecountry?: string };

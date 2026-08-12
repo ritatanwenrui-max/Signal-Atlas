@@ -151,6 +151,47 @@ const tables = [
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, provider)
   )`,
+  `CREATE TABLE IF NOT EXISTS monid_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'RUNNING',
+    terms TEXT NOT NULL DEFAULT '[]',
+    cost INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_post_metrics (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    post_id TEXT NOT NULL DEFAULT '',
+    author_id TEXT NOT NULL DEFAULT '',
+    author_username TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    follower_count INTEGER NOT NULL DEFAULT 0,
+    likes INTEGER NOT NULL DEFAULT 0,
+    comments INTEGER NOT NULL DEFAULT 0,
+    shares INTEGER NOT NULL DEFAULT 0,
+    views INTEGER NOT NULL DEFAULT 0,
+    plays INTEGER NOT NULL DEFAULT 0,
+    matched_terms TEXT NOT NULL DEFAULT '[]',
+    metrics_updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_author_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    author_id TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL,
+    follower_count INTEGER NOT NULL DEFAULT 0,
+    following_count INTEGER NOT NULL DEFAULT 0,
+    verified INTEGER NOT NULL DEFAULT 0,
+    captured_at TEXT NOT NULL
+  )`,
 ] as const;
 
 const indexes = [
@@ -167,6 +208,11 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_propagation_edges_brand_cluster ON propagation_edges(brand_id, cluster_key)",
   "CREATE INDEX IF NOT EXISTS idx_propagation_edges_to_mention ON propagation_edges(to_mention_id)",
   "CREATE INDEX IF NOT EXISTS idx_tracked_entities_brand ON tracked_entities(brand_id, active)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_monid_jobs_run_id ON monid_jobs(run_id)",
+  "CREATE INDEX IF NOT EXISTS idx_monid_jobs_brand_status ON monid_jobs(brand_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_social_metrics_brand_platform ON social_post_metrics(brand_id, platform)",
+  "CREATE INDEX IF NOT EXISTS idx_social_metrics_author ON social_post_metrics(brand_id, author_username)",
+  "CREATE INDEX IF NOT EXISTS idx_social_authors_brand_user_time ON social_author_snapshots(brand_id, username, captured_at)",
 ] as const;
 
 export async function ensureDatabase() {
@@ -186,8 +232,16 @@ export async function loadDashboardData(userId = "") {
   const brand = await getActiveBrandForUser(db, userId);
   const brandId = Number(brand?.id ?? -1);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows] = await Promise.all([
-    db.prepare("SELECT * FROM mentions WHERE brand_id = ? ORDER BY published_at DESC").bind(brandId).all(),
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs] = await Promise.all([
+    db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
+      social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
+      social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
+      social_post_metrics.likes AS social_likes, social_post_metrics.comments AS social_comments,
+      social_post_metrics.shares AS social_shares, social_post_metrics.views AS social_views,
+      social_post_metrics.plays AS social_plays, social_post_metrics.matched_terms AS social_matched_terms,
+      social_post_metrics.metrics_updated_at AS social_metrics_updated_at
+      FROM mentions LEFT JOIN social_post_metrics ON social_post_metrics.mention_id = mentions.id
+      WHERE mentions.brand_id = ? ORDER BY mentions.published_at DESC`).bind(brandId).all(),
     db.prepare("SELECT * FROM traffic_signals WHERE brand_id = ? ORDER BY recorded_at DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM tracked_entities WHERE brand_id = ? ORDER BY id DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM alerts WHERE brand_id = ? ORDER BY acknowledged ASC, id DESC").bind(brandId).all(),
@@ -197,6 +251,8 @@ export async function loadDashboardData(userId = "") {
     db.prepare("SELECT * FROM propagation_edges WHERE brand_id = ? ORDER BY cluster_key, time_gap_minutes ASC").bind(brandId).all(),
     db.prepare("SELECT provider, last_four, status, last_test_at, updated_at FROM connector_credentials WHERE user_id = ? ORDER BY provider")
       .bind(userId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
+    db.prepare("SELECT stage, status, cost, error, started_at, completed_at FROM monid_jobs WHERE brand_id = ? ORDER BY id DESC LIMIT 6")
+      .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -205,10 +261,14 @@ export async function loadDashboardData(userId = "") {
   const eventRegistryLimited = Boolean(eventRegistryHealth?.retry_after && new Date(eventRegistryHealth.retry_after).getTime() > Date.now());
   const storedCredentials = new Map(credentialRows.results.map((item) => [item.provider, item]));
   const newsApiConfigured = Boolean(env.NEWSAPI_AI_KEY || storedCredentials.has("NewsAPI.ai"));
+  const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
   const metaConfigured = storedCredentials.has("Meta / Instagram");
   const tiktokConfigured = storedCredentials.has("TikTok");
+  const monidHealth = healthByName.get("Monid / Instagram");
+  const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
+  const monidPending = monidJobs.results.filter((item) => ["READY", "RUNNING"].includes(item.status)).length;
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
@@ -291,6 +351,11 @@ export async function loadDashboardData(userId = "") {
     connectors: [
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
+      { id: "monid-instagram", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
+        lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Instagram 公共搜索（Monid）",
+        status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
+        detail: !monidConfigured ? "配置 Monid API Key 后，按品牌词搜索公开帖子并补全作者与互动数据"
+          : monidPending ? `${monidPending} 个搜帖或作者补全任务正在后台处理` : "普通文字关键词搜帖 · 作者粉丝数 · 点赞、评论、转发与播放量" },
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
       { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },

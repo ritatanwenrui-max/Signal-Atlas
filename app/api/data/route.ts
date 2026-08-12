@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
+import { verifyMonidApiKey } from "../../../db/monid";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
@@ -40,6 +41,9 @@ export async function POST(request: Request) {
           db.prepare("DELETE FROM sync_runs WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM propagation_edges WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM media_sources WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM monid_jobs WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM social_post_metrics WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM social_author_snapshots WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM provider_health WHERE provider LIKE ?").bind(`${brandId}:%`),
           db.prepare("DELETE FROM sync_locks WHERE name = ?").bind(`monitoring:${brandId}`),
         ]);
@@ -54,7 +58,17 @@ export async function POST(request: Request) {
       ...(website ? [db.prepare("INSERT INTO tracked_entities (brand_id, type, value, language) VALUES (?, ?, ?, ?)").bind(brandId, "官网域名", website, "通用")] : []),
     ]);
   } else if (action === "saveConnectorCredential") {
-    await saveConnectorCredential(db, user.userId, String(payload.provider ?? ""), String(payload.credential ?? ""), String(payload.lastFour ?? ""));
+    const provider = String(payload.provider ?? "");
+    const credential = String(payload.credential ?? "");
+    if (provider === "Monid / Instagram") {
+      try {
+        await verifyMonidApiKey(credential.trim());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Monid API Key 验证失败";
+        return Response.json({ error: message }, { status: 400 });
+      }
+    }
+    await saveConnectorCredential(db, user.userId, provider, credential, String(payload.lastFour ?? ""));
   } else if (action === "deleteConnectorCredential") {
     await deleteConnectorCredential(db, user.userId, String(payload.provider ?? ""));
   } else {

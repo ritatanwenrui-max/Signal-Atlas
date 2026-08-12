@@ -35,6 +35,10 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /按登录用户隔离/);
   assert.match(page, /Instagram Business \/ Creator Account ID/);
   assert.match(page, /Client Secret/);
+  assert.match(page, /Instagram 公共搜索（Monid）|Monid \/ Instagram/);
+  assert.match(page, /monid_live_/);
+  assert.match(page, /social_follower_count/);
+  assert.match(page, /Monid 公开搜索/);
   assert.match(page, /60 \* 60 \* 1000/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
@@ -81,12 +85,32 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.match(credentials, /user_id = \? AND provider = \?/);
   assert.match(credentials, /Meta \/ Instagram/);
   assert.match(credentials, /TikTok/);
+  assert.match(credentials, /Monid \/ Instagram/);
   assert.match(route, /getChatGPTUser/);
   assert.match(route, /请先登录/);
   assert.match(route, /viewer: \{ authenticated: Boolean\(user\) \}/);
   assert.match(schema, /connectorCredentials/);
   assert.match(schema, /primaryKey\(\{ columns: \[table\.userId, table\.provider\] \}\)/);
   assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
+});
+
+test("Monid runs Instagram keyword searches asynchronously and archives social metrics", async () => {
+  const [monid, sync, schema, repository] = await Promise.all([
+    source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"),
+  ]);
+  assert.match(monid, /api\.monid\.ai/);
+  assert.match(monid, /instagram-hashtag-scraper/);
+  assert.match(monid, /keywordSearch: true/);
+  assert.match(monid, /instagram-profile-scraper/);
+  assert.match(monid, /GET|\/v1\/runs\//);
+  assert.match(monid, /resultsLimit: 10/);
+  assert.match(monid, /matchedTerms/);
+  assert.match(sync, /collectMonidInstagram/);
+  assert.match(sync, /upsertSocialMetrics/);
+  assert.match(schema, /socialPostMetrics/);
+  assert.match(schema, /socialAuthorSnapshots/);
+  assert.match(schema, /monidJobs/);
+  assert.match(repository, /Instagram 公共搜索（Monid）/);
 });
 
 test("worker runs the hybrid monitor hourly", async () => {

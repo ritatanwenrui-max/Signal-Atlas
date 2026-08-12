@@ -9,6 +9,7 @@ interface Env {
   X_BEARER_TOKEN?: string;
   YOUTUBE_API_KEY?: string;
   NEWSAPI_AI_KEY?: string;
+  MONID_API_KEY?: string;
   CREDENTIALS_ENCRYPTION_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
