@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { ensureDatabase } from "./repository";
-import { fetchGdelt, fetchX, fetchYouTube, ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, ProviderRequestError, type MonitoringCandidate } from "./providers";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -147,6 +147,7 @@ export async function runNewsSync(force = false) {
 
     try {
       const providers: ProviderTask[] = [
+        ...(env.NEWSAPI_AI_KEY ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms) }] : []),
         { name: "GDELT", load: () => fetchGdelt(query) },
         ...(env.X_BEARER_TOKEN ? [{ name: "X", load: () => fetchX(terms) }] : []),
         ...(env.YOUTUBE_API_KEY ? [{ name: "YouTube", load: () => fetchYouTube(terms) }] : []),

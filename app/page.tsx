@@ -115,9 +115,11 @@ export default function Home() {
         const newsStatus = result.data.connectors?.find((item: Connector) => item.id === "news");
         const retryAt = result.sync.retryAt || newsStatus?.retryAt;
         const retryLabel = retryAt ? formatDate(retryAt) : "稍后";
-        const message = result.sync.reason === "provider_backoff" || result.sync.rateLimited || newsStatus?.status === "limited"
-          ? `GDELT 暂时限流，已停止重复请求，将在 ${retryLabel} 自动重试`
-          : result.sync.skipped ? "刚刚已经完成过搜索" : `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条`;
+        const message = newsStatus?.status === "limited"
+          ? `网页新闻源暂时限流，已停止重复请求，将在 ${retryLabel} 自动重试`
+          : result.sync.rateLimited && result.sync.found > 0
+            ? `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条；备用源已接管采集`
+            : result.sync.skipped ? "刚刚已经完成过搜索" : `搜索完成：发现 ${result.sync.found} 条，新增 ${result.sync.inserted} 条`;
         setToast(message);
         window.setTimeout(() => setToast(""), 5200);
       }

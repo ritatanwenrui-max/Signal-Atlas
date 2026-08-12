@@ -16,6 +16,26 @@ export type MonitoringCandidate = {
 };
 
 type GdeltArticle = { url?: string; title?: string; seendate?: string; domain?: string; language?: string; sourcecountry?: string };
+type EventRegistryLabel = string | { eng?: string };
+type EventRegistryLocation = { label?: EventRegistryLabel; country?: { label?: EventRegistryLabel } };
+type EventRegistryArticle = {
+  uri?: string;
+  url?: string;
+  title?: string;
+  body?: string;
+  dateTime?: string;
+  date?: string;
+  time?: string;
+  lang?: string;
+  sentiment?: number | null;
+  shares?: Record<string, number | undefined>;
+  source?: { uri?: string; title?: string; location?: EventRegistryLocation };
+  originalArticle?: { url?: string };
+};
+type EventRegistryPayload = {
+  articles?: { results?: EventRegistryArticle[] };
+  error?: string | { message?: string };
+};
 type XUser = { id: string; username?: string; name?: string; location?: string };
 type XPlace = { id: string; country?: string; country_code?: string; full_name?: string };
 type XPost = {
@@ -71,6 +91,62 @@ function retryAfterMs(response: Response) {
   if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
   const absolute = new Date(header).getTime();
   return Number.isNaN(absolute) ? null : Math.max(0, absolute - Date.now());
+}
+
+function englishLabel(value?: EventRegistryLabel) {
+  return typeof value === "string" ? value : value?.eng;
+}
+
+export async function fetchEventRegistry(terms: string[]): Promise<MonitoringCandidate[]> {
+  if (!env.NEWSAPI_AI_KEY) return [];
+  const response = await fetch("https://eventregistry.org/api/v1/article/getArticles", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "getArticles",
+      keyword: terms.slice(0, 12),
+      keywordOper: "or",
+      keywordSearchMode: "phrase",
+      keywordLoc: "title,body",
+      articlesPage: 1,
+      articlesCount: 100,
+      articlesSortBy: "date",
+      articlesSortByAsc: false,
+      articleBodyLen: 2000,
+      dataType: ["news", "pr", "blog"],
+      forceMaxDataTimeWindow: 31,
+      resultType: "articles",
+      includeSourceLocation: true,
+      includeArticleSocialScore: true,
+      includeArticleOriginalArticle: true,
+      apiKey: env.NEWSAPI_AI_KEY,
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) throw new ProviderRequestError("NewsAPI.ai", response.status, retryAfterMs(response), `NewsAPI.ai HTTP ${response.status}`);
+  const payload = await response.json() as EventRegistryPayload;
+  if (payload.error) {
+    const message = typeof payload.error === "string" ? payload.error : payload.error.message ?? "接口返回错误";
+    throw new Error(`NewsAPI.ai: ${message}`);
+  }
+  return (payload.articles?.results ?? []).filter((item) => item.url && item.title).map((item) => {
+    const sourceLocation = englishLabel(item.source?.location?.country?.label) ?? englishLabel(item.source?.location?.label);
+    const engagement = Object.values(item.shares ?? {}).reduce<number>((total, value) => total + (Number(value) || 0), 0);
+    return {
+      title: item.title!.trim(),
+      url: item.url!,
+      source: item.source?.title ?? item.source?.uri ?? new URL(item.url!).hostname.replace(/^www\./, ""),
+      platform: "网页新闻" as const,
+      sourceCountry: sourceLocation ? countryNames[sourceLocation] ?? sourceLocation : "地区未披露",
+      language: item.lang ? languageNames[item.lang] ?? item.lang : "自动识别",
+      publishedAt: isoDate(item.dateTime ?? [item.date, item.time].filter(Boolean).join("T")),
+      engagement,
+      discussionText: [item.body ?? "", item.sentiment == null ? "" : `provider-sentiment:${item.sentiment}`].join(" "),
+      commentsAnalyzed: 0,
+      parentUrl: item.originalArticle?.url ?? "",
+      relation: item.originalArticle?.url ? "原始报道" : "",
+    };
+  });
 }
 
 export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> {

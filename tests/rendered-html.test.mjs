@@ -20,6 +20,7 @@ test("dashboard onboards any brand and starts automatic monitoring", async () =>
   assert.match(page, /补充漏报内容/);
   assert.match(page, /最近 30 天/);
   assert.match(page, /限流保护 \/ 自动重试/);
+  assert.match(page, /备用源已接管采集/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
 
@@ -34,6 +35,10 @@ test("monitoring searches providers, analyzes discussion, and builds evidence-ba
   ]);
 
   assert.match(providers, /api\.gdeltproject\.org\/api\/v2\/doc\/doc/);
+  assert.match(providers, /eventregistry\.org\/api\/v1\/article\/getArticles/);
+  assert.match(providers, /forceMaxDataTimeWindow: 31/);
+  assert.match(providers, /articlesCount: 100/);
+  assert.match(providers, /includeSourceLocation: true/);
   assert.match(providers, /api\.x\.com\/2\/tweets\/search\/recent/);
   assert.match(providers, /googleapis\.com\/youtube\/v3\/search/);
   assert.match(providers, /youtube\/v3\/commentThreads/);
@@ -59,6 +64,7 @@ test("monitoring searches providers, analyzes discussion, and builds evidence-ba
   assert.doesNotMatch(repository, /seedDatabase/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS brand_profiles/);
   assert.match(repository, /Meta \/ Instagram/);
+  assert.match(repository, /NewsAPI\.ai \+ GDELT/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS sync_runs/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS sync_locks/);
   assert.match(brandMigration, /CREATE TABLE `brand_profiles`/);

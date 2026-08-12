@@ -114,6 +114,19 @@ export async function loadDashboardData() {
   ]);
   const gdeltHealth = providerHealth.results.find((item) => item.provider === "GDELT");
   const gdeltLimited = Boolean(gdeltHealth?.status === "limited" && gdeltHealth.retry_after && new Date(gdeltHealth.retry_after).getTime() > Date.now());
+  const eventRegistryHealth = providerHealth.results.find((item) => item.provider === "NewsAPI.ai");
+  const eventRegistryLimited = Boolean(eventRegistryHealth?.retry_after && new Date(eventRegistryHealth.retry_after).getTime() > Date.now());
+  const newsApiAvailable = Boolean(env.NEWSAPI_AI_KEY && !eventRegistryLimited);
+  const newsLimited = !newsApiAvailable && gdeltLimited;
+  const newsDetail = env.NEWSAPI_AI_KEY
+    ? eventRegistryLimited && gdeltLimited ? "NewsAPI.ai 与 GDELT 均在退避重试"
+      : eventRegistryLimited ? "GDELT 正常采集 · NewsAPI.ai 暂时退避"
+      : gdeltLimited ? "NewsAPI.ai 正常采集 · GDELT 限流保护中"
+      : "NewsAPI.ai + GDELT · 最近 31 天 · 每 10 分钟"
+    : gdeltLimited ? "GDELT 限流保护中 · 配置 NewsAPI.ai 后可自动切换" : "GDELT · 最近 30 天 · 每 10 分钟";
+  const retryAt = newsLimited
+    ? [eventRegistryHealth?.retry_after, gdeltHealth?.retry_after].filter(Boolean).sort()[0] ?? ""
+    : "";
   return {
     mentions: mentions.results,
     traffic: traffic.results,
@@ -123,7 +136,7 @@ export async function loadDashboardData() {
     brand,
     providerHealth: providerHealth.results,
     connectors: [
-      { id: "news", name: "全球网页新闻", status: gdeltLimited ? "limited" : "online", detail: gdeltLimited ? "GDELT 限流保护中，系统将自动恢复" : "GDELT · 最近 30 天 · 每 10 分钟", retryAt: gdeltLimited ? gdeltHealth?.retry_after : "" },
+      { id: "news", name: "全球网页新闻", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
       { id: "x", name: "X", status: env.X_BEARER_TOKEN ? "online" : "credentials", detail: env.X_BEARER_TOKEN ? "近 7 日公开帖文、转发与引用链路" : "需要 Bearer Token" },
       { id: "youtube", name: "YouTube", status: env.YOUTUBE_API_KEY ? "online" : "credentials", detail: env.YOUTUBE_API_KEY ? "视频、互动量与高相关评论" : "需要 API Key" },
       { id: "meta", name: "Meta / Instagram", status: "approval", detail: "需企业账号授权或数据供应商" },
