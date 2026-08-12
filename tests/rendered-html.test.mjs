@@ -57,8 +57,8 @@ test("hybrid collection discovers globally and continuously follows free media s
 });
 
 test("connector credentials are user-scoped and encrypted server-side", async () => {
-  const [credentials, route, schema] = await Promise.all([
-    source("db/credentials.ts"), source("app/api/data/route.ts"), source("db/schema.ts"),
+  const [credentials, route, schema, repository] = await Promise.all([
+    source("db/credentials.ts"), source("app/api/data/route.ts"), source("db/schema.ts"), source("db/repository.ts"),
   ]);
   assert.match(credentials, /AES-GCM/);
   assert.match(credentials, /additionalData/);
@@ -69,6 +69,7 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.match(route, /请先登录/);
   assert.match(schema, /connectorCredentials/);
   assert.match(schema, /primaryKey\(\{ columns: \[table\.userId, table\.provider\] \}\)/);
+  assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
 });
 
 test("worker runs the hybrid monitor hourly", async () => {

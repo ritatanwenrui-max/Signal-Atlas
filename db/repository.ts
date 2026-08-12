@@ -176,24 +176,8 @@ export async function ensureDatabase() {
 
 export async function getActiveBrandForUser(db: D1Database, userId: string) {
   if (!userId) return null;
-  let brand = await db.prepare("SELECT * FROM brand_profiles WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1")
+  return db.prepare("SELECT * FROM brand_profiles WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1")
     .bind(userId).first<Record<string, unknown>>();
-  if (brand) return brand;
-  const legacy = await db.prepare("SELECT * FROM brand_profiles WHERE user_id = '' AND active = 1 ORDER BY id DESC LIMIT 1").first<Record<string, unknown>>();
-  if (!legacy) return null;
-  const brandId = Number(legacy.id);
-  await db.batch([
-    db.prepare("UPDATE brand_profiles SET user_id = ?, updated_at = ? WHERE id = ? AND user_id = ''").bind(userId, new Date().toISOString(), brandId),
-    db.prepare("UPDATE mentions SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE traffic_signals SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE tracked_entities SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE alerts SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE sync_runs SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE media_sources SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-    db.prepare("UPDATE propagation_edges SET brand_id = ? WHERE brand_id = 0").bind(brandId),
-  ]);
-  brand = await db.prepare("SELECT * FROM brand_profiles WHERE id = ? AND user_id = ?").bind(brandId, userId).first<Record<string, unknown>>();
-  return brand;
 }
 
 export async function loadDashboardData(userId = "") {

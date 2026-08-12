@@ -71,6 +71,13 @@
       "when": 1786504964765,
       "tag": "0009_needy_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1786505460000,
+      "tag": "0010_retire_legacy_demo",
+      "breakpoints": true
     }
   ]
 }
