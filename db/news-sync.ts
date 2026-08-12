@@ -12,6 +12,8 @@ type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> }
 
 const SIX_HOURS = 6 * 3600_000;
 const ONE_DAY = 24 * 3600_000;
+const EVENT_MAX_GAP = 14 * ONE_DAY;
+const BURST_CONTINUATION = 48 * 3600_000;
 
 function providerKey(brandId: number, provider: string) { return `${brandId}:${provider}`; }
 
@@ -52,6 +54,46 @@ function similarity(left: Set<string>, right: Set<string>) {
   return intersection / (left.size + right.size - intersection);
 }
 
+const eventConcepts: Array<[string, RegExp]> = [
+  ["robot", /robot|robotics|机器人|機器人|ロボット|로봇|หุ่นยนต์/i],
+  ["ai", /\bai\b|artificial intelligence|人工智能|人工智慧|生成式|ปัญญาประดิษฐ์/i],
+  ["launch", /launch|release|debut|unveil|推出|发布|發佈|发表|發表|亮相|เปิดตัว/i],
+  ["product", /product|device|model|产品|產品|设备|設備|机型|機型|ผลิตภัณฑ์/i],
+  ["partnership", /partner|collaborat|合作|战略联盟|戰略聯盟|พันธมิตร/i],
+  ["funding", /funding|investment|融资|融資|投资|投資|ระดมทุน/i],
+  ["acquisition", /acqui|merger|收购|收購|并购|併購|ควบรวม/i],
+  ["legal", /lawsuit|legal|regulat|诉讼|訴訟|监管|監管|ฟ้องร้อง/i],
+  ["security", /breach|leak|security|泄露|洩露|安全|ข้อมูลรั่วไหล/i],
+  ["recall", /recall|召回|เรียกคืน/i],
+  ["interview", /interview|采访|採訪|专访|專訪|สัมภาษณ์/i],
+  ["intimacy", /intimacy|adult|sexual|sex robot|成人|性爱|性愛|亲密|親密|ผู้ใหญ่|เพศสัมพันธ์/i],
+];
+
+function eventAnchors(text: string) {
+  const anchors = new Set<string>();
+  for (const raw of text.match(/\d+(?:[.,]\d+)?/g) ?? []) {
+    const number = raw.replaceAll(",", "");
+    if (/^(19|20)\d{2}$/.test(number) || Number(number) < 2) continue;
+    anchors.add(`number:${number}`);
+  }
+  for (const [concept, pattern] of eventConcepts) if (pattern.test(text)) anchors.add(`concept:${concept}`);
+  return anchors;
+}
+
+function sharedNumericAnchor(left: Set<string>, right: Set<string>) {
+  return [...left].some((token) => token.startsWith("number:") && right.has(token));
+}
+
+function mentionText(mention: ExistingMention) { return `${mention.title} ${mention.excerpt ?? ""}`; }
+
+function clusterDistance(candidateTime: number, items: ExistingMention[]) {
+  const times = items.map((item) => new Date(item.published_at ?? 0).getTime()).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!times.length) return Number.POSITIVE_INFINITY;
+  if (candidateTime < times[0]) return times[0] - candidateTime;
+  if (candidateTime > times[times.length - 1]) return candidateTime - times[times.length - 1];
+  return 0;
+}
+
 function simpleHash(value: string) {
   let hash = 2166136261;
   for (const char of value) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
@@ -83,18 +125,37 @@ function findCluster(candidate: MonitoringCandidate, terms: string[], known: Exi
   }
   const incomingTitle = textTokens(candidate.title, terms);
   const incomingBody = textTokens(candidate.discussionText.slice(0, 1000), terms);
-  let best: ExistingMention | undefined;
+  const incomingCombined = textTokens(`${candidate.title} ${candidate.discussionText.slice(0, 1000)}`, terms);
+  const incomingAnchors = eventAnchors(`${candidate.title} ${candidate.discussionText.slice(0, 1000)}`);
+  const clusters = new Map<string, ExistingMention[]>();
+  for (const mention of known) clusters.set(mention.cluster_key, [...(clusters.get(mention.cluster_key) ?? []), mention]);
+  let bestCluster = "";
   let bestScore = 0;
-  for (const mention of known) {
-    const ageHours = Math.abs(new Date(candidate.publishedAt).getTime() - new Date(mention.published_at ?? candidate.publishedAt).getTime()) / 3600_000;
-    if (ageHours > 24 * 7) continue;
-    const titleScore = similarity(incomingTitle, textTokens(mention.title, terms));
-    const bodyScore = incomingBody.size && mention.excerpt ? similarity(incomingBody, textTokens(mention.excerpt, terms)) : 0;
-    const burstBoost = ageHours <= 24 ? 0.12 : ageHours <= 72 ? 0.06 : 0;
-    const score = titleScore * 0.68 + bodyScore * 0.32 + burstBoost;
-    if (score > bestScore) { best = mention; bestScore = score; }
+  const candidateTime = new Date(candidate.publishedAt).getTime();
+  for (const [clusterKey, items] of clusters) {
+    const gap = clusterDistance(candidateTime, items);
+    if (gap > EVENT_MAX_GAP) continue;
+    let maxTitle = 0;
+    let maxBody = 0;
+    let maxCombined = 0;
+    const clusterAnchors = new Set<string>();
+    for (const mention of items) {
+      maxTitle = Math.max(maxTitle, similarity(incomingTitle, textTokens(mention.title, terms)));
+      maxBody = Math.max(maxBody, incomingBody.size && mention.excerpt ? similarity(incomingBody, textTokens(mention.excerpt, terms)) : 0);
+      maxCombined = Math.max(maxCombined, similarity(incomingCombined, textTokens(mentionText(mention), terms)));
+      for (const anchor of eventAnchors(mentionText(mention))) clusterAnchors.add(anchor);
+    }
+    const anchorScore = similarity(incomingAnchors, clusterAnchors);
+    const sharedNumber = sharedNumericAnchor(incomingAnchors, clusterAnchors);
+    const timeBoost = gap <= 24 * 3600_000 ? 0.16 : gap <= BURST_CONTINUATION ? 0.1 : gap <= 7 * ONE_DAY ? 0.03 : 0;
+    const score = maxTitle * 0.45 + maxBody * 0.15 + maxCombined * 0.15 + anchorScore * 0.25 + timeBoost + (sharedNumber ? 0.22 : 0);
+    const eventContinuation = gap <= BURST_CONTINUATION && items.length >= 2 && (anchorScore > 0 || maxTitle >= 0.05 || maxCombined >= 0.05);
+    const translatedReprint = sharedNumber && gap <= 10 * ONE_DAY && (anchorScore > 0 || maxTitle >= 0.02);
+    const similarRewrite = gap <= 7 * ONE_DAY && (maxTitle >= 0.2 || maxCombined >= 0.18);
+    const qualifies = score >= 0.31 || eventContinuation || translatedReprint || similarRewrite;
+    if (qualifies && score > bestScore) { bestCluster = clusterKey; bestScore = score; }
   }
-  return best && bestScore >= 0.42 ? best.cluster_key : hashKey(incomingTitle, candidate.title);
+  return bestCluster || hashKey(new Set([...incomingTitle, ...incomingAnchors]), candidate.title);
 }
 
 function analyzeText(text: string, terms: string[]) {
@@ -205,11 +266,15 @@ async function rebuildPropagationEdges(db: D1Database, brandId: number, terms: s
       if (!parent) {
         const childTitle = textTokens(child.title, terms);
         const childBody = textTokens(child.excerpt ?? "", terms);
+        const childAnchors = eventAnchors(mentionText(child));
         for (const prior of items.slice(0, index)) {
           const titleScore = similarity(childTitle, textTokens(prior.title, terms));
           const bodyScore = similarity(childBody, textTokens(prior.excerpt ?? "", terms));
           const combinedScore = similarity(textTokens(`${child.title} ${child.excerpt ?? ""}`, terms), textTokens(`${prior.title} ${prior.excerpt ?? ""}`, terms));
-          const candidateScore = Math.max(titleScore, bodyScore, combinedScore);
+          const priorAnchors = eventAnchors(mentionText(prior));
+          const anchorScore = similarity(childAnchors, priorAnchors);
+          const multilingualScore = anchorScore * 0.7 + (sharedNumericAnchor(childAnchors, priorAnchors) ? 0.22 : 0);
+          const candidateScore = Math.max(titleScore, bodyScore, combinedScore, multilingualScore);
           if (candidateScore > score) { parent = prior; score = candidateScore; }
         }
       }
@@ -221,9 +286,12 @@ async function rebuildPropagationEdges(db: D1Database, brandId: number, terms: s
       const crossBorder = parent.source_country !== child.source_country && !uncertain.has(parent.source_country) && !uncertain.has(child.source_country);
       const similarityPercent = Math.round(score * 100);
       const confidence = explicit ? 98 : Math.min(94, Math.max(48, Math.round(50 + score * 42 + (crossBorder ? 2 : 0))));
-      const method = explicit ? "显式引用" : score >= 0.62 ? "高度文本复用" : score >= 0.34 ? "标题与正文相似" : "发布时间与主题聚类";
+      const method = explicit ? "显式引用" : score >= 0.62 ? "高度内容复用" : score >= 0.34 ? "标题、正文与事件指纹相似" : "爆发时序与事件上下文";
       const gap = Math.max(0, Math.round((new Date(child.published_at).getTime() - new Date(parent.published_at).getTime()) / 60000));
-      const evidence = explicit ? "来源元数据包含原文链接" : `${similarityPercent}% 文本特征相似，且晚发布 ${gap < 60 ? `${gap} 分钟` : `${Math.round(gap / 60)} 小时`}`;
+      const parentAnchors = eventAnchors(mentionText(parent));
+      const sharedAnchors = [...eventAnchors(mentionText(child))].filter((anchor) => parentAnchors.has(anchor))
+        .map((anchor) => anchor.replace(/^number:/, "数字 ").replace(/^concept:/, "主题 ")).slice(0, 4);
+      const evidence = explicit ? "来源元数据包含原文链接" : `${similarityPercent}% 内容重合度${sharedAnchors.length ? `，共享 ${sharedAnchors.join("、")}` : ""}，且晚发布 ${gap < 60 ? `${gap} 分钟` : `${Math.round(gap / 60)} 小时`}`;
       inserts.push(db.prepare(`INSERT INTO propagation_edges
         (brand_id, cluster_key, from_mention_id, to_mention_id, similarity, confidence, method, evidence, time_gap_minutes, cross_border)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
