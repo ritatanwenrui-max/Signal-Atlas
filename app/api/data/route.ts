@@ -35,6 +35,10 @@ export async function POST(request: Request) {
       const brandChanged = String(existingBrand?.name ?? "") !== brandName;
       if (brandChanged) {
         await db.batch([
+          db.prepare("DELETE FROM mention_comments WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM comment_analyses WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM social_comment_reply_queue WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM social_comment_targets WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM mentions WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM alerts WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM traffic_signals WHERE brand_id = ?").bind(brandId),

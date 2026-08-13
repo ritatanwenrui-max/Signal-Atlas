@@ -175,6 +175,7 @@ export const connectorCredentials = sqliteTable("connector_credentials", {
 export const monidJobs = sqliteTable("monid_jobs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   brandId: integer("brand_id").notNull(),
+  mentionId: integer("mention_id").notNull().default(0),
   runId: text("run_id").notNull(),
   stage: text("stage").notNull(),
   status: text("status").notNull().default("RUNNING"),
@@ -187,6 +188,7 @@ export const monidJobs = sqliteTable("monid_jobs", {
 }, (table) => [
   uniqueIndex("idx_monid_jobs_run_id").on(table.runId),
   index("idx_monid_jobs_brand_status").on(table.brandId, table.status),
+  index("idx_monid_jobs_mention_stage").on(table.mentionId, table.stage, table.status),
 ]);
 
 export const socialPostMetrics = sqliteTable("social_post_metrics", {
@@ -244,15 +246,61 @@ export const mentionComments = sqliteTable("mention_comments", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   mentionId: integer("mention_id").notNull(),
   brandId: integer("brand_id").notNull(),
+  platform: text("platform").notNull().default("网页新闻"),
   sourceCommentId: text("source_comment_id").notNull(),
+  parentCommentId: text("parent_comment_id").notNull().default(""),
+  authorId: text("author_id").notNull().default(""),
+  authorUsername: text("author_username").notNull().default(""),
+  authorName: text("author_name").notNull().default(""),
+  isVerified: integer("is_verified", { mode: "boolean" }).notNull().default(false),
   content: text("content").notNull(),
   sentiment: text("sentiment").notNull(),
   sentimentScore: integer("sentiment_score").notNull().default(0),
+  language: text("language").notNull().default("语言待确认"),
+  topic: text("topic").notNull().default("其他讨论"),
+  keywords: text("keywords").notNull().default("[]"),
   likes: integer("likes").notNull().default(0),
   replies: integer("replies").notNull().default(0),
+  commentUrl: text("comment_url").notNull().default(""),
+  fetchedVia: text("fetched_via").notNull().default(""),
   publishedAt: text("published_at").notNull().default(""),
   collectedAt: text("collected_at").notNull(),
 }, (table) => [
   uniqueIndex("idx_mention_comments_source").on(table.mentionId, table.sourceCommentId),
   index("idx_mention_comments_brand_mention").on(table.brandId, table.mentionId),
+  index("idx_mention_comments_brand_platform_time").on(table.brandId, table.platform, table.publishedAt),
+  index("idx_mention_comments_brand_sentiment").on(table.brandId, table.sentiment, table.sentimentScore),
+]);
+
+export const socialCommentTargets = sqliteTable("social_comment_targets", {
+  mentionId: integer("mention_id").primaryKey(),
+  brandId: integer("brand_id").notNull(),
+  platform: text("platform").notNull().default("Instagram"),
+  mediaId: text("media_id").notNull(),
+  postUrl: text("post_url").notNull(),
+  reportedCount: integer("reported_count").notNull().default(0),
+  collectedCount: integer("collected_count").notNull().default(0),
+  cursor: text("cursor").notNull().default(""),
+  topLevelComplete: integer("top_level_complete", { mode: "boolean" }).notNull().default(false),
+  status: text("status").notNull().default("queued"),
+  pagesFetched: integer("pages_fetched").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("idx_social_comment_targets_brand_status").on(table.brandId, table.status, table.updatedAt)]);
+
+export const socialCommentReplyQueue = sqliteTable("social_comment_reply_queue", {
+  mentionId: integer("mention_id").notNull(),
+  brandId: integer("brand_id").notNull(),
+  mediaId: text("media_id").notNull(),
+  parentCommentId: text("parent_comment_id").notNull(),
+  reportedCount: integer("reported_count").notNull().default(0),
+  collectedCount: integer("collected_count").notNull().default(0),
+  cursor: text("cursor").notNull().default(""),
+  status: text("status").notNull().default("queued"),
+  pagesFetched: integer("pages_fetched").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  primaryKey({ columns: [table.mentionId, table.parentCommentId] }),
+  index("idx_social_comment_replies_brand_status").on(table.brandId, table.status, table.updatedAt),
 ]);

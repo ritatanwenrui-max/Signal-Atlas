@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { refreshPublicCommentAnalyses } from "./comments";
-import { collectMonidInstagram, countPendingMonidJobs, hasPendingMonidJobs, refreshSocialFollowerCounts } from "./monid";
+import { collectMonidInstagram, countPendingMonidJobs, hasPendingMonidJobs, queueInstagramCommentTarget, refreshSocialFollowerCounts } from "./monid";
 import { ensureDatabase, getActiveBrandForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 
@@ -202,6 +202,9 @@ async function upsertSocialMetrics(db: D1Database, brandId: number, mentionId: n
       JSON.stringify(metrics.matchedTerms), updatedAt).run();
   await db.prepare("UPDATE mentions SET engagement = ?, author = CASE WHEN ? != '' THEN ? ELSE author END WHERE id = ? AND brand_id = ?")
     .bind(candidate.engagement, metrics.authorUsername, metrics.authorUsername ? `@${metrics.authorUsername}` : metrics.authorName, mentionId, brandId).run();
+  if (candidate.platform === "Instagram") {
+    await queueInstagramCommentTarget(db, brandId, mentionId, metrics.postId, candidate.url, metrics.comments);
+  }
 }
 
 function retryDelay(error: unknown, failureCount: number) {

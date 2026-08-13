@@ -129,41 +129,9 @@ async function collectForMention(mention: MentionRow): Promise<Collection> {
   }
 }
 
-const positiveWords = ["喜欢", "支持", "期待", "创新", "不错", "很好", "看好", "有用", "厉害", "进步", "赞", "爱", "好玩", "interesting", "love", "great", "good", "support", "期待", "ชอบ", "ดี"];
-const negativeWords = ["垃圾", "恶心", "騙", "骗", "贵", "擔心", "担心", "风险", "危險", "危险", "违法", "噩梦", "問題", "问题", "不行", "反对", "反對", "太贵", "可怕", "离谱", "騙局", "骗局", "bad", "hate", "scam", "risk", "worst", "แพง", "แย่"];
-const stopwords = new Set(["这个", "那个", "一个", "什么", "怎么", "就是", "还是", "可以", "不是", "没有", "已经", "真的", "感觉", "觉得", "可能", "应该", "我们", "你们", "他们", "自己", "然后", "因为", "所以", "如果", "但是", "而且", "评论", "新闻", "公司", "品牌", "产品", "the", "and", "for", "with", "this", "that", "have", "from", "your", "just", "very", "about"]);
-
-function classify(text: string) {
-  const lower = text.toLowerCase();
-  const positive = positiveWords.filter((word) => lower.includes(word)).length;
-  const negative = negativeWords.filter((word) => lower.includes(word)).length;
-  if (positive && negative) return { sentiment: "混合", score: Math.round((positive - negative) / (positive + negative) * 100) };
-  if (positive) return { sentiment: "正面", score: Math.min(100, 25 + positive * 20) };
-  if (negative) return { sentiment: "负面", score: Math.max(-100, -25 - negative * 20) };
-  return { sentiment: "中性", score: 0 };
-}
-
-function keywordCounts(samples: CommentSample[], brandTerms: string[]) {
-  const counts = new Map<string, number>();
-  const excluded = brandTerms.map((term) => term.toLowerCase()).filter(Boolean);
-  for (const sample of samples) {
-    const text = sample.text.toLowerCase().replace(/https?:\/\/\S+/g, " ");
-    for (const token of text.match(/[a-z0-9][a-z0-9-]{2,}/g) ?? []) {
-      if (!stopwords.has(token) && !excluded.some((term) => term === token)) counts.set(token, (counts.get(token) ?? 0) + 1);
-    }
-    for (const sequence of text.match(/\p{Script=Han}{2,}/gu) ?? []) {
-      for (let index = 0; index < sequence.length - 1; index += 1) {
-        const token = sequence.slice(index, index + 2);
-        if (!stopwords.has(token) && !excluded.some((term) => term.includes(token))) counts.set(token, (counts.get(token) ?? 0) + 1);
-      }
-    }
-  }
-  return [...counts.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count || a.word.localeCompare(b.word)).slice(0, 35);
-}
-
 async function storeCollection(db: D1Database, brandId: number, mentionId: number, collection: Collection, brandTerms: string[]) {
   const capturedAt = new Date().toISOString();
-  const analyzed = collection.samples.map((sample) => ({ ...sample, ...classify(sample.text) }));
+  const analyzed = collection.samples.map((sample) => ({ ...sample, ...analyzeCommentText(sample.text) }));
   const counts = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   let score = 0;
   for (const item of analyzed) {
@@ -175,7 +143,7 @@ async function storeCollection(db: D1Database, brandId: number, mentionId: numbe
   }
   const sentiment = !analyzed.length ? "样本不足" : counts.positive > counts.negative && counts.positive >= counts.neutral ? "正面"
     : counts.negative > counts.positive && counts.negative >= counts.neutral ? "负面" : counts.positive && counts.negative ? "混合" : "中性";
-  const keywords = keywordCounts(collection.samples, brandTerms);
+  const keywords = keywordCounts(collection.samples.map((sample) => sample.text), brandTerms);
   await db.prepare(`INSERT INTO comment_analyses
     (mention_id, brand_id, adapter, status, reported_count, analyzed_count, positive_count, neutral_count, negative_count, mixed_count, sentiment, sentiment_score, keywords, last_error, last_collected_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -187,11 +155,13 @@ async function storeCollection(db: D1Database, brandId: number, mentionId: numbe
       counts.negative, counts.mixed, sentiment, analyzed.length ? Math.round(score / analyzed.length) : 0, JSON.stringify(keywords), collection.error ?? "", capturedAt).run();
   for (let index = 0; index < analyzed.length; index += 40) {
     const statements = analyzed.slice(index, index + 40).map((item) => db.prepare(`INSERT INTO mention_comments
-      (mention_id, brand_id, source_comment_id, content, sentiment, sentiment_score, likes, replies, published_at, collected_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (mention_id, brand_id, platform, source_comment_id, content, sentiment, sentiment_score, language, topic, keywords, likes, replies, published_at, collected_at, fetched_via)
+      VALUES (?, ?, '网页新闻', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '公开网页适配器')
       ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET content = excluded.content, sentiment = excluded.sentiment,
-        sentiment_score = excluded.sentiment_score, likes = excluded.likes, replies = excluded.replies, published_at = excluded.published_at, collected_at = excluded.collected_at`)
-      .bind(mentionId, brandId, item.id, item.text, item.sentiment, item.score, item.likes, item.replies, item.publishedAt, capturedAt));
+        sentiment_score = excluded.sentiment_score, language = excluded.language, topic = excluded.topic, keywords = excluded.keywords,
+        likes = excluded.likes, replies = excluded.replies, published_at = excluded.published_at, collected_at = excluded.collected_at`)
+      .bind(mentionId, brandId, item.id, item.text, item.sentiment, item.score, item.language, item.topic,
+        JSON.stringify(keywordCounts([item.text], brandTerms, 8)), item.likes, item.replies, item.publishedAt, capturedAt));
     if (statements.length) await db.batch(statements);
   }
 }
@@ -215,3 +185,4 @@ export async function refreshPublicCommentAnalyses(db: D1Database, brandId: numb
   }
   return { checkedArticles: rows.results.length, analyzedArticles, analyzedComments, warnings };
 }
+import { analyzeCommentText, keywordCounts } from "./text-analysis";

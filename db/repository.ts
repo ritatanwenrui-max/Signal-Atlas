@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { meaningfulTokens } from "./text-analysis";
 
 const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
@@ -154,6 +155,7 @@ const tables = [
   `CREATE TABLE IF NOT EXISTS monid_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     brand_id INTEGER NOT NULL,
+    mention_id INTEGER NOT NULL DEFAULT 0,
     run_id TEXT NOT NULL,
     stage TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'RUNNING',
@@ -213,14 +215,54 @@ const tables = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mention_id INTEGER NOT NULL,
     brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT '网页新闻',
     source_comment_id TEXT NOT NULL,
+    parent_comment_id TEXT NOT NULL DEFAULT '',
+    author_id TEXT NOT NULL DEFAULT '',
+    author_username TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    is_verified INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL,
     sentiment TEXT NOT NULL,
     sentiment_score INTEGER NOT NULL DEFAULT 0,
+    language TEXT NOT NULL DEFAULT '语言待确认',
+    topic TEXT NOT NULL DEFAULT '其他讨论',
+    keywords TEXT NOT NULL DEFAULT '[]',
     likes INTEGER NOT NULL DEFAULT 0,
     replies INTEGER NOT NULL DEFAULT 0,
+    comment_url TEXT NOT NULL DEFAULT '',
+    fetched_via TEXT NOT NULL DEFAULT '',
     published_at TEXT NOT NULL DEFAULT '',
     collected_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_comment_targets (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'Instagram',
+    media_id TEXT NOT NULL,
+    post_url TEXT NOT NULL,
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    collected_count INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '',
+    top_level_complete INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_comment_reply_queue (
+    mention_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    media_id TEXT NOT NULL,
+    parent_comment_id TEXT NOT NULL,
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    collected_count INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mention_id, parent_comment_id)
   )`,
 ] as const;
 
@@ -240,12 +282,17 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_tracked_entities_brand ON tracked_entities(brand_id, active)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_monid_jobs_run_id ON monid_jobs(run_id)",
   "CREATE INDEX IF NOT EXISTS idx_monid_jobs_brand_status ON monid_jobs(brand_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_monid_jobs_mention_stage ON monid_jobs(mention_id, stage, status)",
   "CREATE INDEX IF NOT EXISTS idx_social_metrics_brand_platform ON social_post_metrics(brand_id, platform)",
   "CREATE INDEX IF NOT EXISTS idx_social_metrics_author ON social_post_metrics(brand_id, author_username)",
   "CREATE INDEX IF NOT EXISTS idx_social_authors_brand_user_time ON social_author_snapshots(brand_id, username, captured_at)",
   "CREATE INDEX IF NOT EXISTS idx_comment_analyses_brand_collected ON comment_analyses(brand_id, last_collected_at)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_mention_comments_source ON mention_comments(mention_id, source_comment_id)",
   "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_mention ON mention_comments(brand_id, mention_id)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_platform_time ON mention_comments(brand_id, platform, published_at)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_sentiment ON mention_comments(brand_id, sentiment, sentiment_score)",
+  "CREATE INDEX IF NOT EXISTS idx_social_comment_targets_brand_status ON social_comment_targets(brand_id, status, updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_social_comment_replies_brand_status ON social_comment_reply_queue(brand_id, status, updated_at)",
 ] as const;
 
 export async function ensureDatabase() {
@@ -274,7 +321,7 @@ export async function loadDashboardData(userId = "") {
   const brand = await getActiveBrandForUser(db, userId);
   const brandId = Number(brand?.id ?? -1);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
       social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
       social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
@@ -303,6 +350,11 @@ export async function loadDashboardData(userId = "") {
       .bind(userId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
     db.prepare("SELECT stage, status, cost, error, started_at, completed_at FROM monid_jobs WHERE brand_id = ? ORDER BY id DESC LIMIT 6")
       .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
+    db.prepare(`SELECT
+      (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN ('CREATED','QUEUED','PENDING','READY','RUNNING')) +
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
+      .bind(brandId, brandId, brandId).first<{ count: number }>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -318,7 +370,7 @@ export async function loadDashboardData(userId = "") {
   const tiktokConfigured = storedCredentials.has("TikTok");
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
-  const monidPending = monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length;
+  const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
@@ -339,7 +391,6 @@ export async function loadDashboardData(userId = "") {
   const commentSentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   let commentsAnalyzed = 0;
   const sourceMap = new Map<string, { source: string; country: string; count: number; impact: number }>();
-  const stopwords = new Set(["the", "and", "for", "with", "from", "that", "this", "have", "will", "news", "brand", "company", "their", "about", "into", "after", "more", "latest", "报道", "新闻", "媒体", "公司", "品牌", "一个", "以及", "进行", "表示", "相关", "发布", "今日", "目前", "可以"]);
   const tracked = (entities.results as Array<Record<string, unknown>>).map((item) => String(item.value ?? "").toLowerCase());
   for (const row of mentionRows) {
     const country = String(row.source_country ?? "地区待确认");
@@ -368,16 +419,8 @@ export async function loadDashboardData(userId = "") {
     sourceStat.count += 1;
     sourceStat.impact = Math.max(sourceStat.impact, Number(row.impact ?? 0));
     sourceMap.set(source, sourceStat);
-    const text = `${String(row.title ?? "")} ${String(row.excerpt ?? "")} ${String(row.keywords ?? "")}`.toLowerCase();
-    for (const token of text.match(/[a-z0-9][a-z0-9-]{2,}/g) ?? []) {
-      if (!stopwords.has(token) && !tracked.some((term) => term === token)) wordMap.set(token, (wordMap.get(token) ?? 0) + 1);
-    }
-    for (const sequence of text.match(/\p{Script=Han}{2,}/gu) ?? []) {
-      for (let index = 0; index < sequence.length - 1; index += 1) {
-        const token = sequence.slice(index, index + 2);
-        if (!stopwords.has(token) && !tracked.some((term) => term.includes(token))) wordMap.set(token, (wordMap.get(token) ?? 0) + 1);
-      }
-    }
+    const text = `${String(row.title ?? "")} ${String(row.excerpt ?? "")} ${String(row.keywords ?? "")}`;
+    for (const token of meaningfulTokens(text, tracked)) wordMap.set(token, (wordMap.get(token) ?? 0) + 1);
     commentsAnalyzed += Number(row.comment_analyzed_count ?? 0);
     commentSentiment.positive += Number(row.comment_positive_count ?? 0);
     commentSentiment.neutral += Number(row.comment_neutral_count ?? 0);
@@ -385,11 +428,17 @@ export async function loadDashboardData(userId = "") {
     commentSentiment.mixed += Number(row.comment_mixed_count ?? 0);
     try {
       const commentKeywords = JSON.parse(String(row.comment_keywords ?? "[]")) as Array<{ word?: string; count?: number }>;
+      const cleanedRowKeywords = new Map<string, number>();
       for (const keyword of commentKeywords) {
         const word = String(keyword.word ?? "").trim();
         const count = Number(keyword.count ?? 0);
-        if (word && count > 0) commentWordMap.set(word, (commentWordMap.get(word) ?? 0) + count);
+        if (!word || count <= 0) continue;
+        for (const token of meaningfulTokens(word, tracked)) {
+          cleanedRowKeywords.set(token, (cleanedRowKeywords.get(token) ?? 0) + count);
+          commentWordMap.set(token, (commentWordMap.get(token) ?? 0) + count);
+        }
       }
+      row.comment_keywords = JSON.stringify([...cleanedRowKeywords.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 35));
     } catch { /* Older rows may not contain JSON yet. */ }
   }
   const sourceRows = mediaSources.results as Array<Record<string, unknown>>;
@@ -424,9 +473,9 @@ export async function loadDashboardData(userId = "") {
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Instagram 公共搜索（Monid）",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
         pending: monidPending, retryAt: monidHealth?.retry_after ?? "", lastError: monidHealth?.last_error ?? "",
-        detail: !monidConfigured ? "配置 Monid API Key 后，按品牌词搜索公开帖子并补全作者与互动数据"
+        detail: !monidConfigured ? "配置 Monid API Key 后，按品牌词搜索公开帖子，并分页采集公开评论与回复"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
-          : monidPending ? `${monidPending} 个任务采集中，页面会自动回收结果` : "普通文字关键词搜帖 · 作者粉丝数 · 点赞、评论、转发与播放量" },
+          : monidPending ? `${monidPending} 个采集步骤处理中；包含搜帖、评论与回复分页` : "普通文字关键词搜帖 · 作者与互动 · 全量公开评论及回复归档" },
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
       { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },

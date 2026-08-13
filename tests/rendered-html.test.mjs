@@ -94,26 +94,55 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
 });
 
-test("Monid runs Instagram keyword searches asynchronously and archives social metrics", async () => {
-  const [monid, sync, schema, repository] = await Promise.all([
-    source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"),
+test("Monid searches Instagram and paginates every discovered post's public comments and replies", async () => {
+  const [monid, sync, schema, repository, commentsRoute, page] = await Promise.all([
+    source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/api/comments/route.ts"), source("app/page.tsx"),
   ]);
   assert.match(monid, /api\.monid\.ai/);
   assert.match(monid, /instagram-hashtag-scraper/);
   assert.match(monid, /keywordSearch: true/);
   assert.match(monid, /instagram-profile-scraper/);
   assert.match(monid, /GET|\/v1\/runs\//);
-  assert.match(monid, /resultsLimit: 10/);
+  assert.match(monid, /resultsLimit: 50/);
   assert.match(monid, /matchedTerms/);
+  assert.match(monid, /fetch_post_comments_v2/);
+  assert.match(monid, /fetch_comment_replies/);
+  assert.match(monid, /next_min_id/);
+  assert.match(monid, /next_min_child_cursor/);
+  assert.match(monid, /queueInstagramCommentTarget/);
+  assert.match(monid, /COMMENT_JOBS_PER_CYCLE = 4/);
   assert.match(sync, /collectMonidInstagram/);
   assert.match(sync, /upsertSocialMetrics/);
+  assert.match(sync, /queueInstagramCommentTarget/);
   assert.match(schema, /socialPostMetrics/);
   assert.match(schema, /socialAuthorSnapshots/);
   assert.match(schema, /monidJobs/);
+  assert.match(schema, /socialCommentTargets/);
+  assert.match(schema, /socialCommentReplyQueue/);
   assert.match(repository, /Instagram 公共搜索（Monid）/);
   assert.match(monid, /CREATED.*QUEUED.*PENDING.*READY.*RUNNING/);
   assert.match(sync, /earlyMonidPending/);
-  assert.match(repository, /页面会自动回收结果/);
+  assert.match(repository, /全量公开评论及回复归档/);
+  assert.match(commentsRoute, /COMMENT ARCHIVE|mention_comments/);
+  assert.match(commentsRoute, /topPosts/);
+  assert.match(commentsRoute, /riskComments/);
+  assert.match(page, /社媒评论/);
+  assert.match(page, /评论明细档案/);
+  assert.match(page, /帖子评论抓取进度/);
+});
+
+test("word clouds use multilingual segmentation and remove Chinese and English filler words", async () => {
+  const [analysis, repository, comments] = await Promise.all([
+    source("db/text-analysis.ts"), source("db/repository.ts"), source("db/comments.ts"),
+  ]);
+  assert.match(analysis, /Intl\.Segmenter/);
+  assert.match(analysis, /chineseStopwords/);
+  assert.match(analysis, /englishStopwords/);
+  assert.match(analysis, /"的"/);
+  assert.match(analysis, /"the"/);
+  assert.match(analysis, /meaningfulTokens/);
+  assert.match(repository, /meaningfulTokens/);
+  assert.match(comments, /keywordCounts/);
 });
 
 test("public news comments are collected, archived, and analyzed without inventing samples", async () => {
