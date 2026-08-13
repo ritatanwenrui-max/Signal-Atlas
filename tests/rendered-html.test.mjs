@@ -7,6 +7,7 @@ async function source(path) { return readFile(new URL(path, root), "utf8"); }
 
 test("dashboard provides lifetime archive, event analytics, maps, and shared team setup", async () => {
   const page = await source("app/page.tsx");
+  const report = await source("app/report-view.tsx");
   assert.match(page, /新闻档案/);
   assert.match(page, /有史以来全部记录/);
   assert.match(page, /导出 CSV/);
@@ -20,7 +21,9 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
   assert.match(page, /登录后会直接进入同一个团队工作区/);
   assert.match(page, /全球报道热力分布/);
-  assert.match(page, /world-map-detailed\.svg/);
+  assert.match(page, /world-map-flat\.svg/);
+  assert.match(report, /自动舆情分析报告/);
+  assert.match(report, /导出 PDF/);
   assert.match(page, /getElementById\(code\.toLowerCase\(\)\)/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
@@ -198,6 +201,17 @@ test("public news comments are collected, archived, and analyzed without inventi
   assert.match(page, /评论区情绪/);
   assert.match(page, /评论区关键词词云/);
   assert.match(page, /页面显示的评论总数不会被冒充为已分析样本/);
+});
+
+test("workspace exclusion terms immediately hide archived mentions and their comments", async () => {
+  const repository = await source("db/repository.ts");
+  const comments = await source("app/api/comments/route.ts");
+  const sync = await source("db/news-sync.ts");
+  assert.match(repository, /mentionContainsExcludedTerm/);
+  assert.match(repository, /visiblePropagationEdges/);
+  assert.match(comments, /mentionOnlyWhere/);
+  assert.match(comments, /COALESCE\(c\.content, ''\)/);
+  assert.match(sync, /exclusions\.some\(\(term\) => body\.includes/);
 });
 
 test("worker runs the hybrid monitor hourly", async () => {

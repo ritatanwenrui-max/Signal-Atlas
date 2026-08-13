@@ -377,6 +377,8 @@ export async function runNewsSync(force = false, userId = "") {
   const entities = await db.prepare("SELECT type, value, active FROM tracked_entities WHERE brand_id = ? AND active = 1 ORDER BY id ASC")
     .bind(brandId).all<TrackedEntity>();
   const terms = termsFrom(entities.results);
+  const entityExclusions = entities.results.filter((item) => item.type === "排除词").map((item) => item.value.trim()).filter(Boolean);
+  const scopeBrand = { ...brand, exclude_terms: [...splitProfileTerms(brand.exclude_terms), ...entityExclusions].join("\n") };
   if (!terms.length) return { skipped: true, reason: "brand_not_configured", inserted: 0, found: 0 };
   const now = new Date().toISOString();
   const lockedUntil = new Date(Date.now() + 3 * 60 * 1000).toISOString();
@@ -451,11 +453,11 @@ export async function runNewsSync(force = false, userId = "") {
         }
       }
 
-      const scopedDiscovery = discoveryCandidates.filter((candidate) => matchesBrandScope(candidate, terms, brand));
+      const scopedDiscovery = discoveryCandidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand));
       await registerMediaSources(db, brandId, scopedDiscovery);
       const crawler = await crawlMediaSources(db, brandId, terms);
       await markProviderHealthy(db, brandId, "Free media crawler", attemptedAt);
-      const candidates = [...scopedDiscovery, ...crawler.candidates.filter((candidate) => matchesBrandScope(candidate, terms, brand))];
+      const candidates = [...scopedDiscovery, ...crawler.candidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand))];
       const existing = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source, source_country, content_country, language, published_at, parent_url
         FROM mentions WHERE brand_id = ? ORDER BY published_at DESC LIMIT 5000`).bind(brandId).all<ExistingMention>();
       const known = [...existing.results];

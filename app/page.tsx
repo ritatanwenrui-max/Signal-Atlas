@@ -1,6 +1,7 @@
 "use client";
 
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReportView from "./report-view";
 
 type Mention = {
   id: number; title: string; url: string; source: string; platform: string; source_country: string; content_country: string;
@@ -69,7 +70,7 @@ const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neu
 const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, viewer: { authenticated: false }, workspace: null };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
-  ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["settings", "品牌与团队", "07"],
+  ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"],
 ] as const;
 const platformCatalog = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"] as const;
 const platformVisuals = [["网页新闻", "web"], ["Instagram", "instagram"], ["Facebook", "facebook"], ["TikTok", "tiktok"], ["X", "x"], ["YouTube", "youtube"]] as const;
@@ -250,6 +251,7 @@ export default function Home() {
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
           {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} />}
           {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
+          {view === "reports" && <ReportView brand={data.brand} workspaceName={data.workspace?.name ?? data.brand.name} mentions={data.mentions} analytics={data.analytics} clusters={clusters} countryCodes={countryCode} />}
           {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
         </>}
       </div>
@@ -316,26 +318,21 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   function paintCountries() {
     const document = mapRef.current?.contentDocument;
     if (!document) return;
-    for (const node of document.querySelectorAll<SVGElement>(".landxx")) {
-      node.style.fill = "#d9ddd2";
+    for (const node of document.querySelectorAll<SVGPathElement>("path")) {
+      node.style.fill = "#d9ddd4";
+      node.style.stroke = "#ffffff";
+      node.style.strokeWidth = ".65";
       node.style.transition = "fill .18s ease";
     }
-    const ordered = [...placed].sort((left, right) => Number(countryCode[right.country] === "CN") - Number(countryCode[left.country] === "CN"));
-    for (const item of ordered) {
+    for (const item of placed) {
       const code = countryCode[item.country];
       const node = document.getElementById(code.toLowerCase()) as unknown as SVGElement | null;
       if (!node) continue;
       const heat = item.count / max;
       const palette = ["#dce7be", "#bed288", "#91ad57", "#627f34", "#2f461c"];
       const color = palette[Math.min(palette.length - 1, Math.max(0, Math.ceil(heat * palette.length) - 1))];
-      node.style.fill = color;
-      for (const child of node.querySelectorAll<SVGElement>(".landxx")) child.style.fill = color;
-      if (code === "CN") for (const childCode of ["tw", "hk", "mo"]) {
-        const childRegion = document.getElementById(childCode) as unknown as SVGElement | null;
-        if (!childRegion) continue;
-        childRegion.style.fill = "#d9ddd2";
-        for (const child of childRegion.querySelectorAll<SVGElement>(".landxx")) child.style.fill = "#d9ddd2";
-      }
+      const shapes = node.tagName.toLowerCase() === "path" ? [node] : [...node.querySelectorAll<SVGElement>("path")];
+      for (const shape of shapes) shape.style.fill = color;
       node.style.cursor = "help";
       const previous = node.querySelector("title[data-signal-atlas]");
       previous?.remove();
@@ -348,9 +345,10 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   useEffect(() => { paintCountries(); });
   return <div className="world-map-wrap">
     <div className="world-map" aria-label="按国家地区显示新闻量的世界热力图">
-      <object ref={mapRef} className="world-map-base" data="/world-map-detailed.svg" type="image/svg+xml" aria-label="国家边界与报道强度" onLoad={paintCountries} />
+      <object ref={mapRef} className="world-map-base" data="/world-map-flat.svg" type="image/svg+xml" aria-label="平面国家边界与报道强度" onLoad={paintCountries} />
     </div>
     <div className="heat-legend"><span>报道较少</span><i /><i /><i /><i /><span>报道最多</span></div>
+    <a className="map-attribution" href="https://github.com/flekschas/simple-world-map" target="_blank" rel="noreferrer">平面地图 · CC BY-SA 3.0</a>
     {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
   </div>;
 }
@@ -610,11 +608,12 @@ function SettingsView({ brand, connectors, entities, workspace, submit }: { bran
   const officialSocialConfigured = connectors.some((item) => ["Meta / Instagram", "TikTok"].includes(item.provider ?? "") && item.configured);
   async function handleEntitySubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; await submit({ action: "addEntity", ...Object.fromEntries(new FormData(form).entries()) }, "监测词已加入团队词典"); form.reset(); }
   async function removeEntity(item: Entity) { if (!window.confirm(`确认删除词条“${item.value}”？`)) return; await submit({ action: "deleteEntity", id: item.id }, "词条已从团队词典删除"); }
-  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "团队品牌监测档案已更新"); }
+  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "定位规则已更新；排除词已同步应用到档案、分析和评论舆情"); }
   return <div className="settings-page">
     <TeamWorkspacePanel workspace={workspace} submit={submit} />
     <div className="settings-grid">
       <section className="surface settings-main"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>团队品牌监测档案与同名消歧</h3></div><span className="permission-chip">{workspace.canManage ? "管理员可编辑" : "仅管理员可修改"}</span></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input disabled={!workspace.canManage} name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input disabled={!workspace.canManage} name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea disabled={!workspace.canManage} name="aliases" rows={3} defaultValue={brand.aliases} /></label><label className="field"><span>匹配模式</span><select disabled={!workspace.canManage} name="matchMode" defaultValue={brand.match_mode || "precise"}><option value="precise">精准：品牌词 + 身份锚点</option><option value="balanced">平衡：长品牌名可单独命中</option><option value="broad">宽泛：仅品牌词即可</option></select></label><label className="field"><span>官方社媒账号</span><textarea disabled={!workspace.canManage} name="officialAccounts" rows={3} defaultValue={brand.official_accounts} placeholder={'每行一个，例如：@brand_official'} /></label><label className="field full"><span>身份锚点</span><textarea disabled={!workspace.canManage} name="scopeTerms" rows={4} defaultValue={brand.scope_terms} placeholder={'每行一个：产品名、创始人、核心技术、独特口号、行业定位'} /><small>精准模式下，候选内容必须同时出现品牌名/别名和至少一个锚点；官网或官方账号内容直接通过。</small></label><label className="field full"><span>排除词</span><textarea disabled={!workspace.canManage} name="excludeTerms" rows={3} defaultValue={brand.exclude_terms} placeholder={'每行一个：同名公司的行业、产品、城市或人名'} /></label>{workspace.canManage && <button className="secondary-button">保存定位规则</button>}</form><p className="form-warning">这套定位规则、历史档案、事件、传播链路和分析结果由整个团队共同使用。</p>
+        <p className="form-warning exclusion-note">排除词保存后会立即从新闻档案、事件与舆情分析、评论舆情和导出报告中隐藏匹配结果；删除排除词后可恢复显示，原始档案不会被永久删除。</p>
         <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => { const core = ["品牌", "别名", "官网域名"].includes(item.type); return <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i>{workspace.canEdit && (core ? <em title="请在上方品牌档案中修改">档案管理</em> : <button type="button" onClick={() => void removeEntity(item)} aria-label={`删除词条 ${item.value}`}>删除</button>)}</div>; })}</div>
       </section>
       <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索五个平台" : "由管理员在来源覆盖页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>

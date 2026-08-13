@@ -13,6 +13,14 @@ function integerParam(value: string | null, fallback: number, min: number, max: 
   return Number.isInteger(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 }
 
+function profileTerms(value: unknown) {
+  return String(value ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function escapedLikeTerm(value: string) {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
 export async function GET(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "请先登录后查看评论舆情" }, { status: 401 });
@@ -22,6 +30,8 @@ export async function GET(request: Request) {
   const brand = await getActiveBrandForUser(db, user.userId);
   const brandId = Number(brand?.id ?? 0);
   if (!brandId) return Response.json({ error: "请先创建品牌监测档案" }, { status: 400 });
+  const entityExclusions = await db.prepare("SELECT value FROM tracked_entities WHERE brand_id = ? AND type = '排除词' AND active = 1")
+    .bind(brandId).all<{ value: string }>();
 
   const url = new URL(request.url);
   const page = integerParam(url.searchParams.get("page"), 1, 1, 10_000);
@@ -44,7 +54,16 @@ export async function GET(request: Request) {
     const needle = `%${query}%`;
     binds.push(needle, needle, needle, needle);
   }
+  const exclusions = [...new Set([...profileTerms(brand?.exclude_terms), ...entityExclusions.results.flatMap((item) => profileTerms(item.value))])];
+  const mentionText = "COALESCE(m.title, '') || ' ' || COALESCE(m.excerpt, '') || ' ' || COALESCE(m.summary, '') || ' ' || COALESCE(m.source, '') || ' ' || COALESCE(m.author, '') || ' ' || COALESCE(m.url, '')";
+  for (const term of exclusions) {
+    clauses.push(`(${mentionText} || ' ' || COALESCE(c.content, '')) NOT LIKE ? ESCAPE '\\'`);
+    binds.push(`%${escapedLikeTerm(term)}%`);
+  }
   const where = clauses.join(" AND ");
+  const mentionOnlyClauses = exclusions.map(() => `(${mentionText}) NOT LIKE ? ESCAPE '\\'`);
+  const mentionOnlyWhere = mentionOnlyClauses.length ? ` AND ${mentionOnlyClauses.join(" AND ")}` : "";
+  const mentionOnlyBinds = exclusions.map((term) => `%${escapedLikeTerm(term)}%`);
   const ordering = sort === "liked" ? "c.likes DESC, c.published_at DESC" : sort === "risk" ? "c.sentiment_score ASC, c.likes DESC, c.published_at DESC" : "c.published_at DESC, c.id DESC";
 
   const summarySql = `SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(NULLIF(c.author_id, ''), NULLIF(c.author_username, ''))) AS authors,
@@ -89,16 +108,17 @@ export async function GET(request: Request) {
     db.prepare(topicSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(topPostsSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(keywordSql).bind(...binds).all<{ keywords: string }>(),
-    db.prepare(`SELECT target.*, mentions.title AS post_title, mentions.source AS post_source, mentions.url AS mention_url
-      FROM social_comment_targets target JOIN mentions ON mentions.id = target.mention_id
-      WHERE target.brand_id = ? ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2
+    db.prepare(`SELECT target.*, m.title AS post_title, m.source AS post_source, m.url AS mention_url
+      FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
+      WHERE target.brand_id = ?${mentionOnlyWhere} ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2
         WHEN 'retrying' THEN 3 WHEN 'blocked' THEN 4 WHEN 'unavailable' THEN 5 WHEN 'error' THEN 6 ELSE 7 END,
-      target.updated_at DESC LIMIT 20`).bind(brandId).all<Record<string, unknown>>(),
+      target.updated_at DESC LIMIT 20`).bind(brandId, ...mentionOnlyBinds).all<Record<string, unknown>>(),
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
-      FROM social_comment_targets WHERE brand_id = ?`).bind(brandId).first<{ reported: number; collected: number }>(),
+      FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
+      WHERE target.brand_id = ?${mentionOnlyWhere}`).bind(brandId, ...mentionOnlyBinds).first<{ reported: number; collected: number }>(),
     db.prepare(`SELECT c.*, m.title AS post_title, m.url AS post_url FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-      WHERE c.brand_id = ? AND c.sentiment IN ('负面','混合')
-      ORDER BY c.sentiment_score ASC, c.likes DESC, c.published_at DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
+      WHERE ${where} AND c.sentiment IN ('负面','混合')
+      ORDER BY c.sentiment_score ASC, c.likes DESC, c.published_at DESC LIMIT 8`).bind(...binds).all<Record<string, unknown>>(),
   ]);
 
   const wordCounts = new Map<string, number>();

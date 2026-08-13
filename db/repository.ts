@@ -387,6 +387,17 @@ export async function getWorkspaceAccessForUser(db: D1Database, userId: string) 
     ORDER BY workspace_members.joined_at DESC LIMIT 1`).bind(userId).first<Record<string, unknown>>();
 }
 
+function profileTerms(value: unknown) {
+  return String(value ?? "").split(/[\n,，]/).map((item) => item.trim().normalize("NFKC").toLocaleLowerCase()).filter(Boolean);
+}
+
+function mentionContainsExcludedTerm(row: Record<string, unknown>, exclusions: string[]) {
+  if (!exclusions.length) return false;
+  const searchable = [row.title, row.excerpt, row.summary, row.source, row.author, row.url, row.keywords,
+    row.social_author_username, row.social_author_name].map((value) => String(value ?? "")).join(" ").normalize("NFKC").toLocaleLowerCase();
+  return exclusions.some((term) => searchable.includes(term));
+}
+
 export async function loadDashboardData(userId = "") {
   await ensureDatabase();
   const db = env.DB;
@@ -457,7 +468,15 @@ export async function loadDashboardData(userId = "") {
   const retryAt = newsLimited
     ? [eventRegistryHealth?.retry_after, gdeltHealth?.retry_after].filter(Boolean).sort()[0] ?? ""
     : "";
-  const mentionRows = mentions.results as Array<Record<string, unknown>>;
+  const entityRows = entities.results as Array<Record<string, unknown>>;
+  const exclusions = [...new Set([
+    ...profileTerms(brand?.exclude_terms),
+    ...entityRows.filter((item) => String(item.type) === "排除词" && Number(item.active ?? 1) === 1).flatMap((item) => profileTerms(item.value)),
+  ])];
+  const mentionRows = (mentions.results as Array<Record<string, unknown>>).filter((row) => !mentionContainsExcludedTerm(row, exclusions));
+  const visibleMentionIds = new Set(mentionRows.map((row) => Number(row.id)));
+  const visiblePropagationEdges = (propagationEdges.results as Array<Record<string, unknown>>).filter((edge) =>
+    visibleMentionIds.has(Number(edge.from_mention_id)) && visibleMentionIds.has(Number(edge.to_mention_id)));
   const countryMap = new Map<string, { country: string; count: number; positive: number; neutral: number; negative: number; risk: number; engagement: number; latest: string }>();
   const sentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   const emotionMap = new Map<string, number>();
@@ -467,7 +486,7 @@ export async function loadDashboardData(userId = "") {
   const commentSentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   let commentsAnalyzed = 0;
   const sourceMap = new Map<string, { source: string; country: string; count: number; impact: number }>();
-  const tracked = (entities.results as Array<Record<string, unknown>>).map((item) => String(item.value ?? "").toLowerCase());
+  const tracked = entityRows.map((item) => String(item.value ?? "").toLowerCase());
   for (const row of mentionRows) {
     const country = String(row.source_country ?? "地区待确认");
     const tone = String(row.sentiment ?? "中性");
@@ -540,7 +559,7 @@ export async function loadDashboardData(userId = "") {
     brand,
     providerHealth: providerHealth.results.map((item) => ({ ...item, provider: item.provider.replace(/^\d+:/, "") })),
     mediaSources: sourceRows,
-    propagationEdges: propagationEdges.results,
+    propagationEdges: visiblePropagationEdges,
     connectorCredentials: credentialRows.results,
     workspace: workspace ? {
       id: workspaceId,
@@ -561,7 +580,7 @@ export async function loadDashboardData(userId = "") {
       commentSentiment,
       commentsAnalyzed,
       sources: [...sourceMap.values()].sort((a, b) => b.count - a.count || b.impact - a.impact).slice(0, 12),
-      crossBorderEdges: (propagationEdges.results as Array<Record<string, unknown>>).filter((item) => Number(item.cross_border) === 1).length,
+      crossBorderEdges: visiblePropagationEdges.filter((item) => Number(item.cross_border) === 1).length,
       archivedTotal: mentionRows.length,
     },
     connectors: [
