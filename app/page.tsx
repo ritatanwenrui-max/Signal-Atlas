@@ -467,7 +467,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   return <div className="comments-page">
     <section className="comment-hero panel-dark">
       <div><p className="eyebrow">SOCIAL COMMENT INTELLIGENCE</p><h2>{brand.name} 社媒评论舆情</h2><p>公开帖子评论与楼中楼回复会被分页归档，再按情绪、主题、时间、帖子和参与者交叉分析。</p></div>
-      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : data?.targets.some((item) => item.status !== "complete") ? "持续采集中" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
+      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => item.status !== "complete") ? "持续采集中" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
     </section>
 
     <section className="comment-kpis surface">

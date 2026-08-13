@@ -110,6 +110,7 @@ test("Monid searches Instagram and paginates every discovered post's public comm
   assert.match(monid, /next_min_id/);
   assert.match(monid, /next_min_child_cursor/);
   assert.match(monid, /queueInstagramCommentTarget/);
+  assert.doesNotMatch(monid, /reportedCount === 0/);
   assert.match(monid, /COMMENT_JOBS_PER_CYCLE = 4/);
   assert.match(sync, /collectMonidInstagram/);
   assert.match(sync, /upsertSocialMetrics/);

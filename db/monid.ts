@@ -505,7 +505,7 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
 
 export async function queueInstagramCommentTarget(db: D1Database, brandId: number, mentionId: number, rawMediaId: string, postUrlValue: string, reportedCount: number) {
   const mediaId = rawMediaId.match(/^\d{10,}/)?.[0] ?? "";
-  if (!mediaId || reportedCount === 0) return;
+  if (!mediaId) return;
   const count = Math.max(0, reportedCount);
   const now = new Date().toISOString();
   await db.prepare(`INSERT INTO social_comment_targets
@@ -522,7 +522,7 @@ export async function queueInstagramCommentTarget(db: D1Database, brandId: numbe
 async function registerHistoricalCommentTargets(db: D1Database, brandId: number) {
   const posts = await db.prepare(`SELECT metrics.mention_id, metrics.post_id, metrics.comments, mentions.url
     FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
-    WHERE metrics.brand_id = ? AND metrics.platform = 'Instagram' AND metrics.post_id != '' AND metrics.comments != 0`)
+    WHERE metrics.brand_id = ? AND metrics.platform = 'Instagram' AND metrics.post_id != ''`)
     .bind(brandId).all<{ mention_id: number; post_id: string; comments: number; url: string }>();
   for (const post of posts.results) {
     await queueInstagramCommentTarget(db, brandId, post.mention_id, post.post_id, post.url, Number(post.comments));
