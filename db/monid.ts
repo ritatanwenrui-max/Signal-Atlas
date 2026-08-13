@@ -372,7 +372,16 @@ async function storeSocialComments(db: D1Database, brandId: number, mentionId: n
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Monid', ?, ?)
         ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET parent_comment_id = excluded.parent_comment_id,
           author_id = excluded.author_id, author_username = excluded.author_username, author_name = excluded.author_name,
-          is_verified = excluded.is_verified, content = excluded.content,
+          is_verified = excluded.is_verified,
+          translation_en = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_en END,
+          translation_status = CASE WHEN mention_comments.content != excluded.content THEN 'pending' ELSE mention_comments.translation_status END,
+          translation_source_hash = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_source_hash END,
+          translation_provider = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_provider END,
+          translation_error = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_error END,
+          translation_attempts = CASE WHEN mention_comments.content != excluded.content THEN 0 ELSE mention_comments.translation_attempts END,
+          translation_next_retry_at = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_next_retry_at END,
+          translated_at = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translated_at END,
+          content = excluded.content,
           sentiment = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment ELSE excluded.sentiment END,
           emotion = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.emotion ELSE excluded.emotion END,
           sentiment_score = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment_score ELSE excluded.sentiment_score END,
@@ -578,10 +587,20 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
     db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' AND title LIKE '指定帖子%' THEN ? ELSE title END,
       source = CASE WHEN ? != '' THEN '@' || ? ELSE source END,
       author = CASE WHEN ? != '' THEN '@' || ? ELSE author END,
-      excerpt = CASE WHEN ? != '' AND excerpt = '' THEN ? ELSE excerpt END
+      excerpt = CASE WHEN ? != '' AND excerpt = '' THEN ? ELSE excerpt END,
+      translation_en = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_en END,
+      translation_status = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN 'pending' ELSE translation_status END,
+      translation_source_hash = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_source_hash END,
+      translation_provider = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_provider END,
+      translation_error = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_error END,
+      translation_attempts = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN 0 ELSE translation_attempts END,
+      translation_next_retry_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_next_retry_at END,
+      translated_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translated_at END
       WHERE brand_id = ? AND id = ?`)
       .bind(details.caption, details.caption.slice(0, 180), details.username, details.username, details.username, details.username,
-        details.caption, details.caption.slice(0, 600), brandId, descriptor.mentionId),
+        details.caption, details.caption.slice(0, 600), details.caption, details.caption, details.caption, details.caption,
+        details.caption, details.caption, details.caption, details.caption,
+        brandId, descriptor.mentionId),
   ]);
 }
 
@@ -626,7 +645,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
   if (providerStatus >= 400) {
-    const message = run.providerResponse?.error?.message ?? `Instagram 数据端点 HTTP ${providerStatus}`;
+    const message = run.providerResponse?.error?.message ?? `社交媒体数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
     await markCommentJobError(db, brandId, job, message, providerStatus === 401 || providerStatus === 403 ? "blocked" : providerStatus >= 500 ? "retrying" : "unavailable");
     if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
@@ -776,7 +795,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
       cursor: target.cursor, page: target.pages_fetched + 1, commentAdapter };
     let run: MonidRun;
     let stage: "resolve_post" | "post_comments" = "post_comments";
-    if (target.platform === "Instagram" && !/^\d{10,}$/.test(target.media_id)) {
+    if (target.platform === "Instagram" && commentAdapter === "v1" && !/^\d{10,}$/.test(target.media_id)) {
       stage = "resolve_post";
       run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
     } else if (target.platform === "YouTube") {
@@ -847,7 +866,7 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   const candidates: MonitoringCandidate[] = [];
   await registerHistoricalCommentTargets(db, brandId);
   const pending = await db.prepare(`SELECT id, run_id, mention_id, stage, status, terms FROM monid_jobs
-    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 4`)
+    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 8`)
     .bind(brandId).all<MonidJob>();
   const pendingSearchStages = new Set(pending.results.filter((job) => job.stage.startsWith("search")).map((job) => job.stage));
   const polled = await Promise.all(pending.results.map(async (job) => ({ job, run: await getRun(apiKey, job.run_id) })));

@@ -7,6 +7,8 @@ type Mention = {
   id: number; title: string; url: string; source: string; platform: string; source_country: string; content_country: string;
   language: string; sentiment: string; risk: number; impact: number; summary: string; cluster_key: string; parent_url: string;
   relation: string; engagement: number; excerpt: string; author: string; provider: string; discovered_via: string;
+  translation_en: string; translation_status: string; translation_provider: string; translation_error: string;
+  translation_attempts: number; translation_next_retry_at: string; translated_at: string;
   content_hash: string; word_count: number; sentiment_score: number; topics: string; keywords: string; first_seen_at: string;
   archived_at: string; published_at: string; location_confidence: number; location_method: string; emotion: string;
   social_post_id?: string; social_author_id?: string; social_author_username?: string; social_author_name?: string;
@@ -49,6 +51,8 @@ type DashboardData = {
 type SocialCommentRow = {
   id: number; mention_id: number; platform: string; source_comment_id: string; parent_comment_id: string; author_id: string;
   author_username: string; author_name: string; is_verified: number; content: string; sentiment: string; emotion: string; sentiment_score: number;
+  translation_en: string; translation_status: string; translation_provider: string; translation_error: string;
+  translation_attempts: number; translation_next_retry_at: string; translated_at: string;
   language: string; topic: string; likes: number; replies: number; comment_url: string; published_at: string; collected_at: string;
   post_title: string; post_url: string; post_source?: string; post_author?: string; post_author_followers?: number;
   model_sentiment?: string; model_emotion?: string; model_topic?: string; model_score?: number;
@@ -81,6 +85,15 @@ const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"],
 ] as const;
+type ViewId = (typeof nav)[number][0];
+const routeByView: Record<ViewId, string> = {
+  overview: "/overview", archive: "/archive", propagation: "/propagation", analytics: "/analytics",
+  comments: "/comments", coverage: "/coverage", reports: "/reports", settings: "/settings",
+};
+function viewFromPath(pathname: string): ViewId {
+  const segment = pathname.split("/").filter(Boolean)[0] as ViewId | undefined;
+  return segment && Object.hasOwn(routeByView, segment) ? segment : "overview";
+}
 const platformCatalog = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"] as const;
 const platformVisuals = [["网页新闻", "web"], ["Instagram", "instagram"], ["Facebook", "facebook"], ["TikTok", "tiktok"], ["X", "x"], ["YouTube", "youtube"]] as const;
 function platformSlug(value: string) { return platformVisuals.find(([label]) => label === value)?.[1] ?? "other"; }
@@ -116,8 +129,24 @@ function parsedCommentKeywords(value?: string) {
   catch { return []; }
 }
 
+function translationNotNeeded(value?: string) {
+  const normalized = (value || "").trim().toLocaleLowerCase().replaceAll("_", "-");
+  return Boolean(value?.includes("中文")) || ["zh", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant", "chinese", "英文", "英语", "en", "en-us", "en-gb", "english"].includes(normalized);
+}
+
+function EnglishTranslation({ value, status, language, error, nextRetryAt, provider }: {
+  value?: string; status?: string; language?: string; error?: string; nextRetryAt?: string; provider?: string;
+}) {
+  if (status === "skipped" || translationNotNeeded(language)) return null;
+  if (value?.trim()) return <div className="english-translation"><span>EN</span><p>{value.trim()}</p>{provider && <small>{provider}</small>}</div>;
+  const retry = nextRetryAt ? ` · ${formatDate(nextRetryAt, true)} 后重试` : "";
+  const label = status === "translating" ? "正在翻译为英文…" : status === "blocked" ? "等待独立翻译队列接管"
+    : status === "error" ? `翻译失败：${error || "服务暂时不可用"}${retry}` : "等待英文翻译";
+  return <div className={`english-translation translation-${status || "pending"}`}><span>EN</span><p>{label}</p></div>;
+}
+
 export default function Home() {
-  const [view, setView] = useState("overview");
+  const [view, setView] = useState<ViewId>("overview");
   const [data, setData] = useState<DashboardData>(emptyData);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -128,6 +157,27 @@ export default function Home() {
   const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const monidPollAttempts = useRef(0);
+
+  function navigateTo(nextView: ViewId, replace = false) {
+    setView(nextView);
+    const path = routeByView[nextView];
+    if (window.location.pathname !== path) window.history[replace ? "replaceState" : "pushState"]({ view: nextView }, "", path);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    const syncRoute = () => setView(viewFromPath(window.location.pathname));
+    const initialView = viewFromPath(window.location.pathname);
+    setView(initialView);
+    if (window.location.pathname === "/") window.history.replaceState({ view: initialView }, "", routeByView[initialView]);
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  useEffect(() => {
+    const label = nav.find(([id]) => id === view)?.[1] ?? "品牌舆情监测";
+    document.title = `${label} · Signal Atlas`;
+  }, [view]);
 
   async function syncNews(force = false, announce = false) {
     if (syncing) return;
@@ -229,7 +279,7 @@ export default function Home() {
   return <main className="app-shell">
     <aside className="sidebar">
       <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><strong>SIGNAL ATLAS</strong><small>GLOBAL MEDIA INTELLIGENCE</small></div></div>
-      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <button key={id} disabled={!data.viewer.authenticated} className={view === id ? "nav-item active" : "nav-item"} onClick={() => setView(id)}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</button>)}</nav>
+      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <a key={id} href={routeByView[id]} aria-current={view === id ? "page" : undefined} className={view === id ? "nav-item active" : "nav-item"} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigateTo(id); }}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</a>)}</nav>
       {data.viewer.authenticated && <div className="system-card">
         <div className="system-title"><i /> 混合监测已运行</div>
         <div className="system-row"><span>调度巡检</span><strong>每小时 :17</strong></div>
@@ -253,8 +303,8 @@ export default function Home() {
       </header>
 
       <div className="content-area">
-        {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
-          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} canEdit={Boolean(data.workspace?.canEdit)} />}
+        {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess returnTo={routeByView[view]} /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
+          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={navigateTo} selectCluster={(key) => { setSelectedCluster(key); navigateTo("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} submit={post} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
@@ -271,10 +321,10 @@ export default function Home() {
 
 function LoadingState() { return <div className="loading-state"><span /><p>正在读取长期新闻档案与传播图谱…</p></div>; }
 
-function PublicAccess() {
+function PublicAccess({ returnTo }: { returnTo: string }) {
   return <section className="onboarding">
     <div className="onboarding-copy panel-dark"><h2>品牌舆情监测</h2><p>自动搜索网页新闻与已接入的社交平台内容，并按地区归档、聚类事件、分析情绪和推断传播路径。</p><div className="architecture-mini"><span>搜索与归档</span><b>→</b><span>事件与传播</span><b>→</b><span>情绪与风险</span></div></div>
-    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>如果管理员已邀请你的邮箱，登录后会直接进入同一个团队工作区，品牌、档案、分析和连接器配置无需重新建立。</p><a className="primary-button wide" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录 →</a><small>未受邀账号会获得独立的新工作区。</small></div>
+    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>如果管理员已邀请你的邮箱，登录后会直接进入同一个团队工作区，品牌、档案、分析和连接器配置无需重新建立。</p><a className="primary-button wide" href={`/signin-with-chatgpt?return_to=${encodeURIComponent(returnTo)}`}>使用 ChatGPT 登录 →</a><small>未受邀账号会获得独立的新工作区。</small></div>
   </section>;
 }
 
@@ -292,7 +342,7 @@ function BrandOnboarding({ submit }: { submit: (payload: Record<string, unknown>
   </section>;
 }
 
-function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge, canEdit }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: string) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown>; canEdit: boolean }) {
+function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge, canEdit }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: ViewId) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown>; canEdit: boolean }) {
   const topCountry = data.analytics.countries[0];
   const negative = data.analytics.sentiment.negative;
   const total = data.mentions.length || 1;
@@ -429,7 +479,7 @@ function ArchiveView({ mentions, allCount, countries, platforms, platformCounts,
   const rows = ordered.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize);
   function exportCsv() {
     const visible = (value?: number) => value != null && value >= 0 ? value : "";
-    const fields = [["发布时间", "平台", "标题", "链接", "媒体/账号", "地区", "点赞", "评论", "转发", "播放", "已分析评论", "极性", "具体情绪", "风险分", "传播事件"], ...ordered.map((item) => [item.published_at, item.platform, item.title, item.url, item.source, item.source_country, visible(item.social_likes), visible(item.social_comments), visible(item.social_shares), visible(Math.max(item.social_views ?? -1, item.social_plays ?? -1)), item.comment_analyzed_count ?? "", item.sentiment, item.emotion, item.risk, item.cluster_key])];
+    const fields = [["发布时间", "平台", "原文", "英文翻译", "链接", "媒体/账号", "地区", "点赞", "评论", "转发", "播放", "已分析评论", "极性", "具体情绪", "风险分", "传播事件"], ...ordered.map((item) => [item.published_at, item.platform, [item.title, item.excerpt || item.summary].filter(Boolean).join("\n"), translationNotNeeded(item.language) ? "" : item.translation_en, item.url, item.source, item.source_country, visible(item.social_likes), visible(item.social_comments), visible(item.social_shares), visible(Math.max(item.social_views ?? -1, item.social_plays ?? -1)), item.comment_analyzed_count ?? "", item.sentiment, item.emotion, item.risk, item.cluster_key])];
     const csv = fields.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" })); link.download = `signal-atlas-archive-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(link.href);
   }
@@ -457,7 +507,7 @@ function ArchiveView({ mentions, allCount, countries, platforms, platformCounts,
     <section className="archive-intro"><div><p className="eyebrow">LIFETIME MEDIA ARCHIVE</p><h2>品牌历史媒体档案</h2><p>新闻与社媒内容统一保留发布时间、地区、来源、账号、公开互动、情绪、风险和传播事件编号；旧记录不会被下一次搜索覆盖。</p></div><div className="archive-total"><small>ARCHIVED</small><strong>{allCount}</strong><span>有史以来全部记录</span></div></section>
     <section className="surface archive-table-card">
       <div className="archive-toolbar"><div className="filters"><select value={country} onChange={(event) => { setCountry(event.target.value); setPage(1); }}>{countries.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按平台筛选档案" value={platform} onChange={(event) => { setPlatform(event.target.value); setPage(1); }}>{platforms.map((item) => <option key={item} value={item}>{item === "全部平台" ? `全部平台（${allCount}）` : `${item}（${platformCounts[item] ?? 0}）`}</option>)}</select><select value={sentiment} onChange={(event) => { setSentiment(event.target.value); setPage(1); }}>{["全部情绪", "正面", "中性", "负面", "混合"].map((item) => <option key={item}>{item}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="risk">风险优先</option></select></div><div className="archive-actions">{canEdit && <button className="secondary-button" onClick={() => { const date = new Date(); setManualPublishedAt(new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)); setManualOpen(true); }}>＋ 手动补充</button>}<button className="secondary-button" onClick={exportCsv}>↓ 导出 CSV</button></div></div>
-      <div className="table-scroll"><table className="archive-table"><thead><tr><th>发布时间</th><th>平台</th><th>新闻 / 社媒原文</th><th>媒体 / 账号</th><th>互动</th><th>地区</th><th>具体情绪</th><th>风险</th><th>事件</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td className="date-cell">{formatDate(item.published_at, true)}</td><td><span className={`platform-badge platform-${item.platform.toLowerCase().replace("网页新闻", "web")}`}>{item.platform}</span></td><td className="title-cell"><a href={item.url} target="_blank" rel="noreferrer">{item.title}<span>↗</span></a><small>{item.excerpt || item.summary}</small></td><td><strong>{item.source}</strong>{item.author && item.author !== item.source && <small>{item.author}</small>}</td><td>{interaction(item)}</td><td><span className="country-tag">{countryCode[item.source_country] ?? "GL"}</span>{item.source_country}</td><td><span className="emotion-pill">{item.emotion || item.sentiment}</span><small>{item.sentiment}</small></td><td><span className={`risk-score ${riskClass(item.risk)}`}>{item.risk}</span></td><td><code>{item.cluster_key.replace("story-", "#")}</code></td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table className="archive-table"><thead><tr><th>发布时间</th><th>平台</th><th>新闻 / 社媒原文</th><th>媒体 / 账号</th><th>互动</th><th>地区</th><th>具体情绪</th><th>风险</th><th>事件</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td className="date-cell">{formatDate(item.published_at, true)}</td><td><span className={`platform-badge platform-${item.platform.toLowerCase().replace("网页新闻", "web")}`}>{item.platform}</span></td><td className="title-cell"><a href={item.url} target="_blank" rel="noreferrer">{item.title}<span>↗</span></a><small>{item.excerpt || item.summary}</small><EnglishTranslation value={item.translation_en} status={item.translation_status} language={item.language} error={item.translation_error} nextRetryAt={item.translation_next_retry_at} provider={item.translation_provider} /></td><td><strong>{item.source}</strong>{item.author && item.author !== item.source && <small>{item.author}</small>}</td><td>{interaction(item)}</td><td><span className="country-tag">{countryCode[item.source_country] ?? "GL"}</span>{item.source_country}</td><td><span className="emotion-pill">{item.emotion || item.sentiment}</span><small>{item.sentiment}</small></td><td><span className={`risk-score ${riskClass(item.risk)}`}>{item.risk}</span></td><td><code>{item.cluster_key.replace("story-", "#")}</code></td></tr>)}</tbody></table></div>
       {!rows.length && <div className="empty-table">当前筛选条件下暂无档案</div>}
       <div className="pagination"><span>显示 {ordered.length} 条结果 · 第 {Math.min(page, pages)} / {pages} 页</span><div><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>← 上一页</button><button disabled={page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>下一页 →</button></div></div>
     </section>
@@ -690,11 +740,11 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
 
     <section className="surface comment-feed-card">
       <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={annotation} onChange={(event) => resetPage(setAnnotation, event.target.value)}><option value="">全部标注状态</option><option value="unlabeled">仅未标注</option><option value="labeled">已人工标注</option><option value="disagreed">人机有分歧</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
-      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className={`comment-archive-card ${comment.manual_sentiment ? "human-labeled" : ""}`} key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><CommentAnnotationControls comment={comment} canEdit={canEdit} onSaved={() => setRefreshKey((value) => value + 1)} /><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
+      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className={`comment-archive-card ${comment.manual_sentiment ? "human-labeled" : ""}`} key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><EnglishTranslation value={comment.translation_en} status={comment.translation_status} language={comment.language} error={comment.translation_error} nextRetryAt={comment.translation_next_retry_at} provider={comment.translation_provider} /><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><CommentAnnotationControls comment={comment} canEdit={canEdit} onSaved={() => setRefreshKey((value) => value + 1)} /><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
       <div className="comment-pagination"><span>共 {data?.pagination.total ?? 0} 条 · 第 {data?.pagination.page ?? page} / {data?.pagination.pages ?? 1} 页</span><div><button disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><button disabled={page >= (data?.pagination.pages ?? 1) || loading} onClick={() => setPage((value) => value + 1)}>下一页</button></div></div>
     </section>
 
-    <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
+    <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><EnglishTranslation value={comment.translation_en} status={comment.translation_status} language={comment.language} error={comment.translation_error} nextRetryAt={comment.translation_next_retry_at} provider={comment.translation_provider} /><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
 
     <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 主评论 TikHub {String(target.adapter || "v2").toUpperCase()} · 已请求 {target.pages_fetched} 页{target.v2_failures || target.v1_failures ? ` · V2/V1 失败 ${target.v2_failures || 0}/${target.v1_failures || 0}` : ""}{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
   </div>;
@@ -719,7 +769,7 @@ function CoverageView({ connectors, sources, submit, canManage }: { connectors: 
   }
   async function removeCredential(provider: string) { setBusy(true); try { await submit({ action: "deleteConnectorCredential", provider }, `${provider} 的团队 API 配置已删除`); } finally { setBusy(false); } }
   return <div className="coverage-page">
-    <section className="coverage-architecture panel-dark"><div><h2>采集计划</h2><p>新闻与免费来源持续归档；一个 Monid 凭证连接 Instagram、X、YouTube、TikTok、Facebook，并采集可公开取得的帖子评论与回复。网页新闻评论区也进入同一分析页。</p></div><div className="architecture-flow"><article><b>01</b><strong>全球与社媒发现</strong><span>NewsAPI.ai / GDELT / Monid</span><small>每 6 小时 / 每日</small></article><i>→</i><article><b>02</b><strong>来源库</strong><span>{sources.length} 个媒体域名</span><small>自动更新</small></article><i>→</i><article><b>03</b><strong>持续追踪</strong><span>新闻 / 帖子 / 评论回复</span><small>后台异步归档</small></article></div></section>
+    <section className="coverage-architecture panel-dark"><div><h2>采集计划</h2><p>新闻与免费来源持续归档；一个 Monid 凭证连接 Instagram、X、YouTube、TikTok、Facebook，并采集可公开取得的帖子评论与回复。网页新闻评论区也进入同一分析页。</p></div><div className="architecture-flow"><article><b>01</b><strong>全球与社媒发现</strong><span>NewsAPI.ai / GDELT / Monid</span><small>每 6 小时 / 每日</small></article><i>→</i><article><b>02</b><strong>来源库</strong><span>{sources.length} 个媒体域名</span><small>自动更新</small></article><i>→</i><article><b>03</b><strong>翻译与持续追踪</strong><span>原文 / 英译 / 评论回复</span><small>后台异步归档</small></article></div></section>
     <section className="surface connector-section"><div className="section-head"><div><p className="eyebrow">CONNECTOR STATUS</p><h3>采集连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article key={connector.id}><div><i className={connector.status} /><strong>{connector.name}</strong><span className={`connector-state ${connector.status}`}>{connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权"}</span></div><p>{connector.detail}</p>{connector.configurable && connector.provider && <button className="connector-config-button" disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? `已配置 · ${connector.lastFour === "环境密钥" ? "站点默认密钥" : `•••• ${connector.lastFour}`}` : canManage ? "＋ 配置团队 API" : "管理员可配置"}</button>}</article>)}</div></section>
     <section className="surface credential-vault"><div className="vault-copy"><p className="eyebrow">TEAM API VAULT</p><h3>团队数据连接器</h3><p>管理员只需配置一次 NewsAPI.ai、Monid、X、YouTube、Meta / Instagram 与 TikTok 凭证，所有成员查看同一批采集结果。凭证由服务端加密，完整值不会返回任何成员的浏览器。</p><div className="vault-security"><span>✓ 团队共用采集结果</span><span>✓ 服务端加密</span><span>✓ 仅管理员可更换</span></div></div><div className="credential-list">{configurable.map((connector) => <article key={connector.id}><div><i className={connector.configured ? "configured" : ""} /><div><strong>{connector.name}</strong><small>{connector.configured ? connector.lastFour === "环境密钥" ? "当前使用站点默认密钥" : `团队密钥 •••• ${connector.lastFour}` : "尚未配置团队密钥"}</small></div></div><div><button disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? "更换" : "配置"}</button>{canManage && connector.configured && connector.lastFour !== "环境密钥" && <button className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>删除</button>}</div></article>)}</div></section>
     {editing && canManage && <div className="credential-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="credential-modal" onSubmit={saveCredential} onMouseDown={(event) => event.stopPropagation()}>

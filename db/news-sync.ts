@@ -6,6 +6,7 @@ import { collectMonidSocial, countPendingMonidJobs, hasPendingMonidJobs, queueSo
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
+import { runTranslationCycle } from "./translation";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -395,14 +396,15 @@ export async function runNewsSync(force = false, userId = "") {
     await rebuildStoryClusters(db, brandId, terms);
     await rebuildPropagationEdges(db, brandId, terms);
     const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
+    const translationBefore = await runTranslationCycle(db, brandId);
     const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 1").bind(brandId).first<SyncRun>();
     const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
-    if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
-    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh };
-    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh };
+    if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0, translation: translationBefore };
+    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore };
+    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore };
 
     const query = gdeltQuery(terms);
     const startedAt = new Date().toISOString();
@@ -516,11 +518,18 @@ export async function runNewsSync(force = false, userId = "") {
       }
       await rebuildStoryClusters(db, brandId, terms);
       await rebuildPropagationEdges(db, brandId, terms);
+      const translationAfter = await runTranslationCycle(db, brandId);
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
       return { skipped: false, found: candidates.length, inserted, query, socialPending, commentRefresh,
+        translation: {
+          queued: translationBefore.queued + translationAfter.queued,
+          translated: translationBefore.translated + translationAfter.translated,
+          skipped: translationBefore.skipped + translationAfter.skipped,
+          errors: translationBefore.errors + translationAfter.errors,
+        },
         provider: `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
         warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
     } catch (error) {

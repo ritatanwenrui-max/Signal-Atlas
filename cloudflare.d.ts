@@ -32,5 +32,8 @@ declare module "cloudflare:workers" {
     NEWSAPI_AI_KEY?: string;
     MONID_API_KEY?: string;
     CREDENTIALS_ENCRYPTION_KEY?: string;
+    TRANSLATION_CONTACT_EMAIL?: string;
+    LIBRETRANSLATE_URL?: string;
+    LIBRETRANSLATE_API_KEY?: string;
   };
 }
