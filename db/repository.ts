@@ -356,11 +356,15 @@ export async function ensureDatabase() {
   }
   await db.prepare("CREATE INDEX IF NOT EXISTS idx_brand_profiles_workspace_active ON brand_profiles(workspace_id, active)").run();
   await db.batch([
-    db.prepare(`UPDATE mentions SET source_country = '中国', content_country = '中国', location_confidence = 99,
+    db.prepare(`UPDATE mentions SET source_country = '中国大陆',
+      content_country = CASE WHEN content_country = '中国' THEN '中国大陆' ELSE content_country END
+      WHERE source_country = '中国'`),
+    db.prepare(`UPDATE media_sources SET country = '中国大陆' WHERE country = '中国'`),
+    db.prepare(`UPDATE mentions SET source_country = '中国大陆', content_country = '中国大陆', location_confidence = 99,
       location_method = '媒体域名 / 已知媒体库'
       WHERE (lower(url) LIKE '%://%.163.com/%' OR lower(url) LIKE '%://163.com/%' OR source LIKE '%网易%' OR source LIKE '%網易%')
         AND source_country IN ('地区未披露', '地区待确认', '华语地区')`),
-    db.prepare(`UPDATE media_sources SET country = '中国'
+    db.prepare(`UPDATE media_sources SET country = '中国大陆'
       WHERE (lower(domain) = '163.com' OR lower(domain) LIKE '%.163.com' OR name LIKE '%网易%' OR name LIKE '%網易%')
         AND country IN ('地区未披露', '地区待确认', '华语地区')`),
   ]);

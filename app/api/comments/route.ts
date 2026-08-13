@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { ensureDatabase, getActiveBrandForUser } from "../../../db/repository";
+import { queueSocialCommentTarget } from "../../../db/monid";
+import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "../../../db/repository";
 import { meaningfulTokens } from "../../../db/text-analysis";
 import { prepareWorkspaceForUser } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
@@ -19,6 +20,73 @@ function profileTerms(value: unknown) {
 
 function escapedLikeTerm(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function socialPostDescriptor(value: string) {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("请输入完整的公开帖子链接"); }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("帖子链接必须以 http:// 或 https:// 开头");
+  const host = url.hostname.replace(/^www\./, "").toLowerCase();
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
+    if (!url.pathname.match(/^\/(?:p|reel|tv)\/[^/]+/)) throw new Error("请输入 Instagram 帖子或 Reels 的公开链接");
+    return { platform: "Instagram", postId: value };
+  }
+  if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com")) {
+    const postId = url.pathname.match(/\/status\/(\d+)/)?.[1];
+    if (!postId) throw new Error("未能从 X 链接中识别帖子 ID");
+    return { platform: "X", postId };
+  }
+  if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") {
+    const postId = host === "youtu.be" ? url.pathname.split("/").filter(Boolean)[0] : url.searchParams.get("v") || url.pathname.match(/\/(?:shorts|live)\/([^/]+)/)?.[1];
+    if (!postId) throw new Error("未能从 YouTube 链接中识别视频 ID");
+    return { platform: "YouTube", postId };
+  }
+  if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
+    const postId = url.pathname.match(/\/video\/(\d+)/)?.[1];
+    if (!postId) throw new Error("未能从 TikTok 链接中识别视频 ID");
+    return { platform: "TikTok", postId };
+  }
+  if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch") return { platform: "Facebook", postId: value };
+  throw new Error("目前支持 Instagram、X、YouTube、TikTok 和 Facebook 的公开帖子链接");
+}
+
+export async function POST(request: Request) {
+  const user = await getChatGPTUser();
+  if (!user) return Response.json({ error: "请先登录后添加采集目标" }, { status: 401 });
+  await ensureDatabase();
+  const db = env.DB;
+  await prepareWorkspaceForUser(db, user);
+  const [brand, workspace] = await Promise.all([getActiveBrandForUser(db, user.userId), getWorkspaceAccessForUser(db, user.userId)]);
+  const brandId = Number(brand?.id ?? 0);
+  if (!brandId) return Response.json({ error: "请先创建品牌监测档案" }, { status: 400 });
+  if (String(workspace?.role ?? "viewer") === "viewer") return Response.json({ error: "当前账号只有查看权限" }, { status: 403 });
+  const body = await request.json().catch(() => ({})) as { action?: string; postUrl?: string };
+  if (body.action !== "collectPost") return Response.json({ error: "不支持的操作" }, { status: 400 });
+  const postUrl = String(body.postUrl ?? "").trim().slice(0, 1000);
+  let descriptor: { platform: string; postId: string };
+  try { descriptor = socialPostDescriptor(postUrl); }
+  catch (error) { return Response.json({ error: error instanceof Error ? error.message : "帖子链接无法识别" }, { status: 400 }); }
+  let mention = await db.prepare("SELECT id FROM mentions WHERE brand_id = ? AND url = ? ORDER BY id DESC LIMIT 1")
+    .bind(brandId, postUrl).first<{ id: number }>();
+  if (!mention) {
+    const now = new Date().toISOString();
+    const inserted = await db.prepare(`INSERT INTO mentions
+      (brand_id, title, url, source, platform, source_country, content_country, language, sentiment, emotion, risk, impact,
+       summary, cluster_key, excerpt, author, provider, discovered_via, published_at)
+      VALUES (?, ?, ?, ?, ?, '地区待确认', '地区待确认', '语言待确认', '中性', '中性陈述', 20, 45, '', ?, '', '', 'Monid · 指定帖子', 'manual_comment_target', ?)`)
+      .bind(brandId, `指定帖子 · ${descriptor.platform}`, postUrl, descriptor.platform, descriptor.platform, `story-manual-${crypto.randomUUID()}`, now).run();
+    mention = { id: Number(inserted.meta.last_row_id) };
+  }
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO social_post_metrics (mention_id, brand_id, platform, post_id, matched_terms, metrics_updated_at)
+    VALUES (?, ?, ?, ?, '[]', ?)
+    ON CONFLICT(mention_id) DO UPDATE SET platform = excluded.platform, post_id = excluded.post_id, metrics_updated_at = excluded.metrics_updated_at`)
+    .bind(mention.id, brandId, descriptor.platform, descriptor.postId, now).run();
+  await queueSocialCommentTarget(db, brandId, mention.id, descriptor.platform, descriptor.postId, postUrl, 0);
+  await db.prepare(`UPDATE social_comment_targets SET status = 'queued', top_level_complete = 0, cursor = '', pages_fetched = 0,
+    last_error = '已加入指定帖子采集队列', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+    .bind(now, brandId, mention.id).run();
+  return Response.json({ ok: true, mentionId: mention.id, platform: descriptor.platform });
 }
 
 export async function GET(request: Request) {

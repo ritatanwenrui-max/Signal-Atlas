@@ -77,7 +77,7 @@ const platformVisuals = [["网页新闻", "web"], ["Instagram", "instagram"], ["
 function platformSlug(value: string) { return platformVisuals.find(([label]) => label === value)?.[1] ?? "other"; }
 
 const countryCode: Record<string, string> = {
-  台湾: "TW", 香港: "HK", 泰国: "TH", 美国: "US", 日本: "JP", 全球: "GL", 中国: "CN", 新加坡: "SG", 英国: "GB",
+  台湾: "TW", 香港: "HK", 泰国: "TH", 美国: "US", 日本: "JP", 全球: "GL", 中国大陆: "CN", 中国: "CN", 新加坡: "SG", 英国: "GB",
   韩国: "KR", 加拿大: "CA", 澳大利亚: "AU", 德国: "DE", 法国: "FR", 印度: "IN", 意大利: "IT", 西班牙: "ES",
   印度尼西亚: "ID", 菲律宾: "PH", 越南: "VN", 马来西亚: "MY", 华语地区: "ZH", 地区待确认: "??", 地区未披露: "??",
 };
@@ -249,7 +249,7 @@ export default function Home() {
           {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} submit={post} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
-          {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} />}
+          {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
           {view === "reports" && <ReportView brand={data.brand} workspaceName={data.workspace?.name ?? data.brand.name} mentions={data.mentions} analytics={data.analytics} clusters={clusters} countryCodes={countryCode} />}
           {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
@@ -314,41 +314,91 @@ function Metric({ label, value, note, danger = false }: { label: string; value: 
 function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   const max = Math.max(1, ...countries.map((item) => item.count));
   const mapRef = useRef<HTMLObjectElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [tooltip, setTooltip] = useState<{ country: string; count: number; x: number; y: number } | null>(null);
   const placed = countries.filter((item) => /^[A-Z]{2}$/.test(countryCode[item.country] ?? ""));
+  function changeZoom(next: number) {
+    const viewport = viewportRef.current;
+    const bounded = Math.min(5, Math.max(1, Math.round(next * 2) / 2));
+    if (!viewport || bounded === zoom) return;
+    const x = (viewport.scrollLeft + viewport.clientWidth / 2) / Math.max(1, viewport.scrollWidth);
+    const y = (viewport.scrollTop + viewport.clientHeight / 2) / Math.max(1, viewport.scrollHeight);
+    setZoom(bounded);
+    window.requestAnimationFrame(() => {
+      viewport.scrollLeft = x * viewport.scrollWidth - viewport.clientWidth / 2;
+      viewport.scrollTop = y * viewport.scrollHeight - viewport.clientHeight / 2;
+    });
+  }
   function paintCountries() {
     const document = mapRef.current?.contentDocument;
     if (!document) return;
-    for (const node of document.querySelectorAll<SVGPathElement>("path")) {
+    document.querySelectorAll("[data-signal-atlas-locator]").forEach((node) => node.remove());
+    for (const node of document.querySelectorAll<SVGElement>("path, circle, polygon")) {
       node.style.fill = "#d9ddd4";
       node.style.stroke = "#ffffff";
-      node.style.strokeWidth = ".65";
+      node.style.strokeWidth = ".8";
       node.style.transition = "fill .18s ease";
     }
     for (const item of placed) {
       const code = countryCode[item.country];
-      const node = document.getElementById(code.toLowerCase()) as unknown as SVGElement | null;
+      const mapId = code === "CN" ? "cnx" : code.toLowerCase();
+      const node = document.getElementById(mapId) as unknown as SVGGraphicsElement | null;
       if (!node) continue;
       const heat = item.count / max;
       const palette = ["#dce7be", "#bed288", "#91ad57", "#627f34", "#2f461c"];
       const color = palette[Math.min(palette.length - 1, Math.max(0, Math.ceil(heat * palette.length) - 1))];
-      const shapes = node.tagName.toLowerCase() === "path" ? [node] : [...node.querySelectorAll<SVGElement>("path")];
-      for (const shape of shapes) shape.style.fill = color;
-      node.style.cursor = "help";
-      const previous = node.querySelector("title[data-signal-atlas]");
-      previous?.remove();
-      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.setAttribute("data-signal-atlas", "true");
-      title.textContent = `${item.country}：${item.count} 篇报道`;
-      node.prepend(title);
+      const shapes = node.matches("path, circle, polygon") ? [node] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
+      for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; shape.style.pointerEvents = "all"; }
+      node.style.cursor = "pointer";
+      node.setAttribute("tabindex", "0");
+      node.setAttribute("role", "button");
+      node.setAttribute("aria-label", `${item.country}，${item.count} 篇报道`);
+      const nativeTitle = [...node.children].find((child) => child.tagName.toLowerCase() === "title");
+      if (nativeTitle) nativeTitle.textContent = `${item.country}：${item.count} 篇报道`;
+      const show = (event: PointerEvent | MouseEvent | FocusEvent) => {
+        const mouse = "clientX" in event && event.clientX > 0;
+        const bounds = node.getBoundingClientRect();
+        const x = mouse ? event.clientX : bounds.left + bounds.width / 2;
+        const y = mouse ? event.clientY : bounds.top + bounds.height / 2;
+        setTooltip({ country: item.country, count: item.count, x: Math.min(window.innerWidth - 180, x + 14), y: Math.max(12, y - 12) });
+      };
+      node.onpointerenter = show;
+      node.onpointermove = show;
+      node.onpointerleave = () => setTooltip(null);
+      node.onfocus = show;
+      node.onblur = () => setTooltip(null);
+      const bounds = node.getBBox();
+      if (bounds.width < 18 || bounds.height < 18) {
+        const locator = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        locator.setAttribute("data-signal-atlas-locator", code);
+        locator.setAttribute("cx", String(bounds.x + bounds.width / 2));
+        locator.setAttribute("cy", String(bounds.y + bounds.height / 2));
+        locator.setAttribute("r", "11");
+        locator.setAttribute("fill", color);
+        locator.setAttribute("stroke", "#ffffff");
+        locator.setAttribute("stroke-width", "3");
+        locator.setAttribute("vector-effect", "non-scaling-stroke");
+        locator.style.cursor = "pointer";
+        locator.onpointerenter = show;
+        locator.onpointermove = show;
+        locator.onpointerleave = () => setTooltip(null);
+        node.parentNode?.appendChild(locator);
+      }
     }
   }
   useEffect(() => { paintCountries(); });
   return <div className="world-map-wrap">
-    <div className="world-map" aria-label="按国家地区显示新闻量的世界热力图">
-      <object ref={mapRef} className="world-map-base" data="/world-map-flat.svg" type="image/svg+xml" aria-label="平面国家边界与报道强度" onLoad={paintCountries} />
+    <div className="map-zoom-controls" aria-label="地图缩放控件"><button type="button" aria-label="放大地图" onClick={() => changeZoom(zoom + .5)}>＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label="缩小地图" disabled={zoom <= 1} onClick={() => changeZoom(zoom - .5)}>−</button><button type="button" onClick={() => changeZoom(1)}>重置</button></div>
+    <div ref={viewportRef} className="world-map" aria-label="按国家地区显示新闻量的世界热力图" onDoubleClick={() => changeZoom(zoom + .5)} onWheel={(event) => { event.preventDefault(); changeZoom(zoom + (event.deltaY < 0 ? .5 : -.5)); }}>
+      <div className="world-map-canvas" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
+        <object ref={mapRef} className="world-map-base" data="/world-map-detailed.svg" type="image/svg+xml" aria-label="平面国家边界与报道强度" onLoad={paintCountries} />
+      </div>
     </div>
+    {tooltip && <div className="map-data-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.country}</strong><span>{tooltip.count.toLocaleString()} 篇报道</span></div>}
+    <p className="map-usage-hint">悬停查看地区数据 · 滚轮、双击或按钮缩放 · 放大后拖动滚动条定位小区域</p>
     <div className="heat-legend"><span>报道较少</span><i /><i /><i /><i /><span>报道最多</span></div>
-    <a className="map-attribution" href="https://github.com/flekschas/simple-world-map" target="_blank" rel="noreferrer">平面地图 · CC BY-SA 3.0</a>
+    <span className="map-attribution">平面世界地图</span>
     {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
   </div>;
 }
@@ -480,7 +530,7 @@ function AnalyticsView({ analytics, mentions }: { analytics: Analytics; mentions
   </div>;
 }
 
-function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; monidConfigured: boolean }) {
+function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandProfile; monidConfigured: boolean; canEdit: boolean }) {
   const [data, setData] = useState<SocialCommentsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -492,6 +542,10 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   const [query, setQuery] = useState("");
   const [postId, setPostId] = useState(0);
   const [page, setPage] = useState(1);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [directPostUrl, setDirectPostUrl] = useState("");
+  const [directBusy, setDirectBusy] = useState(false);
+  const [directMessage, setDirectMessage] = useState("");
 
   useEffect(() => {
     const timer = window.setTimeout(() => { setQuery(draftQuery.trim()); setPage(1); }, 280);
@@ -512,7 +566,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
     }).catch((reason) => { if (reason?.name !== "AbortError") setError(reason instanceof Error ? reason.message : "评论数据加载失败"); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [page, platform, postId, query, range, sort, tone]);
+  }, [page, platform, postId, query, range, refreshKey, sort, tone]);
 
   const summary = data?.summary ?? { total: 0, authors: 0, likes: 0, replies: 0, positive: 0, neutral: 0, negative: 0, mixed: 0, average_score: 0, reported: 0, collected: 0, coverage: 0 };
   const sentimentTotal = Math.max(1, summary.positive + summary.neutral + summary.negative + summary.mixed);
@@ -524,16 +578,34 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   const maxTopic = Math.max(1, ...(data?.topics ?? []).map((item) => Number(item.count)));
   const netSentiment = summary.total ? Math.round((summary.positive - summary.negative) / summary.total * 100) : 0;
   const targetStatus = (value: string) => ({
-    complete: "已完成", empty: "无公开评论", unavailable: "平台未开放", blocked: "权限或预算受限",
-    running: "请求中", queued: "排队中", retrying: "等待重试", collecting: "抓取回复中", error: "采集失败",
+    complete: "已完成", empty: "待重新核验", unavailable: "待重新核验", not_returned: "暂未取得文本", blocked: "权限或预算受限",
+    running: "请求中", queued: "排队中", retrying: "重新获取中", collecting: "抓取回复中", error: "采集失败",
   }[value] ?? "待识别");
   function resetPage(value: (next: string) => void, next: string) { value(next); setPage(1); }
+  async function collectDirectPost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!directPostUrl.trim() || directBusy) return;
+    setDirectBusy(true); setDirectMessage("");
+    try {
+      const response = await fetch("/api/comments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "collectPost", postUrl: directPostUrl.trim() }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "帖子无法加入采集队列");
+      setDirectMessage(`${result.platform} 帖子已加入队列，正在识别帖子 ID 并分页获取评论`);
+      setDirectPostUrl("");
+      await fetch("/api/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) }).catch(() => undefined);
+      setRefreshKey((value) => value + 1);
+      window.setTimeout(() => setRefreshKey((value) => value + 1), 6000);
+    } catch (reason) { setDirectMessage(reason instanceof Error ? reason.message : "帖子无法加入采集队列"); }
+    finally { setDirectBusy(false); }
+  }
 
   return <div className="comments-page">
     <section className="comment-hero panel-dark">
       <div><p className="eyebrow">COMMENT INTELLIGENCE</p><h2>{brand.name} 评论舆情</h2><p>社交平台帖子和网页新闻的公开评论会被统一归档，再按具体情绪、主题、时间、来源和参与者交叉分析。</p></div>
-      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status)) ? "持续采集中" : data.targets.some((item) => ["blocked", "unavailable", "error"].includes(item.status)) ? "部分帖子受限" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
+      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status)) ? "持续采集中" : data.targets.some((item) => ["blocked", "unavailable", "empty", "not_returned", "error"].includes(item.status)) ? "部分帖子待核验" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
     </section>
+
+    <section className="surface comment-pipeline" aria-label="自动评论舆情处理流程"><div><b>01</b><strong>关键词搜帖</strong><span>Monid 多平台发现</span></div><i>→</i><div><b>02</b><strong>归档帖子 URL</strong><span>保留来源与互动</span></div><i>→</i><div><b>03</b><strong>逐帖采集评论</strong><span>主评论与回复分页</span></div><i>→</i><div><b>04</b><strong>内部语义分析</strong><span>分词、情绪与议题</span></div><i>→</i><div><b>05</b><strong>舆情展示</strong><span>词云、趋势与风险</span></div></section>
 
     <section className="comment-kpis surface">
       <Metric label="已归档评论" value={summary.total.toLocaleString()} note="当前筛选范围内的真实文本" />
@@ -545,6 +617,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
 
     {!monidConfigured && <section className="comment-callout surface"><strong>社媒评论采集尚未启动</strong><p>网页新闻公开评论仍会持续检查；在“来源覆盖”配置 Monid 后，将为 Instagram、X、YouTube、TikTok、Facebook 相关帖子建立评论任务。</p></section>}
     {error && <section className="comment-callout error surface"><strong>读取评论舆情失败</strong><p>{error}</p></section>}
+    <section className="surface direct-comment-collector"><div><p className="eyebrow">SPECIFIC POST COLLECTION</p><h3>指定帖子评论采集</h3><p>粘贴公开帖子链接。Instagram 会先根据帖子 URL 校验 Media ID，再分页获取主评论及回复；其他已支持平台会按帖子 ID 建立采集任务。</p></div><form onSubmit={collectDirectPost}><input type="url" value={directPostUrl} disabled={!monidConfigured || !canEdit || directBusy} onChange={(event) => setDirectPostUrl(event.target.value)} placeholder="https://www.instagram.com/p/.../" aria-label="指定帖子公开链接" required /><button className="primary-button" disabled={!monidConfigured || !canEdit || directBusy}>{directBusy ? "正在加入…" : "采集此帖评论"}</button>{directMessage && <small>{directMessage}</small>}</form></section>
 
     <div className="comment-intelligence-grid">
       <section className="surface sentiment-card"><div className="section-head"><div><p className="eyebrow">COMMENT SENTIMENT</p><h3>评论情绪结构</h3></div><span className="count-chip">{summary.total}</span></div><div className="sentiment-layout"><div className="sentiment-donut" style={{ "--positive": positivePct, "--neutral": neutralPct, "--negative": negativePct } as CSSProperties}><div><strong>{netSentiment}</strong><span>净情绪指数</span></div></div><div className="sentiment-legend">{[["正面", summary.positive, "positive"], ["中性", summary.neutral, "neutral"], ["负面", summary.negative, "negative"], ["混合", summary.mixed, "mixed"]].map(([label, count, value]) => <div key={String(label)}><i className={String(value)} /><span>{label}</span><strong>{Number(count).toLocaleString()}</strong></div>)}</div></div></section>
@@ -564,7 +637,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
 
     <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
 
-    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const terminal = ["complete", "empty", "unavailable"].includes(target.status); const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : terminal ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 已请求 {target.pages_fetched} 页{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
+    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 已请求 {target.pages_fetched} 页{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
   </div>;
 }
 

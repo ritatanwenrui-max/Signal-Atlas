@@ -74,7 +74,7 @@ function ReportMap({ countries, countryCodes }: { countries: CountryStat[]; coun
   const [markup, setMarkup] = useState("");
   useEffect(() => {
     let cancelled = false;
-    fetch("/world-map-flat.svg").then((response) => response.text()).then((source) => {
+    fetch("/world-map-detailed.svg").then((response) => response.text()).then((source) => {
       const doc = new DOMParser().parseFromString(source, "image/svg+xml");
       const max = Math.max(1, ...countries.map((item) => item.count));
       for (const path of doc.querySelectorAll<SVGPathElement>("path")) {
@@ -82,12 +82,12 @@ function ReportMap({ countries, countryCodes }: { countries: CountryStat[]; coun
       }
       for (const item of countries) {
         const code = countryCodes[item.country]?.toLowerCase();
-        const node = code ? doc.getElementById(code) : null;
+        const node = code ? doc.getElementById(code === "cn" ? "cnx" : code) : null;
         if (!node) continue;
         const colors = ["#dce9bc", "#bed27f", "#91ad52", "#5f7d30", "#263c19"];
         const color = colors[Math.min(4, Math.max(0, Math.ceil(item.count / max * colors.length) - 1))];
-        const paths = node.tagName.toLowerCase() === "path" ? [node as unknown as SVGPathElement] : [...node.querySelectorAll<SVGPathElement>("path")];
-        for (const path of paths) path.style.fill = color;
+        const shapes = node.matches("path, circle, polygon") ? [node as unknown as SVGElement] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
+        for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; }
       }
       const svg = doc.documentElement;
       svg.removeAttribute("width"); svg.removeAttribute("height"); svg.setAttribute("preserveAspectRatio", "xMidYMid meet");

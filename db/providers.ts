@@ -74,7 +74,7 @@ export class ProviderRequestError extends Error {
 }
 
 const countryNames: Record<string, string> = {
-  Taiwan: "台湾", "Hong Kong": "香港", Thailand: "泰国", "United States": "美国", China: "中国",
+  Taiwan: "台湾", "Hong Kong": "香港", Thailand: "泰国", "United States": "美国", China: "中国大陆",
   Japan: "日本", Singapore: "新加坡", Malaysia: "马来西亚", "South Korea": "韩国", "United Kingdom": "英国",
   Australia: "澳大利亚", Canada: "加拿大", Germany: "德国", France: "法国", Italy: "意大利", Spain: "西班牙",
   India: "印度", Indonesia: "印度尼西亚", Philippines: "菲律宾", Vietnam: "越南", Cambodia: "柬埔寨",
@@ -86,17 +86,17 @@ const languageNames: Record<string, string> = {
 };
 
 const countryCodes: Record<string, string> = {
-  US: "美国", GB: "英国", TW: "台湾", HK: "香港", TH: "泰国", CN: "中国", JP: "日本", KR: "韩国",
+  US: "美国", GB: "英国", TW: "台湾", HK: "香港", TH: "泰国", CN: "中国大陆", JP: "日本", KR: "韩国",
   SG: "新加坡", MY: "马来西亚", AU: "澳大利亚", CA: "加拿大", DE: "德国", FR: "法国", IN: "印度",
 };
 
 const relationNames = { retweeted: "直接转发", quoted: "引用传播", replied_to: "回复讨论" } as const;
 
 const domainCountryRules: Array<[RegExp, string]> = [
-  [/(^|\.)163\.com$|(^|\.)126\.com$/i, "中国"],
+  [/(^|\.)163\.com$|(^|\.)126\.com$/i, "中国大陆"],
   [/\.tw$/i, "台湾"], [/\.hk$/i, "香港"], [/\.th$/i, "泰国"], [/\.jp$/i, "日本"], [/\.kr$/i, "韩国"],
   [/\.sg$/i, "新加坡"], [/\.my$/i, "马来西亚"], [/\.vn$/i, "越南"], [/\.ph$/i, "菲律宾"], [/\.id$/i, "印度尼西亚"],
-  [/\.cn$/i, "中国"], [/\.uk$/i, "英国"], [/\.au$/i, "澳大利亚"], [/\.ca$/i, "加拿大"], [/\.de$/i, "德国"],
+  [/\.cn$/i, "中国大陆"], [/\.uk$/i, "英国"], [/\.au$/i, "澳大利亚"], [/\.ca$/i, "加拿大"], [/\.de$/i, "德国"],
   [/\.fr$/i, "法国"], [/\.it$/i, "意大利"], [/\.es$/i, "西班牙"], [/\.in$/i, "印度"],
   [/^(tw\.|tw-)|\.com\.tw$|ettoday\.net$|ebc\.net\.tw$|taiwanhot\.net$/i, "台湾"],
   [/^(hk\.)|scmp\.com$|thestandard\.com\.hk$/i, "香港"], [/bangkokpost\.com$|nationthailand\.com$/i, "泰国"],
@@ -109,7 +109,7 @@ const sourceCountryCues: Array<[RegExp, string]> = [
   [/(台灣|台湾|臺灣|taiwan|台北|臺北)/i, "台湾"], [/(香港|hong kong|港媒)/i, "香港"], [/(泰國|泰国|thailand|bangkok|ประเทศไทย)/i, "泰国"],
   [/(日本|japan|東京|tokyo)/i, "日本"], [/(韓國|韩国|south korea|seoul|서울)/i, "韩国"], [/(新加坡|singapore)/i, "新加坡"],
   [/(馬來西亞|马来西亚|malaysia)/i, "马来西亚"], [/(美國|美国|united states|\busa\b)/i, "美国"], [/(英國|英国|united kingdom|\buk\b)/i, "英国"],
-  [/(中國|中国|mainland china|beijing|网易|網易|netease)/i, "中国"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
+  [/(中國|中国|mainland china|beijing|网易|網易|netease)/i, "中国大陆"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
 ];
 
 export function inferLanguage(text: string, declared = "") {

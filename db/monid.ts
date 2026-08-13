@@ -9,7 +9,7 @@ type MonidRun = {
   providerResponse?: { httpStatus?: number; error?: { message?: string } };
   cost?: { value?: number; currency?: string } | number | null;
 };
-type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "post_comments" | "comment_replies";
+type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
 type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number };
 type SocialComment = {
@@ -22,6 +22,7 @@ type ReplyTarget = { mention_id: number; media_id: string; parent_comment_id: st
 const API_BASE = "https://api.monid.ai";
 const SEARCH_ENDPOINT = "/apify/instagram-hashtag-scraper";
 const PROFILE_ENDPOINT = "/apify/instagram-profile-scraper";
+const POST_BY_URL_ENDPOINT = "/api/v1/instagram/v1/fetch_post_by_url";
 const COMMENTS_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
 const REPLIES_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
 const SOCIAL_SEARCHES = {
@@ -329,6 +330,26 @@ function commentFromRow(row: JsonObject, postUrl: string, parentId = ""): Social
   };
 }
 
+function resolvedInstagramPost(output: unknown) {
+  for (const row of walkObjects(output)) {
+    const mediaId = firstText(row, ["media_id", "mediaId", "pk", "id"]).match(/^\d{10,}/)?.[0] ?? "";
+    if (!mediaId) continue;
+    const shortcode = firstText(row, ["code", "shortcode"]);
+    const caption = firstText(row, ["caption.text", "caption", "text", "description"]);
+    const comments = optionalNumber(row, ["comment_count", "comments_count", "comments", "edge_media_to_parent_comment.count"]);
+    if (!shortcode && !caption && comments < 0 && !pathValue(row, "media_type")) continue;
+    return {
+      mediaId,
+      caption,
+      comments,
+      likes: optionalNumber(row, ["like_count", "likes_count", "likes"]),
+      username: firstText(row, ["user.username", "owner.username", "username"]),
+      authorId: firstText(row, ["user.pk", "user.id", "owner.pk", "owner.id"]),
+    };
+  }
+  return null;
+}
+
 async function brandTermsFor(db: D1Database, brandId: number) {
   const rows = await db.prepare("SELECT value FROM tracked_entities WHERE brand_id = ? AND active = 1 AND type NOT IN ('排除词','官网域名')")
     .bind(brandId).all<{ value: string }>();
@@ -379,7 +400,7 @@ async function refreshSocialCommentAnalysis(db: D1Database, brandId: number, men
   }
   const analyzedCount = rows.results.length;
   const complete = Boolean(target?.top_level_complete) && Number(pendingReplies?.count ?? 0) === 0;
-  const preservedStatus = ["empty", "unavailable", "blocked"].includes(target?.status ?? "") ? target!.status : "";
+  const preservedStatus = ["not_returned", "blocked"].includes(target?.status ?? "") ? target!.status : "";
   const targetStatus = preservedStatus || (complete ? "complete" : "collecting");
   const sentiment = !analyzedCount ? "样本不足" : counts.positive > counts.negative && counts.positive >= counts.neutral ? "正面"
     : counts.negative > counts.positive && counts.negative >= counts.neutral ? "负面" : counts.positive && counts.negative ? "混合" : "中性";
@@ -431,14 +452,21 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
   if (!comments.length) {
     const now = new Date().toISOString();
     if (job.stage === "post_comments") {
-      const target = await db.prepare("SELECT reported_count FROM social_comment_targets WHERE brand_id = ? AND mention_id = ?")
-        .bind(brandId, descriptor.mentionId).first<{ reported_count: number }>();
+      const target = await db.prepare("SELECT reported_count, pages_fetched FROM social_comment_targets WHERE brand_id = ? AND mention_id = ?")
+        .bind(brandId, descriptor.mentionId).first<{ reported_count: number; pages_fetched: number }>();
       const reported = Math.max(Number(target?.reported_count ?? 0), firstNumber(output, ["comment_count", "comments_count", "total"]));
-      const status = reported > 0 ? "unavailable" : "empty";
-      const message = reported > 0 ? `${platform} 显示有评论，但当前公开接口未返回评论文本；常见原因是帖子权限、登录要求或平台风控` : "";
+      const attempt = Number(target?.pages_fetched ?? 0) + 1;
+      const shouldRetry = reported > 0 && attempt < 3;
+      const status = shouldRetry ? "retrying" : "not_returned";
+      const message = shouldRetry
+        ? `${platform} 显示有评论，本次指定帖子接口未返回文本；系统将更换时间窗口自动重试（${attempt}/3）`
+        : reported > 0 ? `${platform} 显示有评论，但连续 ${attempt} 次未取得文本；保留为待核验，不判定为平台未开放`
+        : `指定帖子接口本次未返回评论文本；保留为待核验，不判定为没有评论`;
       await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), top_level_complete = 1,
         status = ?, pages_fetched = pages_fetched + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
         .bind(reported, status, message, now, brandId, descriptor.mentionId).run();
+      if (shouldRetry) await db.prepare("UPDATE social_comment_targets SET top_level_complete = 0 WHERE brand_id = ? AND mention_id = ?")
+        .bind(brandId, descriptor.mentionId).run();
     } else {
       await db.prepare(`UPDATE social_comment_reply_queue SET status = 'complete', pages_fetched = pages_fetched + 1,
         last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
@@ -501,6 +529,36 @@ async function processProfiles(db: D1Database, brandId: number, output: unknown)
   }
 }
 
+async function processResolvedPost(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
+  const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
+  const details = resolvedInstagramPost(output);
+  const now = new Date().toISOString();
+  if (!details) {
+    await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
+      last_error = '指定帖子 URL 已提交，但暂未解析出 Instagram Media ID；30 分钟后自动重试', updated_at = ?
+      WHERE brand_id = ? AND mention_id = ?`).bind(now, brandId, descriptor.mentionId).run();
+    return;
+  }
+  await db.batch([
+    db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?), status = 'queued',
+      top_level_complete = 0, last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+      .bind(details.mediaId, Math.max(0, details.comments), now, brandId, descriptor.mentionId),
+    db.prepare(`UPDATE social_post_metrics SET post_id = ?, comments = MAX(comments, ?), likes = MAX(likes, ?),
+      author_id = CASE WHEN ? != '' THEN ? ELSE author_id END,
+      author_username = CASE WHEN ? != '' THEN ? ELSE author_username END, metrics_updated_at = ?
+      WHERE brand_id = ? AND mention_id = ?`)
+      .bind(details.mediaId, Math.max(0, details.comments), Math.max(0, details.likes), details.authorId, details.authorId,
+        details.username, details.username, now, brandId, descriptor.mentionId),
+    db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' AND title LIKE '指定帖子%' THEN ? ELSE title END,
+      source = CASE WHEN ? != '' THEN '@' || ? ELSE source END,
+      author = CASE WHEN ? != '' THEN '@' || ? ELSE author END,
+      excerpt = CASE WHEN ? != '' AND excerpt = '' THEN ? ELSE excerpt END
+      WHERE brand_id = ? AND id = ?`)
+      .bind(details.caption, details.caption.slice(0, 180), details.username, details.username, details.username, details.username,
+        details.caption, details.caption.slice(0, 600), brandId, descriptor.mentionId),
+  ]);
+}
+
 async function startProfileEnrichment(db: D1Database, brandId: number, apiKey: string, usernames: string[]) {
   const unique = [...new Set(usernames.map((item) => item.trim()).filter(Boolean))].slice(0, 25);
   if (!unique.length) return;
@@ -531,13 +589,13 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   if (run.status === "BLOCKED") {
     await updateJob(db, job, run, "Monid 工作区预算或单次任务上限阻止了执行");
     await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "blocked");
-    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error("Monid 工作区预算或单次任务上限已触发，请在 Monid 后台调整后重试");
   }
   if (run.status !== "COMPLETED") {
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
     await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}，将在稍后重试`, "retrying");
-    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error(`Monid Instagram 任务未完成：${run.status}`);
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
@@ -545,11 +603,16 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     const message = run.providerResponse?.error?.message ?? `Instagram 数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
     await markCommentJobError(db, brandId, job, message, providerStatus === 401 || providerStatus === 403 ? "blocked" : providerStatus >= 500 ? "retrying" : "unavailable");
-    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
   }
   if (job.stage === "profiles") {
     await processProfiles(db, brandId, run.output);
+    await updateJob(db, job, run);
+    return [];
+  }
+  if (job.stage === "resolve_post") {
+    await processResolvedPost(db, brandId, job, run.output);
     await updateJob(db, job, run);
     return [];
   }
@@ -576,10 +639,10 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
 }
 
 async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string, status: "retrying" | "blocked" | "unavailable" | "error" = "error") {
-  if (job.stage !== "post_comments" && job.stage !== "comment_replies") return;
+  if (job.stage !== "resolve_post" && job.stage !== "post_comments" && job.stage !== "comment_replies") return;
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const now = new Date().toISOString();
-  if (job.stage === "post_comments") {
+  if (job.stage === "resolve_post" || job.stage === "post_comments") {
     await db.prepare("UPDATE social_comment_targets SET status = ?, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?")
       .bind(status, message, now, brandId, descriptor.mentionId).run();
   } else {
@@ -607,7 +670,7 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
 }
 
 export async function queueSocialCommentTarget(db: D1Database, brandId: number, mentionId: number, platform: string, rawMediaId: string, postUrlValue: string, reportedCount: number) {
-  const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? "" : rawMediaId || postUrlValue;
+  const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? postUrlValue : rawMediaId || postUrlValue;
   if (!mediaId) return;
   const count = Math.max(0, reportedCount);
   const now = new Date().toISOString();
@@ -630,6 +693,10 @@ async function registerHistoricalCommentTargets(db: D1Database, brandId: number)
   await db.prepare(`UPDATE social_comment_targets SET status = 'retrying',
     last_error = CASE WHEN last_error = '' THEN '旧版采集失败，已进入新版退避重试队列' ELSE last_error END,
     updated_at = datetime('now', '-31 minutes') WHERE brand_id = ? AND status = 'error'`).bind(brandId).run();
+  await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
+    media_id = CASE WHEN platform = 'Instagram' THEN post_url ELSE media_id END,
+    last_error = '旧状态结论已撤销；正在通过指定帖子 URL 重新识别并采集', updated_at = datetime('now', '-31 minutes')
+    WHERE brand_id = ? AND status IN ('empty','unavailable')`).bind(brandId).run();
   const posts = await db.prepare(`SELECT metrics.mention_id, metrics.platform, metrics.post_id, metrics.comments, mentions.url
     FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
     WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook') AND metrics.post_id != ''`)
@@ -641,7 +708,7 @@ async function registerHistoricalCommentTargets(db: D1Database, brandId: number)
 
 async function startCommentJobs(db: D1Database, brandId: number, apiKey: string) {
   const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
-    AND stage IN ('post_comments','comment_replies') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
+    AND stage IN ('resolve_post','post_comments','comment_replies') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
   let available = Math.max(0, COMMENT_JOBS_PER_CYCLE - Number(active?.count ?? 0));
   if (!available) return 0;
   let startedCount = 0;
@@ -650,12 +717,16 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     FROM social_comment_targets target
     WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying') AND target.top_level_complete = 0
       AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
-      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage = 'post_comments' AND job.status IN (${PENDING_SQL}))
+      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage IN ('resolve_post','post_comments') AND job.status IN (${PENDING_SQL}))
     ORDER BY target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
   for (const target of targets.results) {
     const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url, cursor: target.cursor, page: target.pages_fetched + 1 };
     let run: MonidRun;
-    if (target.platform === "YouTube") {
+    let stage: "resolve_post" | "post_comments" = "post_comments";
+    if (target.platform === "Instagram" && !/^\d{10,}$/.test(target.media_id)) {
+      stage = "resolve_post";
+      run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+    } else if (target.platform === "YouTube") {
       const queryParams: JsonObject = { video_id: target.media_id, need_format: true, sort_by: "newest" };
       if (target.cursor) queryParams.continuation_token = target.cursor;
       run = await startQueryRun(apiKey, "/api/v1/youtube/web_v2/get_video_comments", queryParams);
@@ -670,7 +741,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
       if (target.cursor) queryParams.min_id = target.cursor;
       run = await startQueryRun(apiKey, COMMENTS_ENDPOINT, queryParams);
     }
-    const job = await saveJob(db, brandId, run, "post_comments", descriptor, target.mention_id);
+    const job = await saveJob(db, brandId, run, stage, descriptor, target.mention_id);
     await db.prepare("UPDATE social_comment_targets SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ?")
       .bind(new Date().toISOString(), brandId, target.mention_id).run();
     if (run.status === "COMPLETED") await processJob(db, brandId, apiKey, job, run);
@@ -723,8 +794,6 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   for (const { job, run } of polled) {
     candidates.push(...await processJob(db, brandId, apiKey, job, run));
   }
-  const startedComments = await startCommentJobs(db, brandId, apiKey);
-  if (startedComments > 0) return candidates;
   if (startNew && !pendingSearchStages.has("search")) {
     const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
     if (searchTerms.length) {
@@ -764,6 +833,10 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
       throw failure?.reason ?? new Error("Monid 多平台搜索启动失败");
     }
   }
+  // Keyword discovery keeps its own cadence even when the comment backlog is non-empty.
+  // Newly discovered post URLs are archived by the caller, queued as comment targets,
+  // resolved to platform post IDs, then analyzed after comment text is stored.
+  await startCommentJobs(db, brandId, apiKey);
   return candidates;
 }
 
