@@ -21,10 +21,12 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
   assert.match(page, /登录后会直接进入同一个团队工作区/);
   assert.match(page, /全球报道热力分布/);
-  assert.match(page, /world-map-detailed\.svg/);
+  assert.match(page, /world-map-flat\.svg/);
+  assert.doesNotMatch(page, /world-map-detailed\.svg/);
   assert.match(page, /map-zoom-controls/);
   assert.match(page, /map-data-tooltip/);
-  assert.match(page, /code === "CN" \? "cnx"/);
+  assert.match(page, /smallRegionAnchors/);
+  assert.match(page, /HK: \{ x: 680\.5, y: 463\.5 \}/);
   assert.match(page, /中国大陆: "CN"/);
   assert.match(report, /自动舆情分析报告/);
   assert.match(report, /导出 PDF/);

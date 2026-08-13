@@ -74,20 +74,32 @@ function ReportMap({ countries, countryCodes }: { countries: CountryStat[]; coun
   const [markup, setMarkup] = useState("");
   useEffect(() => {
     let cancelled = false;
-    fetch("/world-map-detailed.svg").then((response) => response.text()).then((source) => {
+    fetch("/world-map-flat.svg").then((response) => response.text()).then((source) => {
       const doc = new DOMParser().parseFromString(source, "image/svg+xml");
+      const smallRegionAnchors: Record<string, { x: number; y: number }> = {
+        hk: { x: 680.5, y: 463.5 },
+        tw: { x: 694.5, y: 458.5 },
+      };
       const max = Math.max(1, ...countries.map((item) => item.count));
       for (const path of doc.querySelectorAll<SVGPathElement>("path")) {
         path.style.fill = "#d9ddd4"; path.style.stroke = "#ffffff"; path.style.strokeWidth = "0.7";
       }
       for (const item of countries) {
         const code = countryCodes[item.country]?.toLowerCase();
-        const node = code ? doc.getElementById(code === "cn" ? "cnx" : code) : null;
-        if (!node) continue;
+        const node = code ? doc.getElementById(code) as unknown as SVGGraphicsElement | null : null;
         const colors = ["#dce9bc", "#bed27f", "#91ad52", "#5f7d30", "#263c19"];
         const color = colors[Math.min(4, Math.max(0, Math.ceil(item.count / max * colors.length) - 1))];
-        const shapes = node.matches("path, circle, polygon") ? [node as unknown as SVGElement] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
-        for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; }
+        if (node) {
+          const shapes = node.matches("path, circle, polygon") ? [node as unknown as SVGElement] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
+          for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; }
+        }
+        const anchor = code ? smallRegionAnchors[code] : null;
+        if (anchor) {
+          const locator = doc.createElementNS("http://www.w3.org/2000/svg", "circle");
+          locator.setAttribute("cx", String(anchor.x)); locator.setAttribute("cy", String(anchor.y)); locator.setAttribute("r", "7");
+          locator.setAttribute("fill", color); locator.setAttribute("stroke", "#ffffff"); locator.setAttribute("stroke-width", "2");
+          doc.documentElement.appendChild(locator);
+        }
       }
       const svg = doc.documentElement;
       svg.removeAttribute("width"); svg.removeAttribute("height"); svg.setAttribute("preserveAspectRatio", "xMidYMid meet");

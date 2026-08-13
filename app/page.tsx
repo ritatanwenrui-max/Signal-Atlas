@@ -333,6 +333,9 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   function paintCountries() {
     const document = mapRef.current?.contentDocument;
     if (!document) return;
+    const smallRegionAnchors: Record<string, { x: number; y: number }> = {
+      HK: { x: 680.5, y: 463.5 },
+    };
     document.querySelectorAll("[data-signal-atlas-locator]").forEach((node) => node.remove());
     for (const node of document.querySelectorAll<SVGElement>("path, circle, polygon")) {
       node.style.fill = "#d9ddd4";
@@ -342,49 +345,50 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
     }
     for (const item of placed) {
       const code = countryCode[item.country];
-      const mapId = code === "CN" ? "cnx" : code.toLowerCase();
+      const mapId = code.toLowerCase();
       const node = document.getElementById(mapId) as unknown as SVGGraphicsElement | null;
-      if (!node) continue;
       const heat = item.count / max;
       const palette = ["#dce7be", "#bed288", "#91ad57", "#627f34", "#2f461c"];
       const color = palette[Math.min(palette.length - 1, Math.max(0, Math.ceil(heat * palette.length) - 1))];
-      const shapes = node.matches("path, circle, polygon") ? [node] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
-      for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; shape.style.pointerEvents = "all"; }
-      node.style.cursor = "pointer";
-      node.setAttribute("tabindex", "0");
-      node.setAttribute("role", "button");
-      node.setAttribute("aria-label", `${item.country}，${item.count} 篇报道`);
-      const nativeTitle = [...node.children].find((child) => child.tagName.toLowerCase() === "title");
+      if (node) {
+        const shapes = node.matches("path, circle, polygon") ? [node] : [...node.querySelectorAll<SVGElement>("path, circle, polygon")];
+        for (const shape of shapes) { shape.style.fill = color; shape.style.opacity = "1"; shape.style.pointerEvents = "all"; }
+      }
+      const bounds = node?.getBBox();
+      const anchor = smallRegionAnchors[code] ?? (bounds ? { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 } : null);
+      let interactiveNode: SVGGraphicsElement | null = node;
+      if (anchor && (!node || (bounds && (bounds.width < 18 || bounds.height < 18)))) {
+        const locator = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        locator.setAttribute("data-signal-atlas-locator", code);
+        locator.setAttribute("cx", String(anchor.x));
+        locator.setAttribute("cy", String(anchor.y));
+        locator.setAttribute("r", "7");
+        locator.setAttribute("fill", color);
+        locator.setAttribute("stroke", "#ffffff");
+        locator.setAttribute("stroke-width", "2");
+        locator.setAttribute("vector-effect", "non-scaling-stroke");
+        document.documentElement.appendChild(locator);
+        interactiveNode = locator;
+      }
+      if (!interactiveNode) continue;
+      interactiveNode.style.cursor = "pointer";
+      interactiveNode.setAttribute("tabindex", "0");
+      interactiveNode.setAttribute("role", "button");
+      interactiveNode.setAttribute("aria-label", `${item.country}，${item.count} 篇报道`);
+      const nativeTitle = [...interactiveNode.children].find((child) => child.tagName.toLowerCase() === "title");
       if (nativeTitle) nativeTitle.textContent = `${item.country}：${item.count} 篇报道`;
       const show = (event: PointerEvent | MouseEvent | FocusEvent) => {
         const mouse = "clientX" in event && event.clientX > 0;
-        const bounds = node.getBoundingClientRect();
-        const x = mouse ? event.clientX : bounds.left + bounds.width / 2;
-        const y = mouse ? event.clientY : bounds.top + bounds.height / 2;
+        const screenBounds = interactiveNode!.getBoundingClientRect();
+        const x = mouse ? event.clientX : screenBounds.left + screenBounds.width / 2;
+        const y = mouse ? event.clientY : screenBounds.top + screenBounds.height / 2;
         setTooltip({ country: item.country, count: item.count, x: Math.min(window.innerWidth - 180, x + 14), y: Math.max(12, y - 12) });
       };
-      node.onpointerenter = show;
-      node.onpointermove = show;
-      node.onpointerleave = () => setTooltip(null);
-      node.onfocus = show;
-      node.onblur = () => setTooltip(null);
-      const bounds = node.getBBox();
-      if (bounds.width < 18 || bounds.height < 18) {
-        const locator = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        locator.setAttribute("data-signal-atlas-locator", code);
-        locator.setAttribute("cx", String(bounds.x + bounds.width / 2));
-        locator.setAttribute("cy", String(bounds.y + bounds.height / 2));
-        locator.setAttribute("r", "11");
-        locator.setAttribute("fill", color);
-        locator.setAttribute("stroke", "#ffffff");
-        locator.setAttribute("stroke-width", "3");
-        locator.setAttribute("vector-effect", "non-scaling-stroke");
-        locator.style.cursor = "pointer";
-        locator.onpointerenter = show;
-        locator.onpointermove = show;
-        locator.onpointerleave = () => setTooltip(null);
-        node.parentNode?.appendChild(locator);
-      }
+      interactiveNode.onpointerenter = show;
+      interactiveNode.onpointermove = show;
+      interactiveNode.onpointerleave = () => setTooltip(null);
+      interactiveNode.onfocus = show;
+      interactiveNode.onblur = () => setTooltip(null);
     }
   }
   useEffect(() => { paintCountries(); });
@@ -392,13 +396,13 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
     <div className="map-zoom-controls" aria-label="地图缩放控件"><button type="button" aria-label="放大地图" onClick={() => changeZoom(zoom + .5)}>＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label="缩小地图" disabled={zoom <= 1} onClick={() => changeZoom(zoom - .5)}>−</button><button type="button" onClick={() => changeZoom(1)}>重置</button></div>
     <div ref={viewportRef} className="world-map" aria-label="按国家地区显示新闻量的世界热力图" onDoubleClick={() => changeZoom(zoom + .5)} onWheel={(event) => { event.preventDefault(); changeZoom(zoom + (event.deltaY < 0 ? .5 : -.5)); }}>
       <div className="world-map-canvas" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
-        <object ref={mapRef} className="world-map-base" data="/world-map-detailed.svg" type="image/svg+xml" aria-label="平面国家边界与报道强度" onLoad={paintCountries} />
+        <object ref={mapRef} className="world-map-base" data="/world-map-flat.svg" type="image/svg+xml" aria-label="矩形平面展开的国家边界与报道强度" onLoad={paintCountries} />
       </div>
     </div>
     {tooltip && <div className="map-data-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.country}</strong><span>{tooltip.count.toLocaleString()} 篇报道</span></div>}
     <p className="map-usage-hint">悬停查看地区数据 · 滚轮、双击或按钮缩放 · 放大后拖动滚动条定位小区域</p>
     <div className="heat-legend"><span>报道较少</span><i /><i /><i /><i /><span>报道最多</span></div>
-    <span className="map-attribution">平面世界地图</span>
+    <span className="map-attribution">矩形平面展开 · 支持缩放</span>
     {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
   </div>;
 }
