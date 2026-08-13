@@ -1,0 +1,651 @@
+import { env } from "cloudflare:workers";
+import { meaningfulTokens } from "./text-analysis";
+
+const tables = [
+  `CREATE TABLE IF NOT EXISTS brand_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT '',
+    workspace_id INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '',
+    website TEXT NOT NULL DEFAULT '',
+    match_mode TEXT NOT NULL DEFAULT 'precise',
+    scope_terms TEXT NOT NULL DEFAULT '',
+    exclude_terms TEXT NOT NULL DEFAULT '',
+    official_accounts TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspaces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    credential_owner_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'editor',
+    status TEXT NOT NULL DEFAULT 'active',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workspace_id, user_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspace_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'editor',
+    status TEXT NOT NULL DEFAULT 'pending',
+    invited_by TEXT NOT NULL,
+    accepted_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT NOT NULL DEFAULT ''
+  )`,
+  `CREATE TABLE IF NOT EXISTS mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    source TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    source_country TEXT NOT NULL,
+    content_country TEXT NOT NULL,
+    language TEXT NOT NULL,
+    location_confidence INTEGER NOT NULL DEFAULT 0,
+    location_method TEXT NOT NULL DEFAULT '',
+    sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL DEFAULT '中性陈述',
+    risk INTEGER NOT NULL DEFAULT 20,
+    impact INTEGER NOT NULL DEFAULT 50,
+    summary TEXT NOT NULL DEFAULT '',
+    cluster_key TEXT NOT NULL,
+    parent_url TEXT NOT NULL DEFAULT '',
+    relation TEXT NOT NULL DEFAULT '',
+    engagement INTEGER NOT NULL DEFAULT 0,
+    excerpt TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    discovered_via TEXT NOT NULL DEFAULT 'global_discovery',
+    content_hash TEXT NOT NULL DEFAULT '',
+    word_count INTEGER NOT NULL DEFAULT 0,
+    sentiment_score INTEGER NOT NULL DEFAULT 0,
+    topics TEXT NOT NULL DEFAULT '',
+    keywords TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS media_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    domain TEXT NOT NULL,
+    name TEXT NOT NULL,
+    country TEXT NOT NULL DEFAULT '地区待确认',
+    language TEXT NOT NULL DEFAULT '语言待确认',
+    homepage_url TEXT NOT NULL,
+    feed_url TEXT NOT NULL DEFAULT '',
+    sitemap_url TEXT NOT NULL DEFAULT '',
+    robots_policy TEXT NOT NULL DEFAULT '',
+    robots_checked_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'discovered',
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    last_discovered_at TEXT NOT NULL,
+    last_crawled_at TEXT NOT NULL DEFAULT '',
+    next_crawl_at TEXT NOT NULL,
+    etag TEXT NOT NULL DEFAULT '',
+    last_modified TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS propagation_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    cluster_key TEXT NOT NULL,
+    from_mention_id INTEGER NOT NULL,
+    to_mention_id INTEGER NOT NULL,
+    similarity INTEGER NOT NULL,
+    confidence INTEGER NOT NULL,
+    method TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    time_gap_minutes INTEGER NOT NULL,
+    cross_border INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS traffic_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    country TEXT NOT NULL,
+    visitors INTEGER NOT NULL,
+    views INTEGER NOT NULL,
+    baseline INTEGER NOT NULL,
+    landing_page TEXT NOT NULL,
+    anomaly_ratio INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS tracked_entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    language TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    mention_id INTEGER,
+    title TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    country TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL,
+    query TEXT NOT NULL,
+    status TEXT NOT NULL,
+    found_count INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_locks (
+    name TEXT PRIMARY KEY,
+    locked_until TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS provider_health (
+    provider TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'online',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    retry_after TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_attempt_at TEXT NOT NULL DEFAULT '',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS connector_credentials (
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    last_four TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'saved',
+    last_test_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, provider)
+  )`,
+  `CREATE TABLE IF NOT EXISTS monid_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    mention_id INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'RUNNING',
+    terms TEXT NOT NULL DEFAULT '[]',
+    cost INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_post_metrics (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    post_id TEXT NOT NULL DEFAULT '',
+    author_id TEXT NOT NULL DEFAULT '',
+    author_username TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    follower_count INTEGER NOT NULL DEFAULT 0,
+    likes INTEGER NOT NULL DEFAULT 0,
+    comments INTEGER NOT NULL DEFAULT 0,
+    shares INTEGER NOT NULL DEFAULT 0,
+    views INTEGER NOT NULL DEFAULT 0,
+    plays INTEGER NOT NULL DEFAULT 0,
+    matched_terms TEXT NOT NULL DEFAULT '[]',
+    metrics_updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_author_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    author_id TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL,
+    follower_count INTEGER NOT NULL DEFAULT 0,
+    following_count INTEGER NOT NULL DEFAULT 0,
+    verified INTEGER NOT NULL DEFAULT 0,
+    captured_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS comment_analyses (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    adapter TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'unsupported',
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    analyzed_count INTEGER NOT NULL DEFAULT 0,
+    positive_count INTEGER NOT NULL DEFAULT 0,
+    neutral_count INTEGER NOT NULL DEFAULT 0,
+    negative_count INTEGER NOT NULL DEFAULT 0,
+    mixed_count INTEGER NOT NULL DEFAULT 0,
+    sentiment TEXT NOT NULL DEFAULT '样本不足',
+    sentiment_score INTEGER NOT NULL DEFAULT 0,
+    keywords TEXT NOT NULL DEFAULT '[]',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_collected_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS mention_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mention_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT '网页新闻',
+    source_comment_id TEXT NOT NULL,
+    parent_comment_id TEXT NOT NULL DEFAULT '',
+    author_id TEXT NOT NULL DEFAULT '',
+    author_username TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    is_verified INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL DEFAULT '中性陈述',
+    sentiment_score INTEGER NOT NULL DEFAULT 0,
+    language TEXT NOT NULL DEFAULT '语言待确认',
+    topic TEXT NOT NULL DEFAULT '其他讨论',
+    keywords TEXT NOT NULL DEFAULT '[]',
+    likes INTEGER NOT NULL DEFAULT 0,
+    replies INTEGER NOT NULL DEFAULT 0,
+    comment_url TEXT NOT NULL DEFAULT '',
+    fetched_via TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL DEFAULT '',
+    collected_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS comment_annotations (
+    comment_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    workspace_id INTEGER NOT NULL DEFAULT 0,
+    mention_id INTEGER NOT NULL,
+    annotator_user_id TEXT NOT NULL,
+    model_sentiment TEXT NOT NULL,
+    model_emotion TEXT NOT NULL,
+    model_topic TEXT NOT NULL,
+    model_score INTEGER NOT NULL DEFAULT 0,
+    manual_sentiment TEXT NOT NULL,
+    manual_emotion TEXT NOT NULL,
+    manual_topic TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS sentiment_calibration_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_comment_targets (
+    mention_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'Instagram',
+    media_id TEXT NOT NULL,
+    post_url TEXT NOT NULL,
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    collected_count INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '',
+    adapter TEXT NOT NULL DEFAULT 'v2',
+    v2_failures INTEGER NOT NULL DEFAULT 0,
+    v1_failures INTEGER NOT NULL DEFAULT 0,
+    top_level_complete INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS social_comment_reply_queue (
+    mention_id INTEGER NOT NULL,
+    brand_id INTEGER NOT NULL,
+    media_id TEXT NOT NULL,
+    parent_comment_id TEXT NOT NULL,
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    collected_count INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mention_id, parent_comment_id)
+  )`,
+] as const;
+
+const indexes = [
+  "CREATE INDEX IF NOT EXISTS idx_brand_profiles_user_active ON brand_profiles(user_id, active)",
+  "CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_user_id)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_members_user_active ON workspace_members(user_id, status, is_active)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_members_email ON workspace_members(email, status)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_invites_email_status ON workspace_invites(email, status, expires_at)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace_status ON workspace_invites(workspace_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_published ON mentions(brand_id, published_at)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_country_platform ON mentions(brand_id, source_country, platform)",
+  "CREATE INDEX IF NOT EXISTS idx_mentions_brand_cluster ON mentions(brand_id, cluster_key)",
+  "CREATE INDEX IF NOT EXISTS idx_alerts_brand_ack_severity ON alerts(brand_id, acknowledged, severity)",
+  "CREATE INDEX IF NOT EXISTS idx_traffic_brand_country_recorded ON traffic_signals(brand_id, country, recorded_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sync_runs_brand_started ON sync_runs(brand_id, started_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_sources_brand_domain ON media_sources(brand_id, domain)",
+  "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_next_crawl ON media_sources(brand_id, status, next_crawl_at)",
+  "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_country ON media_sources(brand_id, country)",
+  "CREATE INDEX IF NOT EXISTS idx_propagation_edges_brand_cluster ON propagation_edges(brand_id, cluster_key)",
+  "CREATE INDEX IF NOT EXISTS idx_propagation_edges_to_mention ON propagation_edges(to_mention_id)",
+  "CREATE INDEX IF NOT EXISTS idx_tracked_entities_brand ON tracked_entities(brand_id, active)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_monid_jobs_run_id ON monid_jobs(run_id)",
+  "CREATE INDEX IF NOT EXISTS idx_monid_jobs_brand_status ON monid_jobs(brand_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_monid_jobs_mention_stage ON monid_jobs(mention_id, stage, status)",
+  "CREATE INDEX IF NOT EXISTS idx_social_metrics_brand_platform ON social_post_metrics(brand_id, platform)",
+  "CREATE INDEX IF NOT EXISTS idx_social_metrics_author ON social_post_metrics(brand_id, author_username)",
+  "CREATE INDEX IF NOT EXISTS idx_social_authors_brand_user_time ON social_author_snapshots(brand_id, username, captured_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_analyses_brand_collected ON comment_analyses(brand_id, last_collected_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_mention_comments_source ON mention_comments(mention_id, source_comment_id)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_mention ON mention_comments(brand_id, mention_id)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_platform_time ON mention_comments(brand_id, platform, published_at)",
+  "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_sentiment ON mention_comments(brand_id, sentiment, sentiment_score)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_annotations_brand_updated ON comment_annotations(brand_id, updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_annotations_workspace ON comment_annotations(workspace_id, brand_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sentiment_calibration_brand_token ON sentiment_calibration_rules(brand_id, token)",
+  "CREATE INDEX IF NOT EXISTS idx_sentiment_calibration_brand_weight ON sentiment_calibration_rules(brand_id, weight)",
+  "CREATE INDEX IF NOT EXISTS idx_social_comment_targets_brand_status ON social_comment_targets(brand_id, status, updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_social_comment_replies_brand_status ON social_comment_reply_queue(brand_id, status, updated_at)",
+] as const;
+
+export async function ensureDatabase() {
+  const db = env.DB;
+  await db.batch([...tables, ...indexes].map((statement) => db.prepare(statement)));
+  const columns = [
+    "ALTER TABLE brand_profiles ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'precise'",
+    "ALTER TABLE brand_profiles ADD COLUMN scope_terms TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN exclude_terms TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN official_accounts TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE mentions ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
+    "ALTER TABLE mention_comments ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN adapter TEXT NOT NULL DEFAULT 'v2'",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN v2_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN v1_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN adapter TEXT NOT NULL DEFAULT 'v2'",
+    "ALTER TABLE social_comment_targets ADD COLUMN v2_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN v1_failures INTEGER NOT NULL DEFAULT 0",
+  ];
+  for (const statement of columns) {
+    try { await db.prepare(statement).run(); } catch { /* Existing deployment already has the column. */ }
+  }
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_brand_profiles_workspace_active ON brand_profiles(workspace_id, active)").run();
+  await db.batch([
+    db.prepare(`UPDATE mentions SET source_country = '中国大陆',
+      content_country = CASE WHEN content_country = '中国' THEN '中国大陆' ELSE content_country END
+      WHERE source_country = '中国'`),
+    db.prepare(`UPDATE media_sources SET country = '中国大陆' WHERE country = '中国'`),
+    db.prepare(`UPDATE mentions SET source_country = '中国大陆', content_country = '中国大陆', location_confidence = 99,
+      location_method = '媒体域名 / 已知媒体库'
+      WHERE (lower(url) LIKE '%://%.163.com/%' OR lower(url) LIKE '%://163.com/%' OR source LIKE '%网易%' OR source LIKE '%網易%')
+        AND source_country IN ('地区未披露', '地区待确认', '华语地区')`),
+    db.prepare(`UPDATE media_sources SET country = '中国大陆'
+      WHERE (lower(domain) = '163.com' OR lower(domain) LIKE '%.163.com' OR name LIKE '%网易%' OR name LIKE '%網易%')
+        AND country IN ('地区未披露', '地区待确认', '华语地区')`),
+  ]);
+}
+
+export async function getActiveBrandForUser(db: D1Database, userId: string) {
+  if (!userId) return null;
+  const shared = await db.prepare(`SELECT brand_profiles.* FROM workspace_members
+    JOIN brand_profiles ON brand_profiles.workspace_id = workspace_members.workspace_id
+    WHERE workspace_members.user_id = ? AND workspace_members.status = 'active' AND workspace_members.is_active = 1
+      AND brand_profiles.active = 1 ORDER BY brand_profiles.id DESC LIMIT 1`)
+    .bind(userId).first<Record<string, unknown>>();
+  if (shared) return shared;
+  return db.prepare("SELECT * FROM brand_profiles WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1")
+    .bind(userId).first<Record<string, unknown>>();
+}
+
+export async function getWorkspaceAccessForUser(db: D1Database, userId: string) {
+  if (!userId) return null;
+  return db.prepare(`SELECT workspaces.*, workspace_members.role, workspace_members.email,
+      workspace_members.display_name, workspace_members.joined_at
+    FROM workspace_members JOIN workspaces ON workspaces.id = workspace_members.workspace_id
+    WHERE workspace_members.user_id = ? AND workspace_members.status = 'active' AND workspace_members.is_active = 1
+    ORDER BY workspace_members.joined_at DESC LIMIT 1`).bind(userId).first<Record<string, unknown>>();
+}
+
+function profileTerms(value: unknown) {
+  return String(value ?? "").split(/[\n,，]/).map((item) => item.trim().normalize("NFKC").toLocaleLowerCase()).filter(Boolean);
+}
+
+function mentionContainsExcludedTerm(row: Record<string, unknown>, exclusions: string[]) {
+  if (!exclusions.length) return false;
+  const searchable = [row.title, row.excerpt, row.summary, row.source, row.author, row.url, row.keywords,
+    row.social_author_username, row.social_author_name].map((value) => String(value ?? "")).join(" ").normalize("NFKC").toLocaleLowerCase();
+  return exclusions.some((term) => searchable.includes(term));
+}
+
+export async function loadDashboardData(userId = "") {
+  await ensureDatabase();
+  const db = env.DB;
+  const workspace = await getWorkspaceAccessForUser(db, userId);
+  const brand = await getActiveBrandForUser(db, userId);
+  const brandId = Number(brand?.id ?? -1);
+  const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
+  const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
+  const healthPrefix = `${brandId}:%`;
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats] = await Promise.all([
+    db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
+      social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
+      social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
+      social_post_metrics.likes AS social_likes, social_post_metrics.comments AS social_comments,
+      social_post_metrics.shares AS social_shares, social_post_metrics.views AS social_views,
+      social_post_metrics.plays AS social_plays, social_post_metrics.matched_terms AS social_matched_terms,
+      social_post_metrics.metrics_updated_at AS social_metrics_updated_at,
+      comment_analyses.adapter AS comment_adapter, comment_analyses.status AS comment_status,
+      comment_analyses.reported_count AS comment_reported_count, comment_analyses.analyzed_count AS comment_analyzed_count,
+      comment_analyses.positive_count AS comment_positive_count, comment_analyses.neutral_count AS comment_neutral_count,
+      comment_analyses.negative_count AS comment_negative_count, comment_analyses.mixed_count AS comment_mixed_count,
+      comment_analyses.sentiment AS comment_sentiment, comment_analyses.sentiment_score AS comment_sentiment_score,
+      comment_analyses.keywords AS comment_keywords, comment_analyses.last_error AS comment_last_error,
+      comment_analyses.last_collected_at AS comment_last_collected_at
+      FROM mentions LEFT JOIN social_post_metrics ON social_post_metrics.mention_id = mentions.id
+      LEFT JOIN comment_analyses ON comment_analyses.mention_id = mentions.id
+      WHERE mentions.brand_id = ? ORDER BY mentions.published_at DESC`).bind(brandId).all(),
+    db.prepare("SELECT * FROM traffic_signals WHERE brand_id = ? ORDER BY recorded_at DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM tracked_entities WHERE brand_id = ? ORDER BY id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM alerts WHERE brand_id = ? ORDER BY acknowledged ASC, id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 20").bind(brandId).all(),
+    db.prepare("SELECT * FROM provider_health WHERE provider LIKE ? ORDER BY provider").bind(healthPrefix).all<{ provider: string; status: string; retry_after: string; last_error: string; last_success_at: string }>(),
+    db.prepare("SELECT * FROM media_sources WHERE brand_id = ? ORDER BY last_crawled_at DESC, id DESC").bind(brandId).all(),
+    db.prepare("SELECT * FROM propagation_edges WHERE brand_id = ? ORDER BY cluster_key, time_gap_minutes ASC").bind(brandId).all(),
+    db.prepare("SELECT provider, last_four, status, last_test_at, updated_at FROM connector_credentials WHERE user_id = ? ORDER BY provider")
+      .bind(credentialOwnerId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
+    db.prepare("SELECT stage, status, cost, error, started_at, completed_at FROM monid_jobs WHERE brand_id = ? ORDER BY id DESC LIMIT 6")
+      .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
+    db.prepare(`SELECT
+      (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN ('CREATED','QUEUED','PENDING','READY','RUNNING')) +
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
+      .bind(brandId, brandId, brandId).first<{ count: number }>(),
+  ]);
+  const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
+  const gdeltHealth = healthByName.get("GDELT");
+  const gdeltLimited = Boolean(gdeltHealth?.status === "limited" && gdeltHealth.retry_after && new Date(gdeltHealth.retry_after).getTime() > Date.now());
+  const eventRegistryHealth = healthByName.get("NewsAPI.ai");
+  const eventRegistryLimited = Boolean(eventRegistryHealth?.retry_after && new Date(eventRegistryHealth.retry_after).getTime() > Date.now());
+  const storedCredentials = new Map(credentialRows.results.map((item) => [item.provider, item]));
+  const newsApiConfigured = Boolean(env.NEWSAPI_AI_KEY || storedCredentials.has("NewsAPI.ai"));
+  const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
+  const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
+  const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
+  const metaConfigured = storedCredentials.has("Meta / Instagram");
+  const tiktokConfigured = storedCredentials.has("TikTok");
+  const monidHealth = healthByName.get("Monid / Instagram");
+  const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
+  const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
+  const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
+  const newsLimited = !newsApiAvailable && gdeltLimited;
+  const newsDetail = newsApiConfigured
+    ? eventRegistryLimited && gdeltLimited ? "NewsAPI.ai 与 GDELT 均在退避重试"
+      : eventRegistryLimited ? "GDELT 正常采集 · NewsAPI.ai 暂时退避"
+      : gdeltLimited ? "NewsAPI.ai 正常采集 · GDELT 限流保护中"
+      : "NewsAPI.ai 每 6 小时发现 · 免费源按到期批次追踪"
+    : gdeltLimited ? "GDELT 限流保护中 · 免费媒体源持续追踪" : "GDELT 每日发现 · 免费源按到期批次追踪";
+  const retryAt = newsLimited
+    ? [eventRegistryHealth?.retry_after, gdeltHealth?.retry_after].filter(Boolean).sort()[0] ?? ""
+    : "";
+  const entityRows = entities.results as Array<Record<string, unknown>>;
+  const exclusions = [...new Set([
+    ...profileTerms(brand?.exclude_terms),
+    ...entityRows.filter((item) => String(item.type) === "排除词" && Number(item.active ?? 1) === 1).flatMap((item) => profileTerms(item.value)),
+  ])];
+  const mentionRows = (mentions.results as Array<Record<string, unknown>>).filter((row) => !mentionContainsExcludedTerm(row, exclusions));
+  const visibleMentionIds = new Set(mentionRows.map((row) => Number(row.id)));
+  const visiblePropagationEdges = (propagationEdges.results as Array<Record<string, unknown>>).filter((edge) =>
+    visibleMentionIds.has(Number(edge.from_mention_id)) && visibleMentionIds.has(Number(edge.to_mention_id)));
+  const countryMap = new Map<string, { country: string; count: number; positive: number; neutral: number; negative: number; risk: number; engagement: number; latest: string }>();
+  const sentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
+  const emotionMap = new Map<string, number>();
+  const timelineMap = new Map<string, { date: string; total: number; positive: number; negative: number }>();
+  const wordMap = new Map<string, number>();
+  const commentWordMap = new Map<string, number>();
+  const commentSentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
+  let commentsAnalyzed = 0;
+  const sourceMap = new Map<string, { source: string; country: string; count: number; impact: number }>();
+  const tracked = entityRows.map((item) => String(item.value ?? "").toLowerCase());
+  for (const row of mentionRows) {
+    const country = String(row.source_country ?? "地区待确认");
+    const tone = String(row.sentiment ?? "中性");
+    const current = countryMap.get(country) ?? { country, count: 0, positive: 0, neutral: 0, negative: 0, risk: 0, engagement: 0, latest: "" };
+    current.count += 1;
+    if (tone === "正面") current.positive += 1;
+    else if (tone === "负面") current.negative += 1;
+    else current.neutral += 1;
+    current.risk = Math.max(current.risk, Number(row.risk ?? 0));
+    current.engagement += Number(row.engagement ?? 0);
+    current.latest = [current.latest, String(row.published_at ?? "")].sort().at(-1) ?? "";
+    countryMap.set(country, current);
+    if (tone === "正面") sentiment.positive += 1;
+    else if (tone === "负面") sentiment.negative += 1;
+    else if (tone === "混合") sentiment.mixed += 1;
+    else sentiment.neutral += 1;
+    const emotion = String(row.emotion ?? "中性陈述");
+    emotionMap.set(emotion, (emotionMap.get(emotion) ?? 0) + 1);
+    const day = String(row.published_at ?? "").slice(0, 10);
+    const daily = timelineMap.get(day) ?? { date: day, total: 0, positive: 0, negative: 0 };
+    daily.total += 1;
+    if (tone === "正面") daily.positive += 1;
+    if (tone === "负面") daily.negative += 1;
+    timelineMap.set(day, daily);
+    const source = String(row.source ?? "未知来源");
+    const sourceStat = sourceMap.get(source) ?? { source, country, count: 0, impact: 0 };
+    sourceStat.count += 1;
+    sourceStat.impact = Math.max(sourceStat.impact, Number(row.impact ?? 0));
+    sourceMap.set(source, sourceStat);
+    const text = `${String(row.title ?? "")} ${String(row.excerpt ?? "")} ${String(row.keywords ?? "")}`;
+    for (const token of meaningfulTokens(text, tracked)) wordMap.set(token, (wordMap.get(token) ?? 0) + 1);
+    commentsAnalyzed += Number(row.comment_analyzed_count ?? 0);
+    commentSentiment.positive += Number(row.comment_positive_count ?? 0);
+    commentSentiment.neutral += Number(row.comment_neutral_count ?? 0);
+    commentSentiment.negative += Number(row.comment_negative_count ?? 0);
+    commentSentiment.mixed += Number(row.comment_mixed_count ?? 0);
+    try {
+      const commentKeywords = JSON.parse(String(row.comment_keywords ?? "[]")) as Array<{ word?: string; count?: number }>;
+      const cleanedRowKeywords = new Map<string, number>();
+      for (const keyword of commentKeywords) {
+        const word = String(keyword.word ?? "").trim();
+        const count = Number(keyword.count ?? 0);
+        if (!word || count <= 0) continue;
+        for (const token of meaningfulTokens(word, tracked)) {
+          cleanedRowKeywords.set(token, (cleanedRowKeywords.get(token) ?? 0) + count);
+          commentWordMap.set(token, (commentWordMap.get(token) ?? 0) + count);
+        }
+      }
+      row.comment_keywords = JSON.stringify([...cleanedRowKeywords.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 35));
+    } catch { /* Older rows may not contain JSON yet. */ }
+  }
+  const sourceRows = mediaSources.results as Array<Record<string, unknown>>;
+  const crawlerOnline = sourceRows.some((item) => item.status === "active" || item.status === "discovered" || item.status === "watching");
+  const [workspaceMembers, workspaceInvites] = workspaceId ? await Promise.all([
+    db.prepare(`SELECT user_id, email, display_name, role, status, joined_at, last_seen_at
+      FROM workspace_members WHERE workspace_id = ? AND status = 'active'
+      ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END, joined_at ASC`)
+      .bind(workspaceId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT id, email, role, status, created_at, expires_at FROM workspace_invites
+      WHERE workspace_id = ? AND status = 'pending' AND datetime(expires_at) > datetime('now') ORDER BY created_at DESC`)
+      .bind(workspaceId).all<Record<string, unknown>>(),
+  ]) : [{ results: [] }, { results: [] }];
+  const role = String(workspace?.role ?? "owner");
+  return {
+    mentions: mentionRows,
+    traffic: traffic.results,
+    entities: entities.results,
+    alerts: alerts.results,
+    syncRuns: syncRuns.results,
+    brand,
+    providerHealth: providerHealth.results.map((item) => ({ ...item, provider: item.provider.replace(/^\d+:/, "") })),
+    mediaSources: sourceRows,
+    propagationEdges: visiblePropagationEdges,
+    connectorCredentials: credentialRows.results,
+    workspace: workspace ? {
+      id: workspaceId,
+      name: String(workspace.name ?? `${String(brand?.name ?? "品牌")}团队工作区`),
+      role,
+      canManage: role === "owner" || role === "admin",
+      canEdit: role !== "viewer",
+      members: workspaceMembers.results,
+      invites: role === "owner" || role === "admin" ? workspaceInvites.results : [],
+    } : null,
+    analytics: {
+      countries: [...countryMap.values()].sort((a, b) => b.count - a.count),
+      sentiment,
+      emotions: [...emotionMap.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count),
+      timeline: [...timelineMap.values()].filter((item) => item.date).sort((a, b) => a.date.localeCompare(b.date)).slice(-30),
+      words: [...wordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
+      commentWords: [...commentWordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
+      commentSentiment,
+      commentsAnalyzed,
+      sources: [...sourceMap.values()].sort((a, b) => b.count - a.count || b.impact - a.impact).slice(0, 12),
+      crossBorderEdges: visiblePropagationEdges.filter((item) => Number(item.cross_border) === 1).length,
+      archivedTotal: mentionRows.length,
+    },
+    connectors: [
+      { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
+      { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
+      { id: "monid-vault", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
+        lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
+        status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
+        pending: monidPending, retryAt: monidHealth?.retry_after ?? "", lastError: monidHealth?.last_error ?? "",
+        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook 搜索与公开评论采集"
+          : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
+          : monidPending ? `${monidPending} 个多平台采集步骤处理中` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
+      ...(["Instagram", "X", "YouTube", "TikTok", "Facebook"] as const).map((platform) => ({
+        id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
+        status: (!monidConfigured ? "credentials" : monidLimited ? "limited" : "online") as "credentials" | "limited" | "online",
+        detail: !monidConfigured ? "共享上方 Monid API Key" : `${platform} 公开内容搜索 · 互动指标 · 可取得的评论区文本`,
+      })),
+      { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
+      { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
+      { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },
+      { id: "tiktok", provider: "TikTok", configurable: true, configured: tiktokConfigured, lastFour: storedCredentials.get("TikTok")?.last_four ?? "", name: "TikTok", status: tiktokConfigured ? "approval" : "credentials", detail: tiktokConfigured ? "凭证已保存 · Research API 获批后启用公开关键词监测" : "可配置 Research API Client Key 与 Client Secret" },
+    ],
+  };
+}
