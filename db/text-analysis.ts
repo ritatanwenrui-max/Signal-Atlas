@@ -1,4 +1,5 @@
 export type CommentTone = "正面" | "中性" | "负面" | "混合";
+export type DetailedEmotion = "认可赞赏" | "兴奋期待" | "购买意向" | "好奇讨论" | "轻松戏谑" | "中性陈述" | "担忧顾虑" | "怀疑质疑" | "失望抱怨" | "愤怒抵制" | "反感不适" | "伦理争议";
 
 const chineseStopwords = new Set([
   "的", "了", "和", "是", "在", "就", "都", "而", "及", "与", "着", "或", "被", "把", "让", "给", "从", "到", "上", "下", "中", "里", "对", "将", "又", "也", "还", "很", "太", "更", "最", "吗", "呢", "吧", "啊", "呀", "哦", "嗯", "哈",
@@ -27,6 +28,29 @@ const topicRules: Array<[string, RegExp]> = [
   ["服务售后", /客服|售后|退货|退款|保修|物流|发货|service|support|refund|shipping|delivery|warranty/i],
   ["情绪表达", /喜欢|支持|期待|讨厌|恶心|可怕|离谱|哈哈|love|hate|wow|lol|amazing|creepy/i],
 ];
+
+const emotionRules: Array<[DetailedEmotion, RegExp]> = [
+  ["愤怒抵制", /愤怒|气死|抵制|滚|不可接受|outrage|furious|boycott|unacceptable/i],
+  ["反感不适", /恶心|反感| creepy|诡异|不适|disgust|gross|disturbing/i],
+  ["伦理争议", /伦理|道德|物化|违法|取代人类|ethic|moral|objectify|dehuman/i],
+  ["怀疑质疑", /怀疑|质疑|真假|骗局|噱头|智商税|scam|fake|doubt|skeptic|really\?/i],
+  ["担忧顾虑", /担心|担忧|害怕|风险|危险|隐私|泄露|安全吗|concern|worry|afraid|risk|danger|privacy/i],
+  ["失望抱怨", /失望|糟糕|不行|故障|退款|太贵|disappoint|terrible|broken|refund|expensive/i],
+  ["购买意向", /哪里买|怎么买|想买|购买|下单|预订|价格多少|where.*buy|want.*buy|order|purchase|available/i],
+  ["兴奋期待", /期待|等不及|终于|兴奋|迫不及待|excited|can't wait|cannot wait|looking forward/i],
+  ["轻松戏谑", /哈哈|笑死|好笑|离谱|lol|lmao|rofl|😂|🤣|😅/i],
+  ["认可赞赏", /喜欢|支持|推荐|厉害|优秀|惊喜|可爱|赞|love|great|awesome|amazing|excellent|support|recommend/i],
+  ["好奇讨论", /为什么|怎么|如何|什么原理|有意思|好奇|why|how|what|interesting|curious|\?/i],
+];
+
+export function inferDetailedEmotion(text: string, sentiment: CommentTone = "中性"): DetailedEmotion {
+  const matched = emotionRules.find(([, pattern]) => pattern.test(text));
+  if (matched) return matched[0];
+  if (sentiment === "正面") return "认可赞赏";
+  if (sentiment === "负面") return "担忧顾虑";
+  if (sentiment === "混合") return "好奇讨论";
+  return "中性陈述";
+}
 
 function normalizedBrandTerms(brandTerms: string[]) {
   return brandTerms.map((term) => term.normalize("NFKC").toLocaleLowerCase().replace(/^[@#]/, "").trim()).filter(Boolean);
@@ -69,5 +93,5 @@ export function analyzeCommentText(text: string) {
   const sentiment: CommentTone = positive && negative ? "混合" : positive ? "正面" : negative ? "负面" : "中性";
   const score = positive || negative ? Math.max(-100, Math.min(100, Math.round((positive - negative) / (positive + negative) * 100))) : 0;
   const topic = topicRules.find(([, pattern]) => pattern.test(text))?.[0] ?? "其他讨论";
-  return { sentiment, score, topic, language: inferTextLanguage(text) };
+  return { sentiment, score, emotion: inferDetailedEmotion(text, sentiment), topic, language: inferTextLanguage(text) };
 }

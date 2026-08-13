@@ -26,12 +26,12 @@ export async function GET(request: Request) {
   const pageSize = 40;
   const range = ["1", "7", "30", "0"].includes(url.searchParams.get("range") ?? "") ? url.searchParams.get("range")! : "30";
   const sentiment = ["正面", "中性", "负面", "混合"].includes(url.searchParams.get("sentiment") ?? "") ? url.searchParams.get("sentiment")! : "";
-  const platform = ["Instagram", "Facebook", "TikTok", "X", "YouTube"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
+  const platform = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
   const sort = ["newest", "liked", "risk"].includes(url.searchParams.get("sort") ?? "") ? url.searchParams.get("sort")! : "newest";
   const query = (url.searchParams.get("query") ?? "").trim().slice(0, 120);
   const postId = integerParam(url.searchParams.get("post"), 0, 0, Number.MAX_SAFE_INTEGER);
 
-  const clauses = ["c.brand_id = ?", "c.platform != '网页新闻'"];
+  const clauses = ["c.brand_id = ?"];
   const binds: Array<string | number> = [brandId];
   if (range !== "0") clauses.push(`datetime(COALESCE(NULLIF(c.published_at, ''), c.collected_at)) >= datetime('now', '-${Number(range)} days')`);
   if (sentiment) { clauses.push("c.sentiment = ?"); binds.push(sentiment); }
@@ -60,6 +60,8 @@ export async function GET(request: Request) {
     WHERE ${where} ORDER BY ${ordering} LIMIT ? OFFSET ?`;
   const sentimentSql = `SELECT c.sentiment AS label, COUNT(*) AS count FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${where} GROUP BY c.sentiment ORDER BY count DESC`;
+  const emotionSql = `SELECT c.emotion AS label, COUNT(*) AS count FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+    WHERE ${where} GROUP BY c.emotion ORDER BY count DESC`;
   const timelineSql = `SELECT substr(COALESCE(NULLIF(c.published_at, ''), c.collected_at), 1, 10) AS date, COUNT(*) AS total,
       SUM(CASE WHEN c.sentiment = '负面' THEN 1 ELSE 0 END) AS negative,
       SUM(CASE WHEN c.sentiment = '正面' THEN 1 ELSE 0 END) AS positive
@@ -81,10 +83,11 @@ export async function GET(request: Request) {
   const keywordSql = `SELECT c.keywords FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${where} ORDER BY c.id DESC LIMIT 5000`;
 
-  const [summary, comments, sentimentRows, timeline, topics, topPosts, topAuthors, keywordRows, targets, targetTotals, riskComments] = await Promise.all([
+  const [summary, comments, sentimentRows, emotionRows, timeline, topics, topPosts, topAuthors, keywordRows, targets, targetTotals, riskComments] = await Promise.all([
     db.prepare(summarySql).bind(...binds).first<Record<string, number>>(),
     db.prepare(commentsSql).bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, unknown>>(),
     db.prepare(sentimentSql).bind(...binds).all<Record<string, unknown>>(),
+    db.prepare(emotionSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(timelineSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(topicSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(topPostsSql).bind(...binds).all<Record<string, unknown>>(),
@@ -97,7 +100,7 @@ export async function GET(request: Request) {
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
       FROM social_comment_targets WHERE brand_id = ?`).bind(brandId).first<{ reported: number; collected: number }>(),
     db.prepare(`SELECT c.*, m.title AS post_title, m.url AS post_url FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-      WHERE c.brand_id = ? AND c.platform != '网页新闻' AND c.sentiment IN ('负面','混合')
+      WHERE c.brand_id = ? AND c.sentiment IN ('负面','混合')
       ORDER BY c.sentiment_score ASC, c.likes DESC, c.published_at DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
   ]);
 
@@ -133,6 +136,7 @@ export async function GET(request: Request) {
   return Response.json({
     summary: { ...safeSummary, reported, collected, coverage: reported ? Math.min(100, Math.round(collected / reported * 100)) : total ? 100 : 0 },
     sentiment: sentimentRows.results,
+    emotions: emotionRows.results,
     timeline: timeline.results,
     topics: topics.results,
     words,

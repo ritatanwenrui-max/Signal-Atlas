@@ -2,9 +2,10 @@ import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { refreshPublicCommentAnalyses } from "./comments";
-import { collectMonidInstagram, countPendingMonidJobs, hasPendingMonidJobs, queueInstagramCommentTarget, refreshSocialFollowerCounts } from "./monid";
+import { collectMonidSocial, countPendingMonidJobs, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts } from "./monid";
 import { ensureDatabase, getActiveBrandForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { inferDetailedEmotion } from "./text-analysis";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -21,8 +22,35 @@ const BURST_CONTINUATION = 48 * 3600_000;
 function providerKey(brandId: number, provider: string) { return `${brandId}:${provider}`; }
 
 function termsFrom(entities: TrackedEntity[]) {
-  return [...new Set(entities.filter((item) => item.active && item.type !== "排除词" && item.type !== "官网域名")
+  return [...new Set(entities.filter((item) => item.active && ["品牌", "别名"].includes(item.type))
     .map((item) => item.value.trim()).filter(Boolean))].slice(0, 12);
+}
+
+function splitProfileTerms(value: unknown) {
+  return String(value ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizedScopeText(value: string) { return value.normalize("NFKC").toLocaleLowerCase(); }
+
+function matchesBrandScope(candidate: MonitoringCandidate, primaryTerms: string[], brand: Record<string, unknown>) {
+  const body = normalizedScopeText(`${candidate.title} ${candidate.discussionText} ${candidate.source} ${candidate.author ?? ""} ${candidate.url}`);
+  const exclusions = splitProfileTerms(brand.exclude_terms);
+  if (exclusions.some((term) => body.includes(normalizedScopeText(term)))) return false;
+  const accounts = splitProfileTerms(brand.official_accounts).map((item) => normalizedScopeText(item.replace(/^@/, "")));
+  const sourceIdentity = normalizedScopeText(`${candidate.source} ${candidate.author ?? ""} ${candidate.url}`).replaceAll("@", "");
+  const officialAccountMatch = accounts.some((account) => account && sourceIdentity.includes(account));
+  const website = normalizedScopeText(String(brand.website ?? "").replace(/^https?:\/\//, "").replace(/\/$/, ""));
+  const officialDomainMatch = Boolean(website && normalizedScopeText(candidate.url).includes(website));
+  const brandMatch = primaryTerms.some((term) => body.includes(normalizedScopeText(term)));
+  if (officialAccountMatch || officialDomainMatch) return true;
+  if (!brandMatch) return false;
+  const mode = String(brand.match_mode ?? "precise");
+  if (mode === "broad") return true;
+  const anchors = splitProfileTerms(brand.scope_terms);
+  if (!anchors.length) return true;
+  const anchorMatch = anchors.some((term) => body.includes(normalizedScopeText(term)));
+  if (mode === "precise") return anchorMatch;
+  return anchorMatch || primaryTerms.some((term) => normalizedScopeText(term).length >= 8 && body.includes(normalizedScopeText(term)));
 }
 
 function gdeltQuery(terms: string[]) {
@@ -174,7 +202,7 @@ function analyzeText(text: string, terms: string[]) {
   const risk = Math.min(98, 18 + negativeHits.length * 13 + crisisHits.length * 22);
   const topic = crisisHits.length ? "危机风险" : negativeHits.length ? "争议反馈" : positiveHits.length ? "品牌进展" : "一般提及";
   const keywords = [...textTokens(text, terms)].slice(0, 12);
-  return { sentiment, score, risk, topic, keywords };
+  return { sentiment, emotion: inferDetailedEmotion(text, sentiment), score, risk, topic, keywords };
 }
 
 function impactFor(candidate: MonitoringCandidate) {
@@ -202,9 +230,8 @@ async function upsertSocialMetrics(db: D1Database, brandId: number, mentionId: n
       JSON.stringify(metrics.matchedTerms), updatedAt).run();
   await db.prepare("UPDATE mentions SET engagement = ?, author = CASE WHEN ? != '' THEN ? ELSE author END WHERE id = ? AND brand_id = ?")
     .bind(candidate.engagement, metrics.authorUsername, metrics.authorUsername ? `@${metrics.authorUsername}` : metrics.authorName, mentionId, brandId).run();
-  if (candidate.platform === "Instagram") {
-    await queueInstagramCommentTarget(db, brandId, mentionId, metrics.postId, candidate.url, metrics.comments);
-  }
+  if (["Instagram", "X", "YouTube", "TikTok", "Facebook"].includes(candidate.platform))
+    await queueSocialCommentTarget(db, brandId, mentionId, candidate.platform, metrics.postId, candidate.url, metrics.comments);
 }
 
 function retryDelay(error: unknown, failureCount: number) {
@@ -395,7 +422,7 @@ export async function runNewsSync(force = false, userId = "") {
       const providers: ProviderTask[] = [
         ...(discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
         ...(discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
-        ...(monidApiKey && (monidDue || monidPending) ? [{ name: "Monid / Instagram", load: () => collectMonidInstagram(db, brandId, terms, monidApiKey, monidDue) }] : []),
+        ...(monidApiKey && (monidDue || monidPending) ? [{ name: "Monid / Instagram", load: () => collectMonidSocial(db, brandId, terms, monidApiKey, monidDue) }] : []),
         ...(xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
         ...(youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
       ];
@@ -422,10 +449,11 @@ export async function runNewsSync(force = false, userId = "") {
         }
       }
 
-      await registerMediaSources(db, brandId, discoveryCandidates);
+      const scopedDiscovery = discoveryCandidates.filter((candidate) => matchesBrandScope(candidate, terms, brand));
+      await registerMediaSources(db, brandId, scopedDiscovery);
       const crawler = await crawlMediaSources(db, brandId, terms);
       await markProviderHealthy(db, brandId, "Free media crawler", attemptedAt);
-      const candidates = [...discoveryCandidates, ...crawler.candidates];
+      const candidates = [...scopedDiscovery, ...crawler.candidates.filter((candidate) => matchesBrandScope(candidate, terms, brand))];
       const existing = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source, source_country, content_country, language, published_at, parent_url
         FROM mentions WHERE brand_id = ? ORDER BY published_at DESC LIMIT 5000`).bind(brandId).all<ExistingMention>();
       const known = [...existing.results];
@@ -452,12 +480,12 @@ export async function runNewsSync(force = false, userId = "") {
         const contentHash = simpleHash(`${candidate.title.toLowerCase()}|${excerpt.toLowerCase()}`);
         const firstSeen = new Date().toISOString();
         const result = await db.prepare(`INSERT INTO mentions
-          (brand_id, title, url, source, platform, source_country, content_country, language, location_confidence, location_method, sentiment, risk, impact, summary, cluster_key,
+          (brand_id, title, url, source, platform, source_country, content_country, language, location_confidence, location_method, sentiment, emotion, risk, impact, summary, cluster_key,
            parent_url, relation, engagement, excerpt, author, provider, discovered_via, content_hash, word_count, sentiment_score,
            topics, keywords, first_seen_at, archived_at, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(brandId, candidate.title, candidate.url, candidate.source, candidate.platform, inferredLocation.country, inferredLocation.country,
-            inferredLanguage.language, inferredLocation.confidence, inferredLocation.method, analysis.sentiment, analysis.risk, impact,
+            inferredLanguage.language, inferredLocation.confidence, inferredLocation.method, analysis.sentiment, analysis.emotion, analysis.risk, impact,
             `自动归档 · ${analysis.topic} · ${candidate.platform} · ${candidate.engagement ? `${candidate.engagement.toLocaleString()} 次公开互动` : "互动数据未披露"}${candidate.commentsAnalyzed ? ` · 已分析 ${candidate.commentsAnalyzed} 条高相关评论` : ""}`,
             cluster, candidate.parentUrl, candidate.relation, candidate.engagement, excerpt, candidate.author ?? "", candidate.provider ?? "公开网页",
             candidate.discoveredVia ?? "global_discovery", contentHash, textTokens(`${candidate.title} ${excerpt}`).size, analysis.score,

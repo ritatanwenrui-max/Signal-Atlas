@@ -4,7 +4,7 @@ export type MonitoringCandidate = {
   title: string;
   url: string;
   source: string;
-  platform: "网页新闻" | "Instagram" | "X" | "YouTube";
+  platform: "网页新闻" | "Instagram" | "Facebook" | "TikTok" | "X" | "YouTube";
   sourceCountry: string;
   language: string;
   publishedAt: string;

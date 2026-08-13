@@ -94,7 +94,7 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
 });
 
-test("Monid searches Instagram and paginates every discovered post's public comments and replies", async () => {
+test("Monid searches five social platforms and archives public comments and replies", async () => {
   const [monid, sync, schema, repository, commentsRoute, page] = await Promise.all([
     source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/api/comments/route.ts"), source("app/page.tsx"),
   ]);
@@ -113,22 +113,22 @@ test("Monid searches Instagram and paginates every discovered post's public comm
   assert.doesNotMatch(monid, /reportedCount === 0/);
   assert.match(monid, /COMMENT_JOBS_PER_CYCLE = 4/);
   assert.match(monid, /"queued" \| "error"/);
-  assert.match(sync, /collectMonidInstagram/);
+  assert.match(sync, /collectMonidSocial/);
   assert.match(sync, /upsertSocialMetrics/);
-  assert.match(sync, /queueInstagramCommentTarget/);
+  assert.match(sync, /queueSocialCommentTarget/);
   assert.match(schema, /socialPostMetrics/);
   assert.match(schema, /socialAuthorSnapshots/);
   assert.match(schema, /monidJobs/);
   assert.match(schema, /socialCommentTargets/);
   assert.match(schema, /socialCommentReplyQueue/);
-  assert.match(repository, /Instagram 公共搜索（Monid）/);
+  assert.match(repository, /Monid 多平台公共搜索/);
   assert.match(monid, /CREATED.*QUEUED.*PENDING.*READY.*RUNNING/);
   assert.match(sync, /earlyMonidPending/);
-  assert.match(repository, /全量公开评论及回复归档/);
+  assert.match(repository, /公开评论与回复归档/);
   assert.match(commentsRoute, /COMMENT ARCHIVE|mention_comments/);
   assert.match(commentsRoute, /topPosts/);
   assert.match(commentsRoute, /riskComments/);
-  assert.match(page, /社媒评论/);
+  assert.match(page, /评论舆情/);
   assert.match(page, /评论明细档案/);
   assert.match(page, /帖子评论抓取进度/);
 });

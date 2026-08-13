@@ -8,6 +8,10 @@ const tables = [
     name TEXT NOT NULL,
     aliases TEXT NOT NULL DEFAULT '',
     website TEXT NOT NULL DEFAULT '',
+    match_mode TEXT NOT NULL DEFAULT 'precise',
+    scope_terms TEXT NOT NULL DEFAULT '',
+    exclude_terms TEXT NOT NULL DEFAULT '',
+    official_accounts TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -25,6 +29,7 @@ const tables = [
     location_confidence INTEGER NOT NULL DEFAULT 0,
     location_method TEXT NOT NULL DEFAULT '',
     sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL DEFAULT '中性陈述',
     risk INTEGER NOT NULL DEFAULT 20,
     impact INTEGER NOT NULL DEFAULT 50,
     summary TEXT NOT NULL DEFAULT '',
@@ -224,6 +229,7 @@ const tables = [
     is_verified INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL,
     sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL DEFAULT '中性陈述',
     sentiment_score INTEGER NOT NULL DEFAULT 0,
     language TEXT NOT NULL DEFAULT '语言待确认',
     topic TEXT NOT NULL DEFAULT '其他讨论',
@@ -298,6 +304,17 @@ const indexes = [
 export async function ensureDatabase() {
   const db = env.DB;
   await db.batch([...tables, ...indexes].map((statement) => db.prepare(statement)));
+  const columns = [
+    "ALTER TABLE brand_profiles ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'precise'",
+    "ALTER TABLE brand_profiles ADD COLUMN scope_terms TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN exclude_terms TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN official_accounts TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mentions ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
+    "ALTER TABLE mention_comments ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
+  ];
+  for (const statement of columns) {
+    try { await db.prepare(statement).run(); } catch { /* Existing deployment already has the column. */ }
+  }
   await db.batch([
     db.prepare(`UPDATE mentions SET source_country = '中国', content_country = '中国', location_confidence = 99,
       location_method = '媒体域名 / 已知媒体库'
@@ -385,6 +402,7 @@ export async function loadDashboardData(userId = "") {
   const mentionRows = mentions.results as Array<Record<string, unknown>>;
   const countryMap = new Map<string, { country: string; count: number; positive: number; neutral: number; negative: number; risk: number; engagement: number; latest: string }>();
   const sentiment = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
+  const emotionMap = new Map<string, number>();
   const timelineMap = new Map<string, { date: string; total: number; positive: number; negative: number }>();
   const wordMap = new Map<string, number>();
   const commentWordMap = new Map<string, number>();
@@ -408,6 +426,8 @@ export async function loadDashboardData(userId = "") {
     else if (tone === "负面") sentiment.negative += 1;
     else if (tone === "混合") sentiment.mixed += 1;
     else sentiment.neutral += 1;
+    const emotion = String(row.emotion ?? "中性陈述");
+    emotionMap.set(emotion, (emotionMap.get(emotion) ?? 0) + 1);
     const day = String(row.published_at ?? "").slice(0, 10);
     const daily = timelineMap.get(day) ?? { date: day, total: 0, positive: 0, negative: 0 };
     daily.total += 1;
@@ -457,6 +477,7 @@ export async function loadDashboardData(userId = "") {
     analytics: {
       countries: [...countryMap.values()].sort((a, b) => b.count - a.count),
       sentiment,
+      emotions: [...emotionMap.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count),
       timeline: [...timelineMap.values()].filter((item) => item.date).sort((a, b) => a.date.localeCompare(b.date)).slice(-30),
       words: [...wordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
       commentWords: [...commentWordMap.entries()].map(([word, count]) => ({ word, count })).sort((a, b) => b.count - a.count).slice(0, 45),
@@ -469,13 +490,18 @@ export async function loadDashboardData(userId = "") {
     connectors: [
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
-      { id: "monid-instagram", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
-        lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Instagram 公共搜索（Monid）",
+      { id: "monid-vault", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
+        lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
         pending: monidPending, retryAt: monidHealth?.retry_after ?? "", lastError: monidHealth?.last_error ?? "",
-        detail: !monidConfigured ? "配置 Monid API Key 后，按品牌词搜索公开帖子，并分页采集公开评论与回复"
+        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook 搜索与公开评论采集"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
-          : monidPending ? `${monidPending} 个采集步骤处理中；包含搜帖、评论与回复分页` : "普通文字关键词搜帖 · 作者与互动 · 全量公开评论及回复归档" },
+          : monidPending ? `${monidPending} 个多平台采集步骤处理中` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
+      ...(["Instagram", "X", "YouTube", "TikTok", "Facebook"] as const).map((platform) => ({
+        id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
+        status: (!monidConfigured ? "credentials" : monidLimited ? "limited" : "online") as "credentials" | "limited" | "online",
+        detail: !monidConfigured ? "共享上方 Monid API Key" : `${platform} 公开内容搜索 · 互动指标 · 可取得的评论区文本`,
+      })),
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
       { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },

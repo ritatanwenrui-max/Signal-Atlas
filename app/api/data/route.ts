@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
 import { verifyMonidApiKey } from "../../../db/monid";
+import { analyzeCommentText } from "../../../db/text-analysis";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
@@ -25,11 +26,17 @@ export async function POST(request: Request) {
     if (!brandName) return Response.json({ error: "品牌名不能为空" }, { status: 400 });
     const aliases = String(payload.aliases ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
     const website = String(payload.website ?? "").trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const matchMode = ["precise", "balanced", "broad"].includes(String(payload.matchMode)) ? String(payload.matchMode) : "precise";
+    const scopeTerms = String(payload.scopeTerms ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean).join("\n");
+    const excludeTerms = String(payload.excludeTerms ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean).join("\n");
+    const officialAccounts = String(payload.officialAccounts ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean).join("\n");
     const now = new Date().toISOString();
     let brandId = Number(existingBrand?.id ?? 0);
     if (!brandId) {
-      const inserted = await db.prepare("INSERT INTO brand_profiles (user_id, name, aliases, website, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)")
-        .bind(user.userId, brandName, aliases.join("\n"), website, now).run();
+      const inserted = await db.prepare(`INSERT INTO brand_profiles
+        (user_id, name, aliases, website, match_mode, scope_terms, exclude_terms, official_accounts, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).bind(user.userId, brandName, aliases.join("\n"), website,
+          matchMode, scopeTerms, excludeTerms, officialAccounts, now).run();
       brandId = Number(inserted.meta.last_row_id);
     } else {
       const brandChanged = String(existingBrand?.name ?? "") !== brandName;
@@ -52,10 +59,11 @@ export async function POST(request: Request) {
           db.prepare("DELETE FROM sync_locks WHERE name = ?").bind(`monitoring:${brandId}`),
         ]);
       }
-      await db.prepare("UPDATE brand_profiles SET name = ?, aliases = ?, website = ?, active = 1, updated_at = ? WHERE id = ? AND user_id = ?")
-        .bind(brandName, aliases.join("\n"), website, now, brandId, user.userId).run();
+      await db.prepare(`UPDATE brand_profiles SET name = ?, aliases = ?, website = ?, match_mode = ?, scope_terms = ?,
+        exclude_terms = ?, official_accounts = ?, active = 1, updated_at = ? WHERE id = ? AND user_id = ?`)
+        .bind(brandName, aliases.join("\n"), website, matchMode, scopeTerms, excludeTerms, officialAccounts, now, brandId, user.userId).run();
     }
-    await db.prepare("DELETE FROM tracked_entities WHERE brand_id = ?").bind(brandId).run();
+    await db.prepare("DELETE FROM tracked_entities WHERE brand_id = ? AND type IN ('品牌','别名','官网域名')").bind(brandId).run();
     await db.batch([
       db.prepare("INSERT INTO tracked_entities (brand_id, type, value, language) VALUES (?, ?, ?, ?)").bind(brandId, "品牌", brandName, "通用"),
       ...aliases.map((alias) => db.prepare("INSERT INTO tracked_entities (brand_id, type, value, language) VALUES (?, ?, ?, ?)").bind(brandId, "别名", alias, "通用")),
@@ -85,14 +93,27 @@ export async function POST(request: Request) {
       const risk = Number(payload.risk ?? 30);
       const impact = Number(payload.impact ?? 60);
       const country = String(payload.sourceCountry ?? "地区待确认");
+      const excerpt = String(payload.excerpt ?? payload.summary ?? "").trim();
+      const analysis = analyzeCommentText(`${title} ${excerpt}`);
       const result = await db.prepare(`INSERT INTO mentions
-        (brand_id, title, url, source, platform, source_country, content_country, language, sentiment, risk, impact, summary, cluster_key, parent_url, relation, engagement, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        (brand_id, title, url, source, platform, source_country, content_country, language, sentiment, emotion, risk, impact,
+         summary, excerpt, author, provider, discovered_via, cluster_key, parent_url, relation, engagement, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Manual', 'manual', ?, ?, ?, ?, ?)`)
         .bind(brandId, title, String(payload.url ?? "#"), source, String(payload.platform ?? "网页新闻"), country,
-          String(payload.contentCountry ?? country), String(payload.language ?? "语言待确认"), String(payload.sentiment ?? "中性"), risk,
-          impact, String(payload.summary ?? "人工补充内容，已进入统一分析流程。"), String(payload.clusterKey ?? `manual-${Date.now()}`),
+          String(payload.contentCountry ?? country), String(payload.language ?? analysis.language), analysis.sentiment, analysis.emotion, risk,
+          impact, excerpt || "人工补充内容，已进入统一分析流程。", excerpt, String(payload.author ?? ""), String(payload.clusterKey ?? `manual-${Date.now()}`),
           String(payload.parentUrl ?? ""), String(payload.relation ?? ""), Math.max(0, Number(payload.engagement ?? 0)),
           String(payload.publishedAt ?? new Date().toISOString())).run();
+      const platform = String(payload.platform ?? "网页新闻");
+      if (platform !== "网页新闻") {
+        const metric = (key: string) => payload[key] === "" || payload[key] == null ? -1 : Math.max(0, Number(payload[key]));
+        await db.prepare(`INSERT INTO social_post_metrics
+          (mention_id, brand_id, platform, post_id, author_id, author_username, author_name, follower_count, likes, comments, shares, views, plays, matched_terms, metrics_updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)`)
+          .bind(result.meta.last_row_id, brandId, platform, String(payload.postId ?? ""), String(payload.authorId ?? ""),
+            String(payload.authorUsername ?? ""), String(payload.author ?? ""), metric("followerCount"), metric("likes"), metric("comments"),
+            metric("shares"), metric("views"), metric("plays"), new Date().toISOString()).run();
+      }
       if (risk >= 70 || impact >= 90) await db.prepare("INSERT INTO alerts (brand_id, mention_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(brandId, result.meta.last_row_id, title, risk >= 80 ? "Critical" : "High", country, risk >= 70 ? `风险分 ${risk}，需要人工复核` : `影响力 ${impact}，传播潜力较高`).run();
     } else if (action === "createTraffic") {

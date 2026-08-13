@@ -155,12 +155,12 @@ async function storeCollection(db: D1Database, brandId: number, mentionId: numbe
       counts.negative, counts.mixed, sentiment, analyzed.length ? Math.round(score / analyzed.length) : 0, JSON.stringify(keywords), collection.error ?? "", capturedAt).run();
   for (let index = 0; index < analyzed.length; index += 40) {
     const statements = analyzed.slice(index, index + 40).map((item) => db.prepare(`INSERT INTO mention_comments
-      (mention_id, brand_id, platform, source_comment_id, content, sentiment, sentiment_score, language, topic, keywords, likes, replies, published_at, collected_at, fetched_via)
-      VALUES (?, ?, '网页新闻', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '公开网页适配器')
+      (mention_id, brand_id, platform, source_comment_id, content, sentiment, emotion, sentiment_score, language, topic, keywords, likes, replies, published_at, collected_at, fetched_via)
+      VALUES (?, ?, '网页新闻', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '公开网页适配器')
       ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET content = excluded.content, sentiment = excluded.sentiment,
-        sentiment_score = excluded.sentiment_score, language = excluded.language, topic = excluded.topic, keywords = excluded.keywords,
+        emotion = excluded.emotion, sentiment_score = excluded.sentiment_score, language = excluded.language, topic = excluded.topic, keywords = excluded.keywords,
         likes = excluded.likes, replies = excluded.replies, published_at = excluded.published_at, collected_at = excluded.collected_at`)
-      .bind(mentionId, brandId, item.id, item.text, item.sentiment, item.score, item.language, item.topic,
+      .bind(mentionId, brandId, item.id, item.text, item.sentiment, item.emotion, item.score, item.language, item.topic,
         JSON.stringify(keywordCounts([item.text], brandTerms, 8)), item.likes, item.replies, item.publishedAt, capturedAt));
     if (statements.length) await db.batch(statements);
   }
