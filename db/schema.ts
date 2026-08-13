@@ -4,6 +4,7 @@ import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "driz
 export const brandProfiles = sqliteTable("brand_profiles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").notNull().default(""),
+  workspaceId: integer("workspace_id").notNull().default(0),
   name: text("name").notNull(),
   aliases: text("aliases").notNull().default(""),
   website: text("website").notNull().default(""),
@@ -14,7 +15,51 @@ export const brandProfiles = sqliteTable("brand_profiles", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_brand_profiles_user_active").on(table.userId, table.active)]);
+}, (table) => [
+  index("idx_brand_profiles_user_active").on(table.userId, table.active),
+  index("idx_brand_profiles_workspace_active").on(table.workspaceId, table.active),
+]);
+
+export const workspaces = sqliteTable("workspaces", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  ownerUserId: text("owner_user_id").notNull(),
+  credentialOwnerUserId: text("credential_owner_user_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("idx_workspaces_owner").on(table.ownerUserId)]);
+
+export const workspaceMembers = sqliteTable("workspace_members", {
+  workspaceId: integer("workspace_id").notNull(),
+  userId: text("user_id").notNull(),
+  email: text("email").notNull(),
+  displayName: text("display_name").notNull().default(""),
+  role: text("role").notNull().default("editor"),
+  status: text("status").notNull().default("active"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  joinedAt: text("joined_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.userId] }),
+  index("idx_workspace_members_user_active").on(table.userId, table.status, table.isActive),
+  index("idx_workspace_members_email").on(table.email, table.status),
+]);
+
+export const workspaceInvites = sqliteTable("workspace_invites", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  workspaceId: integer("workspace_id").notNull(),
+  email: text("email").notNull(),
+  role: text("role").notNull().default("editor"),
+  status: text("status").notNull().default("pending"),
+  invitedBy: text("invited_by").notNull(),
+  acceptedBy: text("accepted_by").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  expiresAt: text("expires_at").notNull(),
+  acceptedAt: text("accepted_at").notNull().default(""),
+}, (table) => [
+  index("idx_workspace_invites_email_status").on(table.email, table.status, table.expiresAt),
+  index("idx_workspace_invites_workspace_status").on(table.workspaceId, table.status),
+]);
 
 export const mentions = sqliteTable("mentions", {
   id: integer("id").primaryKey({ autoIncrement: true }),

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { ensureDatabase, getActiveBrandForUser } from "../../../db/repository";
 import { meaningfulTokens } from "../../../db/text-analysis";
+import { prepareWorkspaceForUser } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
@@ -17,6 +18,7 @@ export async function GET(request: Request) {
   if (!user) return Response.json({ error: "请先登录后查看评论舆情" }, { status: 401 });
   await ensureDatabase();
   const db = env.DB;
+  await prepareWorkspaceForUser(db, user);
   const brand = await getActiveBrandForUser(db, user.userId);
   const brandId = Number(brand?.id ?? 0);
   if (!brandId) return Response.json({ error: "请先创建品牌监测档案" }, { status: 400 });

@@ -5,7 +5,7 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 async function source(path) { return readFile(new URL(path, root), "utf8"); }
 
-test("dashboard provides lifetime archive, event analytics, maps, and personal API setup", async () => {
+test("dashboard provides lifetime archive, event analytics, maps, and shared team setup", async () => {
   const page = await source("app/page.tsx");
   assert.match(page, /新闻档案/);
   assert.match(page, /有史以来全部记录/);
@@ -18,7 +18,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.doesNotMatch(page, /少量付费发现|大部分追踪免费完成|正在被归档和溯源|输入一次品牌名/);
   assert.match(page, /!data\.viewer\.authenticated \? <PublicAccess/);
   assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
-  assert.match(page, /每个账号拥有独立的品牌档案、新闻数据和 API 凭证/);
+  assert.match(page, /登录后会直接进入同一个团队工作区/);
   assert.match(page, /全球报道热力分布/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
@@ -31,14 +31,16 @@ test("dashboard provides lifetime archive, event analytics, maps, and personal A
   assert.match(page, /network-edge cross/);
   assert.match(page, /样本不足/);
   assert.match(page, /saveConnectorCredential/);
-  assert.match(page, /PERSONAL API VAULT/);
-  assert.match(page, /按登录用户隔离/);
+  assert.match(page, /TEAM API VAULT/);
+  assert.match(page, /团队共用采集结果/);
+  assert.match(page, /SHARED TEAM WORKSPACE/);
+  assert.match(page, /添加到团队/);
   assert.match(page, /Instagram Business \/ Creator Account ID/);
   assert.match(page, /Client Secret/);
   assert.match(page, /Instagram 公共搜索（Monid）|Monid \/ Instagram/);
   assert.match(page, /monid_live_/);
   assert.match(page, /social_follower_count/);
-  assert.match(page, /Monid 公开搜索/);
+  assert.match(page, /Monid.*五个平台|Monid.*Instagram/);
   assert.match(page, /60 \* 60 \* 1000/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
 });
@@ -76,7 +78,7 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(repository, /每 6 小时发现/);
 });
 
-test("connector credentials are user-scoped and encrypted server-side", async () => {
+test("connector credentials are workspace-shared and encrypted server-side", async () => {
   const [credentials, route, schema, repository] = await Promise.all([
     source("db/credentials.ts"), source("app/api/data/route.ts"), source("db/schema.ts"), source("db/repository.ts"),
   ]);
@@ -89,9 +91,26 @@ test("connector credentials are user-scoped and encrypted server-side", async ()
   assert.match(route, /getChatGPTUser/);
   assert.match(route, /请先登录/);
   assert.match(route, /viewer: \{ authenticated: Boolean\(user\) \}/);
+  assert.match(route, /credential_owner_user_id/);
+  assert.match(route, /inviteWorkspaceMembers/);
   assert.match(schema, /connectorCredentials/);
   assert.match(schema, /primaryKey\(\{ columns: \[table\.userId, table\.provider\] \}\)/);
   assert.doesNotMatch(repository, /SELECT \* FROM brand_profiles WHERE user_id = ''/);
+});
+
+test("invited users automatically enter the same workspace with role-based access", async () => {
+  const [workspaces, repository, schema, dataRoute] = await Promise.all([
+    source("db/workspaces.ts"), source("db/repository.ts"), source("db/schema.ts"), source("app/api/data/route.ts"),
+  ]);
+  assert.match(workspaces, /lower\(workspace_invites\.email\) = \?/);
+  assert.match(workspaces, /status = 'accepted'/);
+  assert.match(workspaces, /UPDATE workspace_members SET is_active = 0/);
+  assert.match(workspaces, /permission: "read" \| "edit" \| "manage"/);
+  assert.match(repository, /JOIN brand_profiles ON brand_profiles\.workspace_id = workspace_members\.workspace_id/);
+  assert.match(repository, /credentialOwnerId/);
+  assert.match(schema, /workspaceMembers/);
+  assert.match(schema, /workspaceInvites/);
+  assert.match(dataRoute, /removeWorkspaceMember/);
 });
 
 test("Monid searches five social platforms and archives public comments and replies", async () => {

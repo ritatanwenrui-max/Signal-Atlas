@@ -36,10 +36,14 @@ type Analytics = {
   crossBorderEdges: number;
   archivedTotal: number;
 };
+type WorkspaceMember = { user_id: string; email: string; display_name: string; role: string; status: string; joined_at: string; last_seen_at: string };
+type WorkspaceInvite = { id: number; email: string; role: string; status: string; created_at: string; expires_at: string };
+type TeamWorkspace = { id: number; name: string; role: string; canManage: boolean; canEdit: boolean; members: WorkspaceMember[]; invites: WorkspaceInvite[] };
 type DashboardData = {
   mentions: Mention[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null;
   connectors: Connector[]; mediaSources: MediaSource[]; propagationEdges: PropagationEdge[]; analytics: Analytics;
   viewer: { authenticated: boolean };
+  workspace: TeamWorkspace | null;
 };
 type SocialCommentRow = {
   id: number; mention_id: number; platform: string; source_comment_id: string; parent_comment_id: string; author_id: string;
@@ -63,10 +67,10 @@ type SocialCommentsData = {
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 
 const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, emotions: [], timeline: [], words: [], commentWords: [], commentSentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, commentsAnalyzed: 0, sources: [], crossBorderEdges: 0, archivedTotal: 0 };
-const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, viewer: { authenticated: false } };
+const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, viewer: { authenticated: false }, workspace: null };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
-  ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["settings", "品牌配置", "07"],
+  ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["settings", "品牌与团队", "07"],
 ] as const;
 const platformCatalog = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"] as const;
 const platformVisuals = [["网页新闻", "web"], ["Instagram", "instagram"], ["Facebook", "facebook"], ["TikTok", "tiktok"], ["X", "x"], ["YouTube", "youtube"]] as const;
@@ -152,8 +156,8 @@ export default function Home() {
         const next = await response.json() as DashboardData;
         if (!cancelled) setData(next);
         if (next.viewer.authenticated) {
-          if (next.brand) void syncNews(false, false);
-          timer = window.setInterval(() => void syncNews(false, false), 60 * 60 * 1000);
+          if (next.brand && next.workspace?.canEdit) void syncNews(false, false);
+          if (next.workspace?.canEdit) timer = window.setInterval(() => void syncNews(false, false), 60 * 60 * 1000);
         }
       } catch { if (!cancelled) setToast("暂时无法读取情报档案，请稍后刷新"); }
       finally { if (!cancelled) setLoading(false); }
@@ -205,7 +209,7 @@ export default function Home() {
   const initials = data.viewer.authenticated ? data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR" : "--";
 
   useEffect(() => {
-    if (!data.viewer.authenticated || !data.brand || monidConnector?.status !== "online" || !monidConnector.pending) {
+    if (!data.viewer.authenticated || !data.workspace?.canEdit || !data.brand || monidConnector?.status !== "online" || !monidConnector.pending) {
       monidPollAttempts.current = 0;
       return;
     }
@@ -217,7 +221,7 @@ export default function Home() {
     return () => window.clearTimeout(timer);
     // Pending Monid jobs must be reclaimed independently of the regular 20-minute provider cooldown.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.brand, data.viewer.authenticated, monidConnector?.pending, monidConnector?.status, syncing]);
+  }, [data.brand, data.viewer.authenticated, data.workspace?.canEdit, monidConnector?.pending, monidConnector?.status, syncing]);
 
   return <main className="app-shell">
     <aside className="sidebar">
@@ -232,7 +236,7 @@ export default function Home() {
         <div className="system-row"><span>媒体来源库</span><strong>{data.mediaSources.length} 个</strong></div>
         <div className="system-row"><span>最后巡检</span><strong>{syncTime(lastSync?.completed_at ?? lastSync?.started_at)}</strong></div>
       </div>}
-      <div className="sidebar-foot"><div className="avatar">{initials}</div><div><strong>{data.viewer.authenticated ? data.brand?.name ?? "尚未配置品牌" : "尚未登录"}</strong><small>品牌情报工作区</small></div></div>
+      <div className="sidebar-foot"><div className="avatar">{initials}</div><div><strong>{data.viewer.authenticated ? data.workspace?.name ?? data.brand?.name ?? "尚未配置品牌" : "尚未登录"}</strong><small>{data.workspace ? `${data.workspace.members.length} 位成员 · ${roleLabel(data.workspace.role)}` : "品牌情报工作区"}</small></div></div>
     </aside>
 
     <section className="workspace">
@@ -240,19 +244,20 @@ export default function Home() {
         <div><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div>
         <div className="top-actions">
           <label className="search-box"><span>⌕</span><input disabled={!data.viewer.authenticated} aria-label="搜索全部档案" placeholder="搜索标题、来源、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>全档案</kbd></label>
-          <button className="primary-button" disabled={syncing || !data.brand} onClick={() => void syncNews(true, true)}><span>{syncing ? "↻" : "◎"}</span>{syncing ? "巡检中…" : "立即巡检"}</button>
+          {data.workspace && <span className="team-chip">共享工作区 · {data.workspace.members.length} 人</span>}
+          <button className="primary-button" disabled={syncing || !data.brand || !data.workspace?.canEdit} onClick={() => void syncNews(true, true)}><span>{syncing ? "↻" : "◎"}</span>{syncing ? "巡检中…" : "立即巡检"}</button>
         </div>
       </header>
 
       <div className="content-area">
         {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
-          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} />}
-          {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} submit={post} />}
+          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} canEdit={Boolean(data.workspace?.canEdit)} />}
+          {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} submit={post} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
           {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} />}
-          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} />}
-          {view === "settings" && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} submit={post} />}
+          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
+          {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
         </>}
       </div>
     </section>
@@ -265,9 +270,11 @@ function LoadingState() { return <div className="loading-state"><span /><p>正�
 function PublicAccess() {
   return <section className="onboarding">
     <div className="onboarding-copy panel-dark"><h2>品牌舆情监测</h2><p>自动搜索网页新闻与已接入的社交平台内容，并按地区归档、聚类事件、分析情绪和推断传播路径。</p><div className="architecture-mini"><span>搜索与归档</span><b>→</b><span>事件与传播</span><b>→</b><span>情绪与风险</span></div></div>
-    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>每个账号拥有独立的品牌档案、新闻数据和 API 凭证，其他用户无法查看或修改。</p><a className="primary-button wide" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录 →</a><small>登录后即可创建自己的品牌监测空间。</small></div>
+    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>如果管理员已邀请你的邮箱，登录后会直接进入同一个团队工作区，品牌、档案、分析和连接器配置无需重新建立。</p><a className="primary-button wide" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录 →</a><small>未受邀账号会获得独立的新工作区。</small></div>
   </section>;
 }
+
+function roleLabel(role: string) { return role === "owner" ? "所有者" : role === "admin" ? "管理员" : role === "editor" ? "编辑者" : "查看者"; }
 
 function BrandOnboarding({ submit }: { submit: (payload: Record<string, unknown>) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
@@ -281,7 +288,7 @@ function BrandOnboarding({ submit }: { submit: (payload: Record<string, unknown>
   </section>;
 }
 
-function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: string) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown> }) {
+function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge, canEdit }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: string) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown>; canEdit: boolean }) {
   const topCountry = data.analytics.countries[0];
   const negative = data.analytics.sentiment.negative;
   const total = data.mentions.length || 1;
@@ -302,7 +309,7 @@ function Overview({ data, brand, clusters, alerts, setView, selectCluster, ackno
       <section className="surface map-panel"><div className="section-head"><div><p className="eyebrow">GLOBAL NEWS INTENSITY</p><h3>全球报道热力分布</h3></div><button className="text-button" onClick={() => setView("analytics")}>查看完整分析 →</button></div><WorldHeatMap countries={data.analytics.countries} /></section>
       <section className="surface recent-panel"><div className="section-head"><div><p className="eyebrow">LATEST ARCHIVE</p><h3>最新归档新闻</h3></div><button className="text-button" onClick={() => setView("archive")}>全部档案 →</button></div><div className="latest-list">{data.mentions.slice(0, 6).map((item) => <article key={item.id}><span className={`tone-dot ${sentimentClass(item.sentiment)}`} /><div><a href={item.url} target="_blank" rel="noreferrer">{item.title}</a><small>{item.source} · {item.source_country} · {formatDate(item.published_at)}</small></div><b className={`risk-pill ${riskClass(item.risk)}`}>{item.risk}</b></article>)}</div></section>
       <section className="surface event-panel"><div className="section-head"><div><p className="eyebrow">PROPAGATION EVENTS</p><h3>正在扩散的报道链路</h3></div><span className="count-chip">{clusters.length}</span></div><div className="event-list">{clusters.slice(0, 5).map((cluster, index) => <button key={cluster.key} onClick={() => selectCluster(cluster.key)}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{cluster.title}</strong><small>起点：{cluster.originCountry} · 覆盖 {cluster.countries.length} 个地区 · {cluster.items.length} 个节点</small></div><b>{cluster.items.length}</b><i>→</i></button>)}</div></section>
-      <section className="surface alerts-panel"><div className="section-head"><div><p className="eyebrow">ACTION QUEUE</p><h3>舆情告警</h3></div><span className="count-chip">{alerts.length}</span></div>{alerts.length ? <div className="alert-list">{alerts.slice(0, 4).map((alert) => <article key={alert.id}><div><span className={`severity ${alert.severity.toLowerCase()}`}>{alert.severity}</span><small>{alert.country}</small></div><h4>{alert.title}</h4><p>{alert.reason}</p><button onClick={() => void acknowledge(alert.id)}>标记已处理</button></article>)}</div> : <div className="empty-mini">当前没有待处理高风险信号</div>}</section>
+      <section className="surface alerts-panel"><div className="section-head"><div><p className="eyebrow">ACTION QUEUE</p><h3>舆情告警</h3></div><span className="count-chip">{alerts.length}</span></div>{alerts.length ? <div className="alert-list">{alerts.slice(0, 4).map((alert) => <article key={alert.id}><div><span className={`severity ${alert.severity.toLowerCase()}`}>{alert.severity}</span><small>{alert.country}</small></div><h4>{alert.title}</h4><p>{alert.reason}</p>{canEdit && <button onClick={() => void acknowledge(alert.id)}>标记已处理</button>}</article>)}</div> : <div className="empty-mini">当前没有待处理高风险信号</div>}</section>
     </div>
   </div>;
 }
@@ -322,7 +329,7 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   </div>;
 }
 
-function ArchiveView({ mentions, allCount, countries, platforms, platformCounts, country, platform, sentiment, setCountry, setPlatform, setSentiment, submit }: { mentions: Mention[]; allCount: number; countries: string[]; platforms: string[]; platformCounts: Record<string, number>; country: string; platform: string; sentiment: string; setCountry: (value: string) => void; setPlatform: (value: string) => void; setSentiment: (value: string) => void; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown> }) {
+function ArchiveView({ mentions, allCount, countries, platforms, platformCounts, country, platform, sentiment, setCountry, setPlatform, setSentiment, submit, canEdit }: { mentions: Mention[]; allCount: number; countries: string[]; platforms: string[]; platformCounts: Record<string, number>; country: string; platform: string; sentiment: string; setCountry: (value: string) => void; setPlatform: (value: string) => void; setSentiment: (value: string) => void; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canEdit: boolean }) {
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<"newest" | "oldest" | "risk">("newest");
   const [manualOpen, setManualOpen] = useState(false);
@@ -362,7 +369,7 @@ function ArchiveView({ mentions, allCount, countries, platforms, platformCounts,
   return <div className="archive-page">
     <section className="archive-intro"><div><p className="eyebrow">LIFETIME MEDIA ARCHIVE</p><h2>品牌历史媒体档案</h2><p>新闻与社媒内容统一保留发布时间、地区、来源、账号、公开互动、情绪、风险和传播事件编号；旧记录不会被下一次搜索覆盖。</p></div><div className="archive-total"><small>ARCHIVED</small><strong>{allCount}</strong><span>有史以来全部记录</span></div></section>
     <section className="surface archive-table-card">
-      <div className="archive-toolbar"><div className="filters"><select value={country} onChange={(event) => { setCountry(event.target.value); setPage(1); }}>{countries.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按平台筛选档案" value={platform} onChange={(event) => { setPlatform(event.target.value); setPage(1); }}>{platforms.map((item) => <option key={item} value={item}>{item === "全部平台" ? `全部平台（${allCount}）` : `${item}（${platformCounts[item] ?? 0}）`}</option>)}</select><select value={sentiment} onChange={(event) => { setSentiment(event.target.value); setPage(1); }}>{["全部情绪", "正面", "中性", "负面", "混合"].map((item) => <option key={item}>{item}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="risk">风险优先</option></select></div><div className="archive-actions"><button className="secondary-button" onClick={() => { const date = new Date(); setManualPublishedAt(new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)); setManualOpen(true); }}>＋ 手动补充</button><button className="secondary-button" onClick={exportCsv}>↓ 导出 CSV</button></div></div>
+      <div className="archive-toolbar"><div className="filters"><select value={country} onChange={(event) => { setCountry(event.target.value); setPage(1); }}>{countries.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按平台筛选档案" value={platform} onChange={(event) => { setPlatform(event.target.value); setPage(1); }}>{platforms.map((item) => <option key={item} value={item}>{item === "全部平台" ? `全部平台（${allCount}）` : `${item}（${platformCounts[item] ?? 0}）`}</option>)}</select><select value={sentiment} onChange={(event) => { setSentiment(event.target.value); setPage(1); }}>{["全部情绪", "正面", "中性", "负面", "混合"].map((item) => <option key={item}>{item}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="risk">风险优先</option></select></div><div className="archive-actions">{canEdit && <button className="secondary-button" onClick={() => { const date = new Date(); setManualPublishedAt(new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)); setManualOpen(true); }}>＋ 手动补充</button>}<button className="secondary-button" onClick={exportCsv}>↓ 导出 CSV</button></div></div>
       <div className="table-scroll"><table className="archive-table"><thead><tr><th>发布时间</th><th>平台</th><th>新闻 / 社媒原文</th><th>媒体 / 账号</th><th>互动</th><th>地区</th><th>具体情绪</th><th>风险</th><th>事件</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td className="date-cell">{formatDate(item.published_at, true)}</td><td><span className={`platform-badge platform-${item.platform.toLowerCase().replace("网页新闻", "web")}`}>{item.platform}</span></td><td className="title-cell"><a href={item.url} target="_blank" rel="noreferrer">{item.title}<span>↗</span></a><small>{item.excerpt || item.summary}</small></td><td><strong>{item.source}</strong>{item.author && item.author !== item.source && <small>{item.author}</small>}</td><td>{interaction(item)}</td><td><span className="country-tag">{countryCode[item.source_country] ?? "GL"}</span>{item.source_country}</td><td><span className="emotion-pill">{item.emotion || item.sentiment}</span><small>{item.sentiment}</small></td><td><span className={`risk-score ${riskClass(item.risk)}`}>{item.risk}</span></td><td><code>{item.cluster_key.replace("story-", "#")}</code></td></tr>)}</tbody></table></div>
       {!rows.length && <div className="empty-table">当前筛选条件下暂无档案</div>}
       <div className="pagination"><span>显示 {ordered.length} 条结果 · 第 {Math.min(page, pages)} / {pages} 页</span><div><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>← 上一页</button><button disabled={page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>下一页 →</button></div></div>
@@ -537,7 +544,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   </div>;
 }
 
-function CoverageView({ connectors, sources, submit }: { connectors: Connector[]; sources: MediaSource[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown> }) {
+function CoverageView({ connectors, sources, submit, canManage }: { connectors: Connector[]; sources: MediaSource[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean }) {
   const active = sources.filter((item) => item.status === "active").length;
   const [editing, setEditing] = useState<string | null>(null);
   const [credential, setCredential] = useState("");
@@ -545,7 +552,7 @@ function CoverageView({ connectors, sources, submit }: { connectors: Connector[]
   const [accountId, setAccountId] = useState("");
   const [busy, setBusy] = useState(false);
   const configurable = connectors.filter((item) => item.configurable && item.provider);
-  function openCredential(provider: string) { setEditing(provider); setCredential(""); setSecondaryCredential(""); setAccountId(""); }
+  function openCredential(provider: string) { if (!canManage) return; setEditing(provider); setCredential(""); setSecondaryCredential(""); setAccountId(""); }
   async function saveCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!editing || !credential.trim()) return; setBusy(true);
     const value = editing === "Meta / Instagram" ? JSON.stringify({ accessToken: credential.trim(), accountId: accountId.trim() })
@@ -554,12 +561,12 @@ function CoverageView({ connectors, sources, submit }: { connectors: Connector[]
     try { await submit({ action: "saveConnectorCredential", provider: editing, credential: value, lastFour }, `${editing} API 配置已加密保存`); setCredential(""); setSecondaryCredential(""); setAccountId(""); setEditing(null); }
     finally { setBusy(false); }
   }
-  async function removeCredential(provider: string) { setBusy(true); try { await submit({ action: "deleteConnectorCredential", provider }, `${provider} 的个人 API 配置已删除`); } finally { setBusy(false); } }
+  async function removeCredential(provider: string) { setBusy(true); try { await submit({ action: "deleteConnectorCredential", provider }, `${provider} 的团队 API 配置已删除`); } finally { setBusy(false); } }
   return <div className="coverage-page">
     <section className="coverage-architecture panel-dark"><div><h2>采集计划</h2><p>新闻与免费来源持续归档；一个 Monid 凭证连接 Instagram、X、YouTube、TikTok、Facebook，并采集可公开取得的帖子评论与回复。网页新闻评论区也进入同一分析页。</p></div><div className="architecture-flow"><article><b>01</b><strong>全球与社媒发现</strong><span>NewsAPI.ai / GDELT / Monid</span><small>每 6 小时 / 每日</small></article><i>→</i><article><b>02</b><strong>来源库</strong><span>{sources.length} 个媒体域名</span><small>自动更新</small></article><i>→</i><article><b>03</b><strong>持续追踪</strong><span>新闻 / 帖子 / 评论回复</span><small>后台异步归档</small></article></div></section>
-    <section className="surface connector-section"><div className="section-head"><div><p className="eyebrow">CONNECTOR STATUS</p><h3>采集连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article key={connector.id}><div><i className={connector.status} /><strong>{connector.name}</strong><span className={`connector-state ${connector.status}`}>{connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权"}</span></div><p>{connector.detail}</p>{connector.configurable && connector.provider && <button className="connector-config-button" onClick={() => openCredential(connector.provider!)}>{connector.configured ? `已配置 · ${connector.lastFour === "环境密钥" ? "站点默认密钥" : `•••• ${connector.lastFour}`}` : "＋ 配置我的 API"}</button>}</article>)}</div></section>
-    <section className="surface credential-vault"><div className="vault-copy"><p className="eyebrow">PERSONAL API VAULT</p><h3>我的数据连接器</h3><p>每位登录用户都可以保存自己的 NewsAPI.ai、Monid、X、YouTube、Meta / Instagram 与 TikTok 凭证。凭证在服务端使用 AES-GCM 加密，完整值不会返回浏览器；手动和定时巡检均按当前品牌工作区隔离。</p><div className="vault-security"><span>✓ 按登录用户隔离</span><span>✓ 服务端加密</span><span>✓ 前端仅显示末四位</span></div></div><div className="credential-list">{configurable.map((connector) => <article key={connector.id}><div><i className={connector.configured ? "configured" : ""} /><div><strong>{connector.name}</strong><small>{connector.configured ? connector.lastFour === "环境密钥" ? "当前使用站点默认密钥" : `个人密钥 •••• ${connector.lastFour}` : "尚未配置个人密钥"}</small></div></div><div><button onClick={() => openCredential(connector.provider!)}>{connector.configured ? "更换" : "配置"}</button>{connector.configured && connector.lastFour !== "环境密钥" && <button className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>删除</button>}</div></article>)}</div></section>
-    {editing && <div className="credential-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="credential-modal" onSubmit={saveCredential} onMouseDown={(event) => event.stopPropagation()}>
+    <section className="surface connector-section"><div className="section-head"><div><p className="eyebrow">CONNECTOR STATUS</p><h3>采集连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article key={connector.id}><div><i className={connector.status} /><strong>{connector.name}</strong><span className={`connector-state ${connector.status}`}>{connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权"}</span></div><p>{connector.detail}</p>{connector.configurable && connector.provider && <button className="connector-config-button" disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? `已配置 · ${connector.lastFour === "环境密钥" ? "站点默认密钥" : `•••• ${connector.lastFour}`}` : canManage ? "＋ 配置团队 API" : "管理员可配置"}</button>}</article>)}</div></section>
+    <section className="surface credential-vault"><div className="vault-copy"><p className="eyebrow">TEAM API VAULT</p><h3>团队数据连接器</h3><p>管理员只需配置一次 NewsAPI.ai、Monid、X、YouTube、Meta / Instagram 与 TikTok 凭证，所有成员查看同一批采集结果。凭证由服务端加密，完整值不会返回任何成员的浏览器。</p><div className="vault-security"><span>✓ 团队共用采集结果</span><span>✓ 服务端加密</span><span>✓ 仅管理员可更换</span></div></div><div className="credential-list">{configurable.map((connector) => <article key={connector.id}><div><i className={connector.configured ? "configured" : ""} /><div><strong>{connector.name}</strong><small>{connector.configured ? connector.lastFour === "环境密钥" ? "当前使用站点默认密钥" : `团队密钥 •••• ${connector.lastFour}` : "尚未配置团队密钥"}</small></div></div><div><button disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? "更换" : "配置"}</button>{canManage && connector.configured && connector.lastFour !== "环境密钥" && <button className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>删除</button>}</div></article>)}</div></section>
+    {editing && canManage && <div className="credential-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="credential-modal" onSubmit={saveCredential} onMouseDown={(event) => event.stopPropagation()}>
       <div className="section-head"><div><p className="eyebrow">SECURE CONNECTOR SETUP</p><h3>配置 {editing}</h3></div><button type="button" className="modal-close" onClick={() => setEditing(null)}>×</button></div>
       <p>{editing === "Monid / Instagram" ? "一个密钥启用 Instagram、X、YouTube、TikTok、Facebook 的普通文字关键词搜索，以及各平台可公开取得的帖子评论与回复采集。保存时会先验证密钥。" : editing === "Meta / Instagram" ? "用于采集 Business / Creator 账号的标签与 @提及；启用仍取决于 Meta 权限和 App Review。" : editing === "TikTok" ? "用于 TikTok Research API 的公开内容查询；启用仍取决于 Research API 审批。" : `输入你自己的 ${editing === "X" ? "Bearer Token" : "API Key"}。`} 保存后仅服务端可以解密使用。</p>
       {editing === "Monid / Instagram" && <a className="credential-help-link" href="https://app.monid.ai/access/api-keys" target="_blank" rel="noreferrer">前往 Monid 创建 API Key ↗</a>}
@@ -572,15 +579,33 @@ function CoverageView({ connectors, sources, submit }: { connectors: Connector[]
   </div>;
 }
 
-function SettingsView({ brand, connectors, entities, submit }: { brand: BrandProfile; connectors: Connector[]; entities: Entity[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown> }) {
+function SettingsView({ brand, connectors, entities, workspace, submit }: { brand: BrandProfile; connectors: Connector[]; entities: Entity[]; workspace: TeamWorkspace; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown> }) {
   const monidConfigured = connectors.some((item) => item.provider === "Monid / Instagram" && item.configured);
   const officialSocialConfigured = connectors.some((item) => ["Meta / Instagram", "TikTok"].includes(item.provider ?? "") && item.configured);
-  async function handleEntitySubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; await submit({ action: "addEntity", ...Object.fromEntries(new FormData(form).entries()) }, "监测词已加入全球词典"); form.reset(); }
-  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "品牌监测档案已更新"); }
-  return <div className="settings-grid">
-    <section className="surface settings-main"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>品牌监测档案与同名消歧</h3></div></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea name="aliases" rows={3} defaultValue={brand.aliases} /></label><label className="field"><span>匹配模式</span><select name="matchMode" defaultValue={brand.match_mode || "precise"}><option value="precise">精准：品牌词 + 身份锚点</option><option value="balanced">平衡：长品牌名可单独命中</option><option value="broad">宽泛：仅品牌词即可</option></select></label><label className="field"><span>官方社媒账号</span><textarea name="officialAccounts" rows={3} defaultValue={brand.official_accounts} placeholder={'每行一个，例如：@brand_official'} /></label><label className="field full"><span>身份锚点</span><textarea name="scopeTerms" rows={4} defaultValue={brand.scope_terms} placeholder={'每行一个：产品名、创始人、核心技术、独特口号、行业定位'} /><small>精准模式下，候选内容必须同时出现品牌名/别名和至少一个锚点；官网或官方账号内容直接通过。</small></label><label className="field full"><span>排除词</span><textarea name="excludeTerms" rows={3} defaultValue={brand.exclude_terms} placeholder={'每行一个：同名公司的行业、产品、城市或人名'} /></label><button className="secondary-button">保存定位规则</button></form><p className="form-warning">先应用排除词，再验证官网/官方账号，最后执行品牌词与身份锚点组合匹配。规则在内容入库前生效。</p>
-      <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div><form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form><div className="entity-list">{entities.map((item) => <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i></div>)}</div>
-    </section>
-    <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>自动运行策略</h3></div></div>{[["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索 Instagram、X、YouTube、TikTok、Facebook" : "在来源覆盖页配置 Monid API Key 后启用", monidConfigured], ["评论与回复", monidConfigured ? "社媒帖子与网页新闻的可公开评论统一归档分析" : "网页评论持续运行；社媒评论在配置 Monid 后启用", true], ["精准品牌匹配", "排除同名实体，按身份锚点在入库前过滤", true], ["免费媒体追踪", "活跃源 3 小时、待探测源 12 小时，按到期批次抓取", true], ["robots.txt", "不抓取禁止路径，不绕过验证码与付费墙", true], ["传播链路", "先按时间与文本聚为同一事件，再重建有向传播图", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "凭证已保存，等待平台权限审核后启用采集" : "可选配置，不影响 Monid 公共搜索", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
+  async function handleEntitySubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; await submit({ action: "addEntity", ...Object.fromEntries(new FormData(form).entries()) }, "监测词已加入团队词典"); form.reset(); }
+  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "团队品牌监测档案已更新"); }
+  return <div className="settings-page">
+    <TeamWorkspacePanel workspace={workspace} submit={submit} />
+    <div className="settings-grid">
+      <section className="surface settings-main"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>团队品牌监测档案与同名消歧</h3></div><span className="permission-chip">{workspace.canManage ? "管理员可编辑" : "仅管理员可修改"}</span></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input disabled={!workspace.canManage} name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input disabled={!workspace.canManage} name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea disabled={!workspace.canManage} name="aliases" rows={3} defaultValue={brand.aliases} /></label><label className="field"><span>匹配模式</span><select disabled={!workspace.canManage} name="matchMode" defaultValue={brand.match_mode || "precise"}><option value="precise">精准：品牌词 + 身份锚点</option><option value="balanced">平衡：长品牌名可单独命中</option><option value="broad">宽泛：仅品牌词即可</option></select></label><label className="field"><span>官方社媒账号</span><textarea disabled={!workspace.canManage} name="officialAccounts" rows={3} defaultValue={brand.official_accounts} placeholder={'每行一个，例如：@brand_official'} /></label><label className="field full"><span>身份锚点</span><textarea disabled={!workspace.canManage} name="scopeTerms" rows={4} defaultValue={brand.scope_terms} placeholder={'每行一个：产品名、创始人、核心技术、独特口号、行业定位'} /><small>精准模式下，候选内容必须同时出现品牌名/别名和至少一个锚点；官网或官方账号内容直接通过。</small></label><label className="field full"><span>排除词</span><textarea disabled={!workspace.canManage} name="excludeTerms" rows={3} defaultValue={brand.exclude_terms} placeholder={'每行一个：同名公司的行业、产品、城市或人名'} /></label>{workspace.canManage && <button className="secondary-button">保存定位规则</button>}</form><p className="form-warning">这套定位规则、历史档案、事件、传播链路和分析结果由整个团队共同使用。</p>
+        <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i></div>)}</div>
+      </section>
+      <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索五个平台" : "由管理员在来源覆盖页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
+    </div>
   </div>;
+}
+
+function TeamWorkspacePanel({ workspace, submit }: { workspace: TeamWorkspace; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown> }) {
+  const [busy, setBusy] = useState(false);
+  async function invite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = event.currentTarget; setBusy(true);
+    try { await submit({ action: "inviteWorkspaceMembers", ...Object.fromEntries(new FormData(form).entries()) }, "邀请名单已保存；同事用对应邮箱登录后会自动进入此工作区"); form.reset(); }
+    finally { setBusy(false); }
+  }
+  return <section className="surface team-workspace-card">
+    <div className="team-workspace-head"><div><p className="eyebrow">SHARED TEAM WORKSPACE</p><h2>{workspace.name}</h2><p>成员登录后直接读取同一品牌配置、历史档案、事件聚类、传播链路、评论分析和连接器采集结果，无需重新配置或重新跑流程。</p></div><div className="team-workspace-stat"><strong>{workspace.members.length}</strong><span>已加入成员</span><small>你的权限：{roleLabel(workspace.role)}</small></div></div>
+    {workspace.canManage && <form className="team-invite-form" onSubmit={invite}><label className="field"><span>邀请同事邮箱</span><textarea name="emails" rows={3} required placeholder={'每行一个邮箱。必须与同事登录 ChatGPT 时使用的邮箱一致。'} /></label><label className="field"><span>加入后的权限</span><select name="role" defaultValue="editor"><option value="editor">编辑者：可巡检、补录和维护词典</option><option value="viewer">查看者：只读全部档案与分析</option></select></label><button className="primary-button" disabled={busy}>{busy ? "保存邀请中…" : "添加到团队"}</button></form>}
+    <div className="team-member-list"><div className="team-member-head"><span>成员</span><span>权限</span><span>状态</span><span /></div>{workspace.members.map((member) => <article key={member.user_id}><div className="member-identity"><b>{(member.display_name || member.email).slice(0, 1).toUpperCase()}</b><div><strong>{member.display_name || member.email}</strong><small>{member.email}</small></div></div><span className="role-pill">{roleLabel(member.role)}</span><span className="member-status"><i /> 已加入</span><div>{workspace.canManage && member.role !== "owner" && <button disabled={busy} onClick={() => void submit({ action: "removeWorkspaceMember", userId: member.user_id }, "成员已移出工作区")}>移除</button>}</div></article>)}</div>
+    {workspace.canManage && workspace.invites.length > 0 && <div className="pending-invites"><div className="section-head"><div><p className="eyebrow">PENDING</p><h3>等待首次登录</h3></div><span className="count-chip">{workspace.invites.length}</span></div>{workspace.invites.map((inviteRow) => <article key={inviteRow.id}><div><strong>{inviteRow.email}</strong><small>{roleLabel(inviteRow.role)} · 有效至 {formatDate(inviteRow.expires_at, true)}</small></div><button disabled={busy} onClick={() => void submit({ action: "revokeWorkspaceInvite", id: inviteRow.id }, "邀请已撤销")}>撤销</button></article>)}</div>}
+  </section>;
 }

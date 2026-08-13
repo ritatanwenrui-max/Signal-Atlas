@@ -5,6 +5,7 @@ const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL DEFAULT '',
+    workspace_id INTEGER NOT NULL DEFAULT 0,
     name TEXT NOT NULL,
     aliases TEXT NOT NULL DEFAULT '',
     website TEXT NOT NULL DEFAULT '',
@@ -15,6 +16,38 @@ const tables = [
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspaces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    credential_owner_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'editor',
+    status TEXT NOT NULL DEFAULT 'active',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workspace_id, user_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS workspace_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'editor',
+    status TEXT NOT NULL DEFAULT 'pending',
+    invited_by TEXT NOT NULL,
+    accepted_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE TABLE IF NOT EXISTS mentions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +307,11 @@ const tables = [
 
 const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_brand_profiles_user_active ON brand_profiles(user_id, active)",
+  "CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_user_id)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_members_user_active ON workspace_members(user_id, status, is_active)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_members_email ON workspace_members(email, status)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_invites_email_status ON workspace_invites(email, status, expires_at)",
+  "CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace_status ON workspace_invites(workspace_id, status)",
   "CREATE INDEX IF NOT EXISTS idx_mentions_brand_published ON mentions(brand_id, published_at)",
   "CREATE INDEX IF NOT EXISTS idx_mentions_brand_country_platform ON mentions(brand_id, source_country, platform)",
   "CREATE INDEX IF NOT EXISTS idx_mentions_brand_cluster ON mentions(brand_id, cluster_key)",
@@ -309,12 +347,14 @@ export async function ensureDatabase() {
     "ALTER TABLE brand_profiles ADD COLUMN scope_terms TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE brand_profiles ADD COLUMN exclude_terms TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE brand_profiles ADD COLUMN official_accounts TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE brand_profiles ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE mentions ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
     "ALTER TABLE mention_comments ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
   ];
   for (const statement of columns) {
     try { await db.prepare(statement).run(); } catch { /* Existing deployment already has the column. */ }
   }
+  await db.prepare("CREATE INDEX IF NOT EXISTS idx_brand_profiles_workspace_active ON brand_profiles(workspace_id, active)").run();
   await db.batch([
     db.prepare(`UPDATE mentions SET source_country = '中国', content_country = '中国', location_confidence = 99,
       location_method = '媒体域名 / 已知媒体库'
@@ -328,15 +368,33 @@ export async function ensureDatabase() {
 
 export async function getActiveBrandForUser(db: D1Database, userId: string) {
   if (!userId) return null;
+  const shared = await db.prepare(`SELECT brand_profiles.* FROM workspace_members
+    JOIN brand_profiles ON brand_profiles.workspace_id = workspace_members.workspace_id
+    WHERE workspace_members.user_id = ? AND workspace_members.status = 'active' AND workspace_members.is_active = 1
+      AND brand_profiles.active = 1 ORDER BY brand_profiles.id DESC LIMIT 1`)
+    .bind(userId).first<Record<string, unknown>>();
+  if (shared) return shared;
   return db.prepare("SELECT * FROM brand_profiles WHERE user_id = ? AND active = 1 ORDER BY id DESC LIMIT 1")
     .bind(userId).first<Record<string, unknown>>();
+}
+
+export async function getWorkspaceAccessForUser(db: D1Database, userId: string) {
+  if (!userId) return null;
+  return db.prepare(`SELECT workspaces.*, workspace_members.role, workspace_members.email,
+      workspace_members.display_name, workspace_members.joined_at
+    FROM workspace_members JOIN workspaces ON workspaces.id = workspace_members.workspace_id
+    WHERE workspace_members.user_id = ? AND workspace_members.status = 'active' AND workspace_members.is_active = 1
+    ORDER BY workspace_members.joined_at DESC LIMIT 1`).bind(userId).first<Record<string, unknown>>();
 }
 
 export async function loadDashboardData(userId = "") {
   await ensureDatabase();
   const db = env.DB;
+  const workspace = await getWorkspaceAccessForUser(db, userId);
   const brand = await getActiveBrandForUser(db, userId);
   const brandId = Number(brand?.id ?? -1);
+  const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
+  const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const healthPrefix = `${brandId}:%`;
   const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
@@ -364,7 +422,7 @@ export async function loadDashboardData(userId = "") {
     db.prepare("SELECT * FROM media_sources WHERE brand_id = ? ORDER BY last_crawled_at DESC, id DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM propagation_edges WHERE brand_id = ? ORDER BY cluster_key, time_gap_minutes ASC").bind(brandId).all(),
     db.prepare("SELECT provider, last_four, status, last_test_at, updated_at FROM connector_credentials WHERE user_id = ? ORDER BY provider")
-      .bind(userId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
+      .bind(credentialOwnerId).all<{ provider: string; last_four: string; status: string; last_test_at: string; updated_at: string }>(),
     db.prepare("SELECT stage, status, cost, error, started_at, completed_at FROM monid_jobs WHERE brand_id = ? ORDER BY id DESC LIMIT 6")
       .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
     db.prepare(`SELECT
@@ -463,6 +521,16 @@ export async function loadDashboardData(userId = "") {
   }
   const sourceRows = mediaSources.results as Array<Record<string, unknown>>;
   const crawlerOnline = sourceRows.some((item) => item.status === "active" || item.status === "discovered" || item.status === "watching");
+  const [workspaceMembers, workspaceInvites] = workspaceId ? await Promise.all([
+    db.prepare(`SELECT user_id, email, display_name, role, status, joined_at, last_seen_at
+      FROM workspace_members WHERE workspace_id = ? AND status = 'active'
+      ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END, joined_at ASC`)
+      .bind(workspaceId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT id, email, role, status, created_at, expires_at FROM workspace_invites
+      WHERE workspace_id = ? AND status = 'pending' AND datetime(expires_at) > datetime('now') ORDER BY created_at DESC`)
+      .bind(workspaceId).all<Record<string, unknown>>(),
+  ]) : [{ results: [] }, { results: [] }];
+  const role = String(workspace?.role ?? "owner");
   return {
     mentions: mentionRows,
     traffic: traffic.results,
@@ -474,6 +542,15 @@ export async function loadDashboardData(userId = "") {
     mediaSources: sourceRows,
     propagationEdges: propagationEdges.results,
     connectorCredentials: credentialRows.results,
+    workspace: workspace ? {
+      id: workspaceId,
+      name: String(workspace.name ?? `${String(brand?.name ?? "品牌")}团队工作区`),
+      role,
+      canManage: role === "owner" || role === "admin",
+      canEdit: role !== "viewer",
+      members: workspaceMembers.results,
+      invites: role === "owner" || role === "admin" ? workspaceInvites.results : [],
+    } : null,
     analytics: {
       countries: [...countryMap.values()].sort((a, b) => b.count - a.count),
       sentiment,

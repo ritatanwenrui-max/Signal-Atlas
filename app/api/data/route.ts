@@ -3,12 +3,17 @@ import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
 import { verifyMonidApiKey } from "../../../db/monid";
 import { analyzeCommentText } from "../../../db/text-analysis";
+import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
 
 export async function GET() {
   const user = await getChatGPTUser();
+  if (user) {
+    await ensureDatabase();
+    await prepareWorkspaceForUser(env.DB, user);
+  }
   return Response.json({ ...await loadDashboardData(user?.userId), viewer: { authenticated: Boolean(user) } });
 }
 
@@ -19,9 +24,12 @@ export async function POST(request: Request) {
   const action = String(payload.action ?? "");
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "请先登录后再管理品牌工作区" }, { status: 401 });
+  await prepareWorkspaceForUser(db, user);
+  const workspace = await requireWorkspaceAccess(db, user.userId);
   const existingBrand = await getActiveBrandForUser(db, user.userId);
 
   if (action === "saveBrandProfile") {
+    await requireWorkspaceAccess(db, user.userId, "manage");
     const brandName = String(payload.brandName ?? "").trim();
     if (!brandName) return Response.json({ error: "品牌名不能为空" }, { status: 400 });
     const aliases = String(payload.aliases ?? "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
@@ -34,10 +42,12 @@ export async function POST(request: Request) {
     let brandId = Number(existingBrand?.id ?? 0);
     if (!brandId) {
       const inserted = await db.prepare(`INSERT INTO brand_profiles
-        (user_id, name, aliases, website, match_mode, scope_terms, exclude_terms, official_accounts, active, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).bind(user.userId, brandName, aliases.join("\n"), website,
+        (user_id, workspace_id, name, aliases, website, match_mode, scope_terms, exclude_terms, official_accounts, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).bind(user.userId, Number(workspace.id), brandName, aliases.join("\n"), website,
           matchMode, scopeTerms, excludeTerms, officialAccounts, now).run();
       brandId = Number(inserted.meta.last_row_id);
+      await db.prepare("UPDATE workspaces SET name = ?, updated_at = ? WHERE id = ?")
+        .bind(`${brandName} 团队工作区`, now, Number(workspace.id)).run();
     } else {
       const brandChanged = String(existingBrand?.name ?? "") !== brandName;
       if (brandChanged) {
@@ -60,8 +70,8 @@ export async function POST(request: Request) {
         ]);
       }
       await db.prepare(`UPDATE brand_profiles SET name = ?, aliases = ?, website = ?, match_mode = ?, scope_terms = ?,
-        exclude_terms = ?, official_accounts = ?, active = 1, updated_at = ? WHERE id = ? AND user_id = ?`)
-        .bind(brandName, aliases.join("\n"), website, matchMode, scopeTerms, excludeTerms, officialAccounts, now, brandId, user.userId).run();
+        exclude_terms = ?, official_accounts = ?, active = 1, updated_at = ? WHERE id = ? AND workspace_id = ?`)
+        .bind(brandName, aliases.join("\n"), website, matchMode, scopeTerms, excludeTerms, officialAccounts, now, brandId, Number(workspace.id)).run();
     }
     await db.prepare("DELETE FROM tracked_entities WHERE brand_id = ? AND type IN ('品牌','别名','官网域名')").bind(brandId).run();
     await db.batch([
@@ -70,6 +80,7 @@ export async function POST(request: Request) {
       ...(website ? [db.prepare("INSERT INTO tracked_entities (brand_id, type, value, language) VALUES (?, ?, ?, ?)").bind(brandId, "官网域名", website, "通用")] : []),
     ]);
   } else if (action === "saveConnectorCredential") {
+    await requireWorkspaceAccess(db, user.userId, "manage");
     const provider = String(payload.provider ?? "");
     const credential = String(payload.credential ?? "");
     if (provider === "Monid / Instagram") {
@@ -80,10 +91,22 @@ export async function POST(request: Request) {
         return Response.json({ error: message }, { status: 400 });
       }
     }
-    await saveConnectorCredential(db, user.userId, provider, credential, String(payload.lastFour ?? ""));
+    await saveConnectorCredential(db, String(workspace.credential_owner_user_id), provider, credential, String(payload.lastFour ?? ""));
   } else if (action === "deleteConnectorCredential") {
-    await deleteConnectorCredential(db, user.userId, String(payload.provider ?? ""));
+    await requireWorkspaceAccess(db, user.userId, "manage");
+    await deleteConnectorCredential(db, String(workspace.credential_owner_user_id), String(payload.provider ?? ""));
+  } else if (action === "inviteWorkspaceMembers") {
+    await requireWorkspaceAccess(db, user.userId, "manage");
+    await inviteWorkspaceMembers(db, Number(workspace.id), user.userId, String(payload.emails ?? ""), String(payload.role ?? "editor"));
+  } else if (action === "revokeWorkspaceInvite") {
+    await requireWorkspaceAccess(db, user.userId, "manage");
+    await db.prepare("UPDATE workspace_invites SET status = 'revoked' WHERE id = ? AND workspace_id = ? AND status = 'pending'")
+      .bind(Number(payload.id), Number(workspace.id)).run();
+  } else if (action === "removeWorkspaceMember") {
+    await requireWorkspaceAccess(db, user.userId, "manage");
+    await removeWorkspaceMember(db, Number(workspace.id), user.userId, String(payload.userId ?? ""));
   } else {
+    await requireWorkspaceAccess(db, user.userId, "edit");
     const brandId = Number(existingBrand?.id ?? 0);
     if (!brandId) return Response.json({ error: "请先创建品牌监测档案" }, { status: 400 });
     if (action === "createMention") {

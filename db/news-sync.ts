@@ -3,7 +3,7 @@ import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { refreshPublicCommentAnalyses } from "./comments";
 import { collectMonidSocial, countPendingMonidJobs, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts } from "./monid";
-import { ensureDatabase, getActiveBrandForUser } from "./repository";
+import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
 
@@ -372,6 +372,8 @@ export async function runNewsSync(force = false, userId = "") {
   const brand = await getActiveBrandForUser(db, userId);
   if (!brand) return { skipped: true, reason: "brand_not_configured", inserted: 0, found: 0 };
   const brandId = Number(brand.id);
+  const workspace = await getWorkspaceAccessForUser(db, userId);
+  const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const entities = await db.prepare("SELECT type, value, active FROM tracked_entities WHERE brand_id = ? AND active = 1 ORDER BY id ASC")
     .bind(brandId).all<TrackedEntity>();
   const terms = termsFrom(entities.results);
@@ -391,7 +393,7 @@ export async function runNewsSync(force = false, userId = "") {
     await rebuildStoryClusters(db, brandId, terms);
     await rebuildPropagationEdges(db, brandId, terms);
     const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
-    const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", userId);
+    const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 1").bind(brandId).first<SyncRun>();
@@ -411,8 +413,8 @@ export async function runNewsSync(force = false, userId = "") {
         .bind(`${brandId}:%`).all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
       const [newsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
-        loadConnectorCredential(db, "NewsAPI.ai", userId),
-        loadConnectorCredential(db, "X", userId), loadConnectorCredential(db, "YouTube", userId),
+        loadConnectorCredential(db, "NewsAPI.ai", credentialOwnerId),
+        loadConnectorCredential(db, "X", credentialOwnerId), loadConnectorCredential(db, "YouTube", credentialOwnerId),
       ]);
       const monidApiKey = earlyMonidApiKey;
       const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
@@ -532,7 +534,10 @@ export async function runNewsSync(force = false, userId = "") {
 
 export async function runAllBrandSyncs() {
   await ensureDatabase();
-  const rows = await env.DB.prepare("SELECT user_id FROM brand_profiles WHERE active = 1 AND user_id != '' ORDER BY id ASC LIMIT 100")
+  const rows = await env.DB.prepare(`SELECT COALESCE(workspaces.owner_user_id, brand_profiles.user_id) AS user_id
+    FROM brand_profiles LEFT JOIN workspaces ON workspaces.id = brand_profiles.workspace_id
+    WHERE brand_profiles.active = 1 AND COALESCE(workspaces.owner_user_id, brand_profiles.user_id) != ''
+    GROUP BY brand_profiles.id ORDER BY brand_profiles.id ASC LIMIT 100`)
     .all<{ user_id: string }>();
   const results = [];
   for (const row of rows.results) results.push(await runNewsSync(false, row.user_id));
