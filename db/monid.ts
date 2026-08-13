@@ -776,7 +776,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
       cursor: target.cursor, page: target.pages_fetched + 1, commentAdapter };
     let run: MonidRun;
     let stage: "resolve_post" | "post_comments" = "post_comments";
-    if (target.platform === "Instagram" && !/^\d{10,}$/.test(target.media_id)) {
+    if (target.platform === "Instagram" && commentAdapter === "v1" && !/^\d{10,}$/.test(target.media_id)) {
       stage = "resolve_post";
       run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
     } else if (target.platform === "YouTube") {
