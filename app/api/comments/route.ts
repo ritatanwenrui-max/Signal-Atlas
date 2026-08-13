@@ -77,15 +77,10 @@ export async function GET(request: Request) {
       SUM(CASE WHEN c.sentiment = '负面' THEN 1 ELSE 0 END) AS negative, COALESCE(SUM(c.likes), 0) AS likes
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}
     GROUP BY c.mention_id, m.title, m.url, m.source ORDER BY comments DESC, likes DESC LIMIT 8`;
-  const topAuthorsSql = `SELECT c.author_id, c.author_username, c.author_name, MAX(c.is_verified) AS is_verified,
-      COUNT(*) AS comments, COALESCE(SUM(c.likes), 0) AS likes,
-      SUM(CASE WHEN c.sentiment = '负面' THEN 1 ELSE 0 END) AS negative
-    FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}
-    GROUP BY c.author_id, c.author_username, c.author_name ORDER BY comments DESC, likes DESC LIMIT 8`;
   const keywordSql = `SELECT c.keywords FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${where} ORDER BY c.id DESC LIMIT 5000`;
 
-  const [summary, comments, sentimentRows, emotionRows, timeline, topics, topPosts, topAuthors, keywordRows, targets, targetTotals, riskComments] = await Promise.all([
+  const [summary, comments, sentimentRows, emotionRows, timeline, topics, topPosts, keywordRows, targets, targetTotals, riskComments] = await Promise.all([
     db.prepare(summarySql).bind(...binds).first<Record<string, number>>(),
     db.prepare(commentsSql).bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, unknown>>(),
     db.prepare(sentimentSql).bind(...binds).all<Record<string, unknown>>(),
@@ -93,11 +88,11 @@ export async function GET(request: Request) {
     db.prepare(timelineSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(topicSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(topPostsSql).bind(...binds).all<Record<string, unknown>>(),
-    db.prepare(topAuthorsSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(keywordSql).bind(...binds).all<{ keywords: string }>(),
     db.prepare(`SELECT target.*, mentions.title AS post_title, mentions.source AS post_source, mentions.url AS mention_url
       FROM social_comment_targets target JOIN mentions ON mentions.id = target.mention_id
-      WHERE target.brand_id = ? ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2 WHEN 'error' THEN 3 ELSE 4 END,
+      WHERE target.brand_id = ? ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2
+        WHEN 'retrying' THEN 3 WHEN 'blocked' THEN 4 WHEN 'unavailable' THEN 5 WHEN 'error' THEN 6 ELSE 7 END,
       target.updated_at DESC LIMIT 20`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
       FROM social_comment_targets WHERE brand_id = ?`).bind(brandId).first<{ reported: number; collected: number }>(),
@@ -143,7 +138,6 @@ export async function GET(request: Request) {
     topics: topics.results,
     words,
     topPosts: topPosts.results,
-    topAuthors: topAuthors.results,
     targets: targets.results,
     riskComments: riskComments.results,
     comments: comments.results,

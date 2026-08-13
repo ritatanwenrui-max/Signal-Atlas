@@ -20,6 +20,8 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
   assert.match(page, /登录后会直接进入同一个团队工作区/);
   assert.match(page, /全球报道热力分布/);
+  assert.match(page, /world-map-detailed\.svg/);
+  assert.match(page, /getElementById\(code\.toLowerCase\(\)\)/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
   assert.match(page, /事件爆发曲线/);
@@ -130,8 +132,10 @@ test("Monid searches five social platforms and archives public comments and repl
   assert.match(monid, /next_min_child_cursor/);
   assert.match(monid, /queueInstagramCommentTarget/);
   assert.doesNotMatch(monid, /reportedCount === 0/);
-  assert.match(monid, /COMMENT_JOBS_PER_CYCLE = 4/);
-  assert.match(monid, /"queued" \| "error"/);
+  assert.match(monid, /COMMENT_JOBS_PER_CYCLE = 2/);
+  assert.match(monid, /status = reported > 0 \? "unavailable" : "empty"/);
+  assert.match(monid, /datetime\('now', '-30 minutes'\)/);
+  assert.match(monid, /"retrying" \| "blocked" \| "unavailable" \| "error"/);
   assert.match(sync, /collectMonidSocial/);
   assert.match(sync, /upsertSocialMetrics/);
   assert.match(sync, /queueSocialCommentTarget/);
@@ -150,6 +154,16 @@ test("Monid searches five social platforms and archives public comments and repl
   assert.match(page, /评论舆情/);
   assert.match(page, /评论明细档案/);
   assert.match(page, /帖子评论抓取进度/);
+  assert.match(page, /comment-card-grid/);
+  assert.doesNotMatch(page, /ACTIVE AUTHORS|高活跃参与者/);
+});
+
+test("team entity dictionary supports protected deletion", async () => {
+  const [page, dataRoute] = await Promise.all([source("app/page.tsx"), source("app/api/data/route.ts")]);
+  assert.match(page, /action: "deleteEntity"/);
+  assert.match(page, /确认删除词条/);
+  assert.match(dataRoute, /DELETE FROM tracked_entities WHERE id = \? AND brand_id = \?/);
+  assert.match(dataRoute, /品牌、别名和官网域名请在品牌档案中修改/);
 });
 
 test("word clouds use multilingual segmentation and remove Chinese and English filler words", async () => {

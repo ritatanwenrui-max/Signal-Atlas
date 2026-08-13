@@ -32,7 +32,7 @@ const SOCIAL_SEARCHES = {
 };
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
-const COMMENT_JOBS_PER_CYCLE = 4;
+const COMMENT_JOBS_PER_CYCLE = 2;
 
 function pathValue(value: unknown, path: string) {
   return path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as JsonObject)[key] : undefined, value);
@@ -109,7 +109,7 @@ async function monidRequest(apiKey: string, path: string, init?: RequestInit) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers,
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(8_000),
   });
   const payload = await response.json().catch(() => ({})) as MonidRun & { message?: string; error?: { message?: string } };
   if (!response.ok && response.status !== 202) {
@@ -379,6 +379,8 @@ async function refreshSocialCommentAnalysis(db: D1Database, brandId: number, men
   }
   const analyzedCount = rows.results.length;
   const complete = Boolean(target?.top_level_complete) && Number(pendingReplies?.count ?? 0) === 0;
+  const preservedStatus = ["empty", "unavailable", "blocked"].includes(target?.status ?? "") ? target!.status : "";
+  const targetStatus = preservedStatus || (complete ? "complete" : "collecting");
   const sentiment = !analyzedCount ? "样本不足" : counts.positive > counts.negative && counts.positive >= counts.neutral ? "正面"
     : counts.negative > counts.positive && counts.negative >= counts.neutral ? "负面" : counts.positive && counts.negative ? "混合" : "中性";
   const keywords = keywordCounts(rows.results.map((row) => row.content), brandTerms);
@@ -394,11 +396,11 @@ async function refreshSocialCommentAnalysis(db: D1Database, brandId: number, men
         negative_count = excluded.negative_count, mixed_count = excluded.mixed_count,
         sentiment = excluded.sentiment, sentiment_score = excluded.sentiment_score, keywords = excluded.keywords,
         last_error = excluded.last_error, last_collected_at = excluded.last_collected_at`)
-      .bind(mentionId, brandId, complete ? "collected" : "collecting", Number(target?.reported_count ?? analyzedCount), analyzedCount,
+      .bind(mentionId, brandId, targetStatus === "complete" ? "collected" : targetStatus, Number(target?.reported_count ?? analyzedCount), analyzedCount,
         counts.positive, counts.neutral, counts.negative, counts.mixed, sentiment,
         analyzedCount ? Math.round(score / analyzedCount) : 0, JSON.stringify(keywords), target?.last_error ?? "", now),
     db.prepare("UPDATE social_comment_targets SET collected_count = ?, status = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?")
-      .bind(analyzedCount, complete ? "complete" : "collecting", now, brandId, mentionId),
+      .bind(analyzedCount, targetStatus, now, brandId, mentionId),
   ]);
 }
 
@@ -408,7 +410,6 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
   const payload = nestedObjectWithArray(output, job.stage === "post_comments" ? ["comments", "replies", "items", "data"] : ["child_comments", "replies", "comments"]);
   const rawRows = payload ? (["comments", "replies", "child_comments", "items", "data"].map((key) => payload[key]).find(Array.isArray) as unknown[] | undefined) : undefined;
   const sourceRows = rawRows ?? walkObjects(output);
-  if (!sourceRows.length) throw new Error("Monid 评论结果缺少评论列表");
   const brandTerms = await brandTermsFor(db, brandId);
   const comments: SocialComment[] = [];
   const replyQueue: Array<{ parentId: string; count: number }> = [];
@@ -426,6 +427,25 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
       }
       if (platform === "Instagram" && comment.replies > 0) replyQueue.push({ parentId: comment.id, count: comment.replies });
     }
+  }
+  if (!comments.length) {
+    const now = new Date().toISOString();
+    if (job.stage === "post_comments") {
+      const target = await db.prepare("SELECT reported_count FROM social_comment_targets WHERE brand_id = ? AND mention_id = ?")
+        .bind(brandId, descriptor.mentionId).first<{ reported_count: number }>();
+      const reported = Math.max(Number(target?.reported_count ?? 0), firstNumber(output, ["comment_count", "comments_count", "total"]));
+      const status = reported > 0 ? "unavailable" : "empty";
+      const message = reported > 0 ? `${platform} 显示有评论，但当前公开接口未返回评论文本；常见原因是帖子权限、登录要求或平台风控` : "";
+      await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), top_level_complete = 1,
+        status = ?, pages_fetched = pages_fetched + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+        .bind(reported, status, message, now, brandId, descriptor.mentionId).run();
+    } else {
+      await db.prepare(`UPDATE social_comment_reply_queue SET status = 'complete', pages_fetched = pages_fetched + 1,
+        last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
+        .bind(now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+    }
+    await refreshSocialCommentAnalysis(db, brandId, descriptor.mentionId, brandTerms);
+    return;
   }
   await storeSocialComments(db, brandId, descriptor.mentionId, platform, comments, brandTerms);
   const now = new Date().toISOString();
@@ -510,12 +530,13 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   }
   if (run.status === "BLOCKED") {
     await updateJob(db, job, run, "Monid 工作区预算或单次任务上限阻止了执行");
-    await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "queued");
+    await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "blocked");
+    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error("Monid 工作区预算或单次任务上限已触发，请在 Monid 后台调整后重试");
   }
   if (run.status !== "COMPLETED") {
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
-    await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}`);
+    await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}，将在稍后重试`, "retrying");
     if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error(`Monid Instagram 任务未完成：${run.status}`);
   }
@@ -523,7 +544,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   if (providerStatus >= 400) {
     const message = run.providerResponse?.error?.message ?? `Instagram 数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
-    await markCommentJobError(db, brandId, job, message);
+    await markCommentJobError(db, brandId, job, message, providerStatus === 401 || providerStatus === 403 ? "blocked" : providerStatus >= 500 ? "retrying" : "unavailable");
     if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
   }
@@ -539,7 +560,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     } catch (error) {
       const message = error instanceof Error ? error.message : "Monid 评论结果无法解析";
       await updateJob(db, job, run, message);
-      await markCommentJobError(db, brandId, job, message);
+      await markCommentJobError(db, brandId, job, `${message}；将在稍后重试`, "retrying");
     }
     return [];
   }
@@ -554,7 +575,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   return candidates;
 }
 
-async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string, status: "queued" | "error" = "error") {
+async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string, status: "retrying" | "blocked" | "unavailable" | "error" = "error") {
   if (job.stage !== "post_comments" && job.stage !== "comment_replies") return;
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const now = new Date().toISOString();
@@ -567,19 +588,10 @@ async function markCommentJobError(db: D1Database, brandId: number, job: MonidJo
   }
 }
 
-async function waitBriefly(apiKey: string, run: MonidRun) {
-  let current = run;
-  for (let attempt = 0; attempt < 3 && !TERMINAL.has(current.status); attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    current = await getRun(apiKey, current.runId);
-  }
-  return current;
-}
-
 export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
       (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0) > 0;
@@ -588,7 +600,7 @@ export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
 export async function countPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
       (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0);
@@ -603,10 +615,10 @@ export async function queueSocialCommentTarget(db: D1Database, brandId: number, 
     (mention_id, brand_id, platform, media_id, post_url, reported_count, status, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
     ON CONFLICT(mention_id) DO UPDATE SET media_id = excluded.media_id, post_url = excluded.post_url,
+      top_level_complete = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 0 ELSE social_comment_targets.top_level_complete END,
+      status = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'queued' ELSE social_comment_targets.status END,
       reported_count = MAX(social_comment_targets.reported_count, excluded.reported_count),
-      top_level_complete = CASE WHEN excluded.reported_count > social_comment_targets.collected_count THEN 0 ELSE social_comment_targets.top_level_complete END,
-      status = CASE WHEN excluded.reported_count > social_comment_targets.collected_count THEN 'queued' ELSE social_comment_targets.status END,
-      updated_at = excluded.updated_at`)
+      updated_at = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.updated_at ELSE social_comment_targets.updated_at END`)
     .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, now).run();
 }
 
@@ -615,6 +627,9 @@ export async function queueInstagramCommentTarget(db: D1Database, brandId: numbe
 }
 
 async function registerHistoricalCommentTargets(db: D1Database, brandId: number) {
+  await db.prepare(`UPDATE social_comment_targets SET status = 'retrying',
+    last_error = CASE WHEN last_error = '' THEN '旧版采集失败，已进入新版退避重试队列' ELSE last_error END,
+    updated_at = datetime('now', '-31 minutes') WHERE brand_id = ? AND status = 'error'`).bind(brandId).run();
   const posts = await db.prepare(`SELECT metrics.mention_id, metrics.platform, metrics.post_id, metrics.comments, mentions.url
     FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
     WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook') AND metrics.post_id != ''`)
@@ -628,11 +643,13 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
   const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
     AND stage IN ('post_comments','comment_replies') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
   let available = Math.max(0, COMMENT_JOBS_PER_CYCLE - Number(active?.count ?? 0));
-  if (!available) return;
+  if (!available) return 0;
+  let startedCount = 0;
 
   const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched
     FROM social_comment_targets target
-    WHERE target.brand_id = ? AND target.status IN ('queued','collecting') AND target.top_level_complete = 0
+    WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying') AND target.top_level_complete = 0
+      AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage = 'post_comments' AND job.status IN (${PENDING_SQL}))
     ORDER BY target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
   for (const target of targets.results) {
@@ -657,8 +674,9 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     await db.prepare("UPDATE social_comment_targets SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ?")
       .bind(new Date().toISOString(), brandId, target.mention_id).run();
     if (run.status === "COMPLETED") await processJob(db, brandId, apiKey, job, run);
+    startedCount += 1;
     available -= 1;
-    if (!available) return;
+    if (!available) return startedCount;
   }
 
   const replies = await db.prepare(`SELECT reply.mention_id, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched
@@ -677,9 +695,11 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     await db.prepare("UPDATE social_comment_reply_queue SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
       .bind(new Date().toISOString(), brandId, reply.mention_id, reply.parent_comment_id).run();
     if (run.status === "COMPLETED") await processJob(db, brandId, apiKey, job, run);
+    startedCount += 1;
     available -= 1;
-    if (!available) return;
+    if (!available) return startedCount;
   }
+  return startedCount;
 }
 
 export async function refreshSocialFollowerCounts(db: D1Database, brandId: number) {
@@ -696,13 +716,15 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   const candidates: MonitoringCandidate[] = [];
   await registerHistoricalCommentTargets(db, brandId);
   const pending = await db.prepare(`SELECT id, run_id, mention_id, stage, status, terms FROM monid_jobs
-    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 6`)
+    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 4`)
     .bind(brandId).all<MonidJob>();
   const pendingSearchStages = new Set(pending.results.filter((job) => job.stage.startsWith("search")).map((job) => job.stage));
-  for (const job of pending.results) {
-    const run = await getRun(apiKey, job.run_id);
+  const polled = await Promise.all(pending.results.map(async (job) => ({ job, run: await getRun(apiKey, job.run_id) })));
+  for (const { job, run } of polled) {
     candidates.push(...await processJob(db, brandId, apiKey, job, run));
   }
+  const startedComments = await startCommentJobs(db, brandId, apiKey);
+  if (startedComments > 0) return candidates;
   if (startNew && !pendingSearchStages.has("search")) {
     const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
     if (searchTerms.length) {
@@ -713,25 +735,35 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
         resultsLimit: 50,
       });
       const job = await saveJob(db, brandId, started, "search", searchTerms);
-      const run = await waitBriefly(apiKey, started);
-      candidates.push(...await processJob(db, brandId, apiKey, job, run));
+      candidates.push(...await processJob(db, brandId, apiKey, job, started));
     }
   }
   if (startNew && terms.length) {
     const keyword = terms[0];
-    for (const [platform, config] of Object.entries(SOCIAL_SEARCHES) as Array<[keyof typeof SOCIAL_SEARCHES, (typeof SOCIAL_SEARCHES)[keyof typeof SOCIAL_SEARCHES]]>) {
-      if (pendingSearchStages.has(config.stage)) continue;
+    const searches = (Object.entries(SOCIAL_SEARCHES) as Array<[keyof typeof SOCIAL_SEARCHES, (typeof SOCIAL_SEARCHES)[keyof typeof SOCIAL_SEARCHES]]>)
+      .filter(([, config]) => !pendingSearchStages.has(config.stage)).map(async ([platform, config]) => {
       const input = platform === "Facebook"
         ? { body: { query: `${terms.join(" OR ")} Facebook public post`, includeDomains: ["facebook.com"], numResults: 25 } }
         : { queryParams: platform === "X" ? { keyword: terms.join(" OR "), search_type: "Latest" }
           : platform === "YouTube" ? { keyword, type: "video", upload_date: "this_month", sort_by: "upload_date" }
           : { keyword, offset: 0 } };
       const started = await startProviderRun(apiKey, config.provider, config.endpoint, input);
+      return { platform, config, started };
+    });
+    const settled = await Promise.allSettled(searches);
+    let successfulStarts = 0;
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      successfulStarts += 1;
+      const { platform, config, started } = result.value;
       const job = await saveJob(db, brandId, started, config.stage, { platform, terms });
       if (started.status === "COMPLETED") candidates.push(...await processJob(db, brandId, apiKey, job, started));
     }
+    if (searches.length && !successfulStarts) {
+      const failure = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+      throw failure?.reason ?? new Error("Monid 多平台搜索启动失败");
+    }
   }
-  await startCommentJobs(db, brandId, apiKey);
   return candidates;
 }
 

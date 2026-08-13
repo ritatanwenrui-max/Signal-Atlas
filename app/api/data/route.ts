@@ -153,6 +153,16 @@ export async function POST(request: Request) {
       if (!value) return Response.json({ error: "监测词不能为空" }, { status: 400 });
       await db.prepare("INSERT INTO tracked_entities (brand_id, type, value, language) VALUES (?, ?, ?, ?)")
         .bind(brandId, String(payload.type ?? "关键词"), value, String(payload.language ?? "通用")).run();
+    } else if (action === "deleteEntity") {
+      const entityId = Number(payload.id ?? 0);
+      if (!Number.isInteger(entityId) || entityId <= 0) return Response.json({ error: "词条编号无效" }, { status: 400 });
+      const entity = await db.prepare("SELECT type FROM tracked_entities WHERE id = ? AND brand_id = ?")
+        .bind(entityId, brandId).first<{ type: string }>();
+      if (!entity) return Response.json({ error: "词条不存在或已被删除" }, { status: 404 });
+      if (["品牌", "别名", "官网域名"].includes(entity.type)) {
+        return Response.json({ error: "品牌、别名和官网域名请在品牌档案中修改" }, { status: 400 });
+      }
+      await db.prepare("DELETE FROM tracked_entities WHERE id = ? AND brand_id = ?").bind(entityId, brandId).run();
     } else if (action === "acknowledgeAlert") {
       await db.prepare("UPDATE alerts SET acknowledged = 1 WHERE id = ? AND brand_id = ?").bind(Number(payload.id), brandId).run();
     } else return Response.json({ error: "未知操作" }, { status: 400 });

@@ -59,7 +59,6 @@ type SocialCommentsData = {
   topics: Array<{ topic: string; count: number; negative: number }>;
   words: Array<{ word: string; count: number }>;
   topPosts: Array<{ mention_id: number; title: string; url: string; source: string; comments: number; negative: number; likes: number }>;
-  topAuthors: Array<{ author_id: string; author_username: string; author_name: string; is_verified: number; comments: number; likes: number; negative: number }>;
   targets: Array<{ mention_id: number; status: string; reported_count: number; collected_count: number; pages_fetched: number; last_error: string; updated_at: string; post_title: string; post_source: string; mention_url: string }>;
   riskComments: SocialCommentRow[]; comments: SocialCommentRow[];
   pagination: { page: number; pageSize: number; total: number; pages: number };
@@ -81,12 +80,6 @@ const countryCode: Record<string, string> = {
   韩国: "KR", 加拿大: "CA", 澳大利亚: "AU", 德国: "DE", 法国: "FR", 印度: "IN", 意大利: "IT", 西班牙: "ES",
   印度尼西亚: "ID", 菲律宾: "PH", 越南: "VN", 马来西亚: "MY", 华语地区: "ZH", 地区待确认: "??", 地区未披露: "??",
 };
-const mapPosition: Record<string, [number, number]> = {
-  美国: [17, 40], 加拿大: [15, 25], 英国: [44, 31], 法国: [46, 39], 德国: [49, 34], 西班牙: [43, 45], 意大利: [50, 43],
-  中国: [76, 43], 香港: [80, 53], 台湾: [84, 48], 日本: [90, 39], 韩国: [84, 39], 泰国: [77, 61], 新加坡: [78, 71],
-  马来西亚: [78, 68], 印度: [68, 56], 印度尼西亚: [81, 76], 菲律宾: [86, 63], 越南: [80, 59], 澳大利亚: [88, 82],
-};
-
 function formatDate(value?: string, full = false) {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -318,14 +311,47 @@ function Metric({ label, value, note, danger = false }: { label: string; value: 
 
 function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
   const max = Math.max(1, ...countries.map((item) => item.count));
-  const placed = countries.filter((item) => mapPosition[item.country]);
+  const mapRef = useRef<HTMLObjectElement>(null);
+  const placed = countries.filter((item) => /^[A-Z]{2}$/.test(countryCode[item.country] ?? ""));
+  function paintCountries() {
+    const document = mapRef.current?.contentDocument;
+    if (!document) return;
+    for (const node of document.querySelectorAll<SVGElement>(".landxx")) {
+      node.style.fill = "#d9ddd2";
+      node.style.transition = "fill .18s ease";
+    }
+    const ordered = [...placed].sort((left, right) => Number(countryCode[right.country] === "CN") - Number(countryCode[left.country] === "CN"));
+    for (const item of ordered) {
+      const code = countryCode[item.country];
+      const node = document.getElementById(code.toLowerCase()) as unknown as SVGElement | null;
+      if (!node) continue;
+      const heat = item.count / max;
+      const palette = ["#dce7be", "#bed288", "#91ad57", "#627f34", "#2f461c"];
+      const color = palette[Math.min(palette.length - 1, Math.max(0, Math.ceil(heat * palette.length) - 1))];
+      node.style.fill = color;
+      for (const child of node.querySelectorAll<SVGElement>(".landxx")) child.style.fill = color;
+      if (code === "CN") for (const childCode of ["tw", "hk", "mo"]) {
+        const childRegion = document.getElementById(childCode) as unknown as SVGElement | null;
+        if (!childRegion) continue;
+        childRegion.style.fill = "#d9ddd2";
+        for (const child of childRegion.querySelectorAll<SVGElement>(".landxx")) child.style.fill = "#d9ddd2";
+      }
+      node.style.cursor = "help";
+      const previous = node.querySelector("title[data-signal-atlas]");
+      previous?.remove();
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.setAttribute("data-signal-atlas", "true");
+      title.textContent = `${item.country}：${item.count} 篇报道`;
+      node.prepend(title);
+    }
+  }
+  useEffect(() => { paintCountries(); });
   return <div className="world-map-wrap">
     <div className="world-map" aria-label="按国家地区显示新闻量的世界热力图">
-      <div className="continent north-america" /><div className="continent south-america" /><div className="continent europe" /><div className="continent africa" /><div className="continent asia" /><div className="continent oceania" />
-      {placed.map((item) => { const [left, top] = mapPosition[item.country]; const heat = item.count / max; return <div key={item.country} className="map-marker" style={{ left: `${left}%`, top: `${top}%`, "--heat": heat } as CSSProperties} title={`${item.country}：${item.count} 篇`}><i /><span>{item.country}<b>{item.count}</b></span></div>; })}
+      <object ref={mapRef} className="world-map-base" data="/world-map-detailed.svg" type="image/svg+xml" aria-label="国家边界与报道强度" onLoad={paintCountries} />
     </div>
     <div className="heat-legend"><span>报道较少</span><i /><i /><i /><i /><span>报道最多</span></div>
-    {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !mapPosition[item.country]).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
+    {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
   </div>;
 }
 
@@ -499,13 +525,16 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   const maxWord = Math.max(1, ...(data?.words ?? []).map((item) => Number(item.count)));
   const maxTopic = Math.max(1, ...(data?.topics ?? []).map((item) => Number(item.count)));
   const netSentiment = summary.total ? Math.round((summary.positive - summary.negative) / summary.total * 100) : 0;
-  const targetStatus = (value: string) => value === "complete" ? "已完成" : value === "running" ? "请求中" : value === "queued" ? "排队中" : value === "collecting" ? "抓取回复中" : "无法采集";
+  const targetStatus = (value: string) => ({
+    complete: "已完成", empty: "无公开评论", unavailable: "平台未开放", blocked: "权限或预算受限",
+    running: "请求中", queued: "排队中", retrying: "等待重试", collecting: "抓取回复中", error: "采集失败",
+  }[value] ?? "待识别");
   function resetPage(value: (next: string) => void, next: string) { value(next); setPage(1); }
 
   return <div className="comments-page">
     <section className="comment-hero panel-dark">
       <div><p className="eyebrow">COMMENT INTELLIGENCE</p><h2>{brand.name} 评论舆情</h2><p>社交平台帖子和网页新闻的公开评论会被统一归档，再按具体情绪、主题、时间、来源和参与者交叉分析。</p></div>
-      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => item.status !== "complete") ? "持续采集中" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
+      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status)) ? "持续采集中" : data.targets.some((item) => ["blocked", "unavailable", "error"].includes(item.status)) ? "部分帖子受限" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
     </section>
 
     <section className="comment-kpis surface">
@@ -527,20 +556,17 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
       <section className="surface comment-cloud-card"><div className="section-head"><div><p className="eyebrow">MEANINGFUL TERMS</p><h3>评论高频词云</h3></div><span className="subtle-note">中英文分词 · 已过滤虚词</span></div>{data?.words.length ? <div className="word-cloud">{data.words.map((item, index) => <span key={item.word} className={index < 6 ? "hot" : ""} style={{ fontSize: `${11 + item.count / maxWord * 25}px`, opacity: .5 + item.count / maxWord * .5 }} title={`${item.count} 次`}>{item.word}<sup>{item.count}</sup></span>)}</div> : <div className="comment-empty">暂无可统计的有效词</div>}</section>
     </div>
 
-    <div className="comment-rank-grid">
-      <section className="surface"><div className="section-head"><div><p className="eyebrow">TOP POSTS</p><h3>讨论最集中的帖子</h3></div></div><div className="comment-rank-list">{data?.topPosts.map((item, index) => <button key={item.mention_id} className={postId === item.mention_id ? "active" : ""} onClick={() => { setPostId(postId === item.mention_id ? 0 : item.mention_id); setPage(1); }}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.title}</strong><small>{item.source} · {item.comments} 条 · {item.negative} 条负面</small></div><em>{item.likes.toLocaleString()} 赞</em></button>)}</div></section>
-      <section className="surface"><div className="section-head"><div><p className="eyebrow">ACTIVE AUTHORS</p><h3>高活跃参与者</h3></div></div><div className="comment-rank-list authors">{data?.topAuthors.map((item, index) => <article key={`${item.author_id}-${item.author_username}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.author_username ? `@${item.author_username}` : item.author_name || "匿名公开账号"}{item.is_verified ? " ✓" : ""}</strong><small>{item.comments} 条评论 · {item.negative} 条负面</small></div><em>{item.likes.toLocaleString()} 赞</em></article>)}</div></section>
-    </div>
-
-    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 已请求 {target.pages_fetched} 页{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
+    <section className="surface top-posts-card"><div className="section-head"><div><p className="eyebrow">TOP POSTS</p><h3>讨论最集中的帖子</h3></div></div><div className="comment-rank-list">{data?.topPosts.map((item, index) => <button key={item.mention_id} className={postId === item.mention_id ? "active" : ""} onClick={() => { setPostId(postId === item.mention_id ? 0 : item.mention_id); setPage(1); }}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.title}</strong><small>{item.source} · {item.comments} 条 · {item.negative} 条负面</small></div><em>{item.likes.toLocaleString()} 赞</em></button>)}</div></section>
 
     <section className="surface comment-feed-card">
       <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
-      <div className="comment-feed-table"><div className="comment-feed-head"><span>参与者 / 时间</span><span>评论内容</span><span>主题 / 情绪</span><span>互动</span><span>原帖</span></div>{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article key={comment.id}><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)}</small><em>{comment.language}{comment.parent_comment_id ? " · 回复" : " · 顶层评论"}</em></div><p>{comment.content}</p><div><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · {comment.sentiment} {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><div className="comment-engagement"><strong>♥ {comment.likes.toLocaleString()}</strong><small>↳ {comment.replies.toLocaleString()}</small></div><div className="comment-origin"><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><small>{comment.platform} · {comment.post_source}</small></div></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
+      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className="comment-archive-card" key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
       <div className="comment-pagination"><span>共 {data?.pagination.total ?? 0} 条 · 第 {data?.pagination.page ?? page} / {data?.pagination.pages ?? 1} 页</span><div><button disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><button disabled={page >= (data?.pagination.pages ?? 1) || loading} onClick={() => setPage((value) => value + 1)}>下一页</button></div></div>
     </section>
 
-    <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><p>{comment.content}</p><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a><strong>{comment.likes} 赞</strong></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
+    <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
+
+    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const terminal = ["complete", "empty", "unavailable"].includes(target.status); const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : terminal ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 已请求 {target.pages_fetched} 页{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
   </div>;
 }
 
@@ -583,12 +609,13 @@ function SettingsView({ brand, connectors, entities, workspace, submit }: { bran
   const monidConfigured = connectors.some((item) => item.provider === "Monid / Instagram" && item.configured);
   const officialSocialConfigured = connectors.some((item) => ["Meta / Instagram", "TikTok"].includes(item.provider ?? "") && item.configured);
   async function handleEntitySubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; await submit({ action: "addEntity", ...Object.fromEntries(new FormData(form).entries()) }, "监测词已加入团队词典"); form.reset(); }
+  async function removeEntity(item: Entity) { if (!window.confirm(`确认删除词条“${item.value}”？`)) return; await submit({ action: "deleteEntity", id: item.id }, "词条已从团队词典删除"); }
   async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "团队品牌监测档案已更新"); }
   return <div className="settings-page">
     <TeamWorkspacePanel workspace={workspace} submit={submit} />
     <div className="settings-grid">
       <section className="surface settings-main"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>团队品牌监测档案与同名消歧</h3></div><span className="permission-chip">{workspace.canManage ? "管理员可编辑" : "仅管理员可修改"}</span></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input disabled={!workspace.canManage} name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input disabled={!workspace.canManage} name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea disabled={!workspace.canManage} name="aliases" rows={3} defaultValue={brand.aliases} /></label><label className="field"><span>匹配模式</span><select disabled={!workspace.canManage} name="matchMode" defaultValue={brand.match_mode || "precise"}><option value="precise">精准：品牌词 + 身份锚点</option><option value="balanced">平衡：长品牌名可单独命中</option><option value="broad">宽泛：仅品牌词即可</option></select></label><label className="field"><span>官方社媒账号</span><textarea disabled={!workspace.canManage} name="officialAccounts" rows={3} defaultValue={brand.official_accounts} placeholder={'每行一个，例如：@brand_official'} /></label><label className="field full"><span>身份锚点</span><textarea disabled={!workspace.canManage} name="scopeTerms" rows={4} defaultValue={brand.scope_terms} placeholder={'每行一个：产品名、创始人、核心技术、独特口号、行业定位'} /><small>精准模式下，候选内容必须同时出现品牌名/别名和至少一个锚点；官网或官方账号内容直接通过。</small></label><label className="field full"><span>排除词</span><textarea disabled={!workspace.canManage} name="excludeTerms" rows={3} defaultValue={brand.exclude_terms} placeholder={'每行一个：同名公司的行业、产品、城市或人名'} /></label>{workspace.canManage && <button className="secondary-button">保存定位规则</button>}</form><p className="form-warning">这套定位规则、历史档案、事件、传播链路和分析结果由整个团队共同使用。</p>
-        <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i></div>)}</div>
+        <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => { const core = ["品牌", "别名", "官网域名"].includes(item.type); return <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i>{workspace.canEdit && (core ? <em title="请在上方品牌档案中修改">档案管理</em> : <button type="button" onClick={() => void removeEntity(item)} aria-label={`删除词条 ${item.value}`}>删除</button>)}</div>; })}</div>
       </section>
       <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索五个平台" : "由管理员在来源覆盖页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
     </div>
