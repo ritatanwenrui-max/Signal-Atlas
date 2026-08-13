@@ -92,6 +92,12 @@ export async function POST(request: Request) {
       }
     }
     await saveConnectorCredential(db, String(workspace.credential_owner_user_id), provider, credential, String(payload.lastFour ?? ""));
+    if (provider === "Monid / Instagram" && existingBrand?.id) {
+      await db.batch([
+        db.prepare("UPDATE mentions SET translation_status = 'pending', translated_at = '' WHERE brand_id = ? AND translation_status IN ('blocked','error')").bind(Number(existingBrand.id)),
+        db.prepare("UPDATE mention_comments SET translation_status = 'pending', translated_at = '' WHERE brand_id = ? AND translation_status IN ('blocked','error')").bind(Number(existingBrand.id)),
+      ]);
+    }
   } else if (action === "deleteConnectorCredential") {
     await requireWorkspaceAccess(db, user.userId, "manage");
     await deleteConnectorCredential(db, String(workspace.credential_owner_user_id), String(payload.provider ?? ""));

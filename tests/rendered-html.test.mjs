@@ -175,6 +175,29 @@ test("Monid searches five social platforms and archives public comments and repl
   assert.doesNotMatch(page, /ACTIVE AUTHORS|高活跃参与者/);
 });
 
+test("collected posts and comments receive persisted English translations", async () => {
+  const [monid, schema, repository, page, comments] = await Promise.all([
+    source("db/monid.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"), source("db/comments.ts"),
+  ]);
+  assert.match(monid, /api\.strale\.io/);
+  assert.match(monid, /\/x402\/translate/);
+  assert.match(monid, /target_language: "English"/);
+  assert.match(monid, /TRANSLATION_ITEMS_PER_JOB = 6/);
+  assert.match(monid, /translation_status = 'translated'/);
+  assert.match(monid, /Monid · Strale/);
+  assert.match(schema, /translationEn: text\("translation_en"\)/);
+  assert.match(schema, /idx_mentions_brand_translation/);
+  assert.match(schema, /idx_mention_comments_brand_translation/);
+  assert.match(repository, /ALTER TABLE mentions ADD COLUMN translation_en/);
+  assert.match(repository, /ALTER TABLE mention_comments ADD COLUMN translation_en/);
+  assert.match(comments, /translation_status = CASE WHEN mention_comments\.content != excluded\.content THEN 'pending'/);
+  assert.match(page, /function EnglishTranslation/);
+  assert.match(page, /English translation queued/);
+  assert.match(page, /<EnglishTranslation value=\{item\.translation_en\}/);
+  assert.match(page, /<EnglishTranslation value=\{comment\.translation_en\}/);
+  assert.match(page, /"英文翻译"/);
+});
+
 test("team entity dictionary supports protected deletion", async () => {
   const [page, dataRoute] = await Promise.all([source("app/page.tsx"), source("app/api/data/route.ts")]);
   assert.match(page, /action: "deleteEntity"/);

@@ -83,6 +83,11 @@ export const mentions = sqliteTable("mentions", {
   relation: text("relation").notNull().default(""),
   engagement: integer("engagement").notNull().default(0),
   excerpt: text("excerpt").notNull().default(""),
+  translationEn: text("translation_en").notNull().default(""),
+  translationStatus: text("translation_status").notNull().default("pending"),
+  translationProvider: text("translation_provider").notNull().default(""),
+  translationSourceHash: text("translation_source_hash").notNull().default(""),
+  translatedAt: text("translated_at").notNull().default(""),
   author: text("author").notNull().default(""),
   provider: text("provider").notNull().default(""),
   discoveredVia: text("discovered_via").notNull().default("global_discovery"),
@@ -99,6 +104,7 @@ export const mentions = sqliteTable("mentions", {
   index("idx_mentions_brand_published").on(table.brandId, table.publishedAt),
   index("idx_mentions_brand_country_platform").on(table.brandId, table.sourceCountry, table.platform),
   index("idx_mentions_brand_cluster").on(table.brandId, table.clusterKey),
+  index("idx_mentions_brand_translation").on(table.brandId, table.translationStatus),
 ]);
 
 export const trafficSignals = sqliteTable("traffic_signals", {
@@ -304,6 +310,11 @@ export const mentionComments = sqliteTable("mention_comments", {
   authorName: text("author_name").notNull().default(""),
   isVerified: integer("is_verified", { mode: "boolean" }).notNull().default(false),
   content: text("content").notNull(),
+  translationEn: text("translation_en").notNull().default(""),
+  translationStatus: text("translation_status").notNull().default("pending"),
+  translationProvider: text("translation_provider").notNull().default(""),
+  translationSourceHash: text("translation_source_hash").notNull().default(""),
+  translatedAt: text("translated_at").notNull().default(""),
   sentiment: text("sentiment").notNull(),
   emotion: text("emotion").notNull().default("中性陈述"),
   sentimentScore: integer("sentiment_score").notNull().default(0),
@@ -321,6 +332,7 @@ export const mentionComments = sqliteTable("mention_comments", {
   index("idx_mention_comments_brand_mention").on(table.brandId, table.mentionId),
   index("idx_mention_comments_brand_platform_time").on(table.brandId, table.platform, table.publishedAt),
   index("idx_mention_comments_brand_sentiment").on(table.brandId, table.sentiment, table.sentimentScore),
+  index("idx_mention_comments_brand_translation").on(table.brandId, table.translationStatus),
 ]);
 
 export const commentAnnotations = sqliteTable("comment_annotations", {

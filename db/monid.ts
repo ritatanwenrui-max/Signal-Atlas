@@ -10,9 +10,11 @@ type MonidRun = {
   providerResponse?: { httpStatus?: number; error?: { message?: string } };
   cost?: { value?: number; currency?: string } | number | null;
 };
-type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
+type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "resolve_post" | "post_comments" | "comment_replies" | "translation";
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
 type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1"; replyAdapter?: "v2" | "v1" };
+type TranslationTarget = { kind: "mention" | "comment"; id: number; sourceHash: string };
+type TranslationJobPayload = { targets: TranslationTarget[] };
 type SocialComment = {
   id: string; parentId: string; text: string; authorId: string; authorUsername: string; authorName: string;
   verified: boolean; likes: number; replies: number; publishedAt: string; commentUrl: string;
@@ -28,6 +30,8 @@ const COMMENTS_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_post_comments";
 const COMMENTS_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
 const REPLIES_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_comment_replies";
 const REPLIES_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
+const TRANSLATION_PROVIDER = "api.strale.io";
+const TRANSLATION_ENDPOINT = "/x402/translate";
 const SOCIAL_SEARCHES = {
   X: { stage: "search_x" as const, provider: "tikhub", endpoint: "/api/v1/twitter/web/fetch_search_timeline" },
   YouTube: { stage: "search_youtube" as const, provider: "tikhub", endpoint: "/api/v1/youtube/web_v2/get_general_search_v2" },
@@ -37,6 +41,9 @@ const SOCIAL_SEARCHES = {
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
 const COMMENT_JOBS_PER_CYCLE = 2;
+const TRANSLATION_JOBS_PER_CYCLE = 2;
+const TRANSLATION_ITEMS_PER_JOB = 6;
+const TRANSLATION_CHAR_LIMIT = 4_800;
 
 function pathValue(value: unknown, path: string) {
   return path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as JsonObject)[key] : undefined, value);
@@ -296,6 +303,89 @@ async function updateJob(db: D1Database, job: MonidJob, run: MonidRun, error = "
     .bind(run.status, costValue(run.cost), error, terminal ? new Date().toISOString() : "", new Date().toISOString(), job.id).run();
 }
 
+function translationHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function translationOutputText(output: unknown) {
+  if (typeof output === "string") return output.trim();
+  const direct = firstText(output, [
+    "translated_text", "translatedText", "translation", "text", "result",
+    "data.translated_text", "data.translatedText", "data.translation", "data.text",
+    "result.translated_text", "result.translatedText", "result.translation", "result.text",
+  ]);
+  if (direct) return direct;
+  for (const row of walkObjects(output)) {
+    const candidate = firstText(row, ["translated_text", "translatedText", "translation", "translated", "target_text"]);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function translationChunks(value: string, count: number) {
+  const marker = /<{3}\s*SIGNAL_ATLAS_(\d+)\s*>{3}/gi;
+  const matches = [...value.matchAll(marker)];
+  if (!matches.length) return count === 1 && value.trim() ? [value.trim()] : [];
+  const chunks = Array.from({ length: count }, () => "");
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const targetIndex = Number(match[1]);
+    if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= count) continue;
+    const start = (match.index ?? 0) + match[0].length;
+    const end = index + 1 < matches.length ? matches[index + 1].index ?? value.length : value.length;
+    chunks[targetIndex] = value.slice(start, end).trim();
+  }
+  return chunks.every(Boolean) ? chunks : [];
+}
+
+async function translationSource(db: D1Database, brandId: number, target: TranslationTarget) {
+  if (target.kind === "mention") {
+    const row = await db.prepare("SELECT title, excerpt, summary FROM mentions WHERE brand_id = ? AND id = ?")
+      .bind(brandId, target.id).first<{ title: string; excerpt: string; summary: string }>();
+    if (!row) return "";
+    return [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800);
+  }
+  const row = await db.prepare("SELECT content FROM mention_comments WHERE brand_id = ? AND id = ?")
+    .bind(brandId, target.id).first<{ content: string }>();
+  return row?.content.trim().slice(0, 1_800) ?? "";
+}
+
+async function setTranslationState(db: D1Database, brandId: number, targets: TranslationTarget[], status: "pending" | "translating" | "error" | "blocked") {
+  const attemptedAt = status === "error" || status === "blocked" ? new Date().toISOString() : "";
+  const statements = targets.map((target) => db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+    SET translation_status = ?, translated_at = CASE WHEN ? != '' THEN ? ELSE translated_at END
+    WHERE brand_id = ? AND id = ?`).bind(status, attemptedAt, attemptedAt, brandId, target.id));
+  if (statements.length) await db.batch(statements);
+}
+
+async function processTranslationJob(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
+  const payload = JSON.parse(job.terms || "{}") as TranslationJobPayload;
+  const targets = Array.isArray(payload.targets) ? payload.targets : [];
+  const translated = translationChunks(translationOutputText(output), targets.length);
+  if (!targets.length || translated.length !== targets.length) throw new Error("英文翻译结果缺少批次标记");
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    const currentSource = await translationSource(db, brandId, target);
+    if (!currentSource || translationHash(currentSource) !== target.sourceHash) {
+      statements.push(db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+        SET translation_en = '', translation_status = 'pending', translation_source_hash = '', translation_provider = '', translated_at = ''
+        WHERE brand_id = ? AND id = ?`).bind(brandId, target.id));
+      continue;
+    }
+    statements.push(db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+      SET translation_en = ?, translation_status = 'translated', translation_source_hash = ?, translation_provider = ?, translated_at = ?
+      WHERE brand_id = ? AND id = ?`).bind(translated[index], target.sourceHash, "Monid · Strale", now, brandId, target.id));
+  }
+  if (statements.length) await db.batch(statements);
+}
+
 function nestedObjectWithArray(value: unknown, keys: string[], depth = 0): JsonObject | null {
   if (depth > 6 || !value || typeof value !== "object") return null;
   if (Array.isArray(value)) {
@@ -372,7 +462,13 @@ async function storeSocialComments(db: D1Database, brandId: number, mentionId: n
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Monid', ?, ?)
         ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET parent_comment_id = excluded.parent_comment_id,
           author_id = excluded.author_id, author_username = excluded.author_username, author_name = excluded.author_name,
-          is_verified = excluded.is_verified, content = excluded.content,
+          is_verified = excluded.is_verified,
+          translation_en = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_en END,
+          translation_status = CASE WHEN mention_comments.content != excluded.content THEN 'pending' ELSE mention_comments.translation_status END,
+          translation_source_hash = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_source_hash END,
+          translation_provider = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_provider END,
+          translated_at = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translated_at END,
+          content = excluded.content,
           sentiment = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment ELSE excluded.sentiment END,
           emotion = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.emotion ELSE excluded.emotion END,
           sentiment_score = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment_score ELSE excluded.sentiment_score END,
@@ -578,10 +674,16 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
     db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' AND title LIKE '指定帖子%' THEN ? ELSE title END,
       source = CASE WHEN ? != '' THEN '@' || ? ELSE source END,
       author = CASE WHEN ? != '' THEN '@' || ? ELSE author END,
-      excerpt = CASE WHEN ? != '' AND excerpt = '' THEN ? ELSE excerpt END
+      excerpt = CASE WHEN ? != '' AND excerpt = '' THEN ? ELSE excerpt END,
+      translation_en = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_en END,
+      translation_status = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN 'pending' ELSE translation_status END,
+      translation_source_hash = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_source_hash END,
+      translation_provider = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_provider END,
+      translated_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translated_at END
       WHERE brand_id = ? AND id = ?`)
       .bind(details.caption, details.caption.slice(0, 180), details.username, details.username, details.username, details.username,
-        details.caption, details.caption.slice(0, 600), brandId, descriptor.mentionId),
+        details.caption, details.caption.slice(0, 600), details.caption, details.caption, details.caption, details.caption, details.caption,
+        brandId, descriptor.mentionId),
   ]);
 }
 
@@ -614,23 +716,50 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   }
   if (run.status === "BLOCKED") {
     await updateJob(db, job, run, "Monid 工作区预算或单次任务上限阻止了执行");
+    if (job.stage === "translation") {
+      const payload = JSON.parse(job.terms || "{}") as TranslationJobPayload;
+      await setTranslationState(db, brandId, payload.targets ?? [], "blocked");
+      return [];
+    }
     await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "blocked");
     if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error("Monid 工作区预算或单次任务上限已触发，请在 Monid 后台调整后重试");
   }
   if (run.status !== "COMPLETED") {
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
+    if (job.stage === "translation") {
+      const payload = JSON.parse(job.terms || "{}") as TranslationJobPayload;
+      await setTranslationState(db, brandId, payload.targets ?? [], "error");
+      return [];
+    }
     await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}，将在稍后重试`, "retrying");
     if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error(`Monid Instagram 任务未完成：${run.status}`);
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
   if (providerStatus >= 400) {
-    const message = run.providerResponse?.error?.message ?? `Instagram 数据端点 HTTP ${providerStatus}`;
+    const message = run.providerResponse?.error?.message ?? `${job.stage === "translation" ? "翻译" : "社交媒体"}数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
+    if (job.stage === "translation") {
+      const payload = JSON.parse(job.terms || "{}") as TranslationJobPayload;
+      await setTranslationState(db, brandId, payload.targets ?? [], providerStatus === 401 || providerStatus === 403 ? "blocked" : "error");
+      return [];
+    }
     await markCommentJobError(db, brandId, job, message, providerStatus === 401 || providerStatus === 403 ? "blocked" : providerStatus >= 500 ? "retrying" : "unavailable");
     if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
+  }
+  if (job.stage === "translation") {
+    try {
+      await processTranslationJob(db, brandId, job, run.output);
+      await updateJob(db, job, run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "英文翻译结果无法解析";
+      const payload = JSON.parse(job.terms || "{}") as TranslationJobPayload;
+      await setTranslationState(db, brandId, payload.targets ?? [], "error");
+      await updateJob(db, job, run, message);
+    }
+    return [];
   }
   if (job.stage === "profiles") {
     await processProfiles(db, brandId, run.output);
@@ -833,6 +962,57 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
   return startedCount;
 }
 
+async function startTranslationJobs(db: D1Database, brandId: number, apiKey: string) {
+  const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
+    AND stage = 'translation' AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
+  let available = Math.max(0, TRANSLATION_JOBS_PER_CYCLE - Number(active?.count ?? 0));
+  if (!available) return 0;
+
+  const [mentionRows, commentRows] = await Promise.all([
+    db.prepare(`SELECT id, title, excerpt, summary FROM mentions WHERE brand_id = ?
+      AND (translation_status = 'pending' OR (translation_status = 'error' AND datetime(translated_at) <= datetime('now', '-6 hours')))
+      ORDER BY published_at DESC, id DESC LIMIT 60`).bind(brandId).all<{ id: number; title: string; excerpt: string; summary: string }>(),
+    db.prepare(`SELECT id, content FROM mention_comments WHERE brand_id = ?
+      AND (translation_status = 'pending' OR (translation_status = 'error' AND datetime(translated_at) <= datetime('now', '-6 hours')))
+      ORDER BY COALESCE(NULLIF(published_at, ''), collected_at) DESC, id DESC LIMIT 120`).bind(brandId).all<{ id: number; content: string }>(),
+  ]);
+  const queue = [
+    ...commentRows.results.map((row) => ({ kind: "comment" as const, id: row.id, source: row.content.trim().slice(0, 1_800) })),
+    ...mentionRows.results.map((row) => ({ kind: "mention" as const, id: row.id,
+      source: [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800) })),
+  ].filter((item) => item.source);
+
+  let startedCount = 0;
+  let cursor = 0;
+  while (available > 0 && cursor < queue.length) {
+    const batch: typeof queue = [];
+    let characters = 0;
+    while (cursor < queue.length && batch.length < TRANSLATION_ITEMS_PER_JOB) {
+      const item = queue[cursor];
+      const addition = item.source.length + 40;
+      if (batch.length && characters + addition > TRANSLATION_CHAR_LIMIT) break;
+      batch.push(item); cursor += 1; characters += addition;
+    }
+    if (!batch.length) break;
+    const targets: TranslationTarget[] = batch.map((item) => ({ kind: item.kind, id: item.id, sourceHash: translationHash(item.source) }));
+    const text = batch.map((item, index) => `<<<SIGNAL_ATLAS_${index}>>>\n${item.source}`).join("\n\n");
+    try {
+      const run = await startProviderRun(apiKey, TRANSLATION_PROVIDER, TRANSLATION_ENDPOINT, {
+        queryParams: { text, target_language: "English" },
+      });
+      const job = await saveJob(db, brandId, run, "translation", { targets } satisfies TranslationJobPayload);
+      await setTranslationState(db, brandId, targets, "translating");
+      if (run.status === "COMPLETED") await processJob(db, brandId, apiKey, job, run);
+      startedCount += 1;
+      available -= 1;
+    } catch {
+      await setTranslationState(db, brandId, targets, "error");
+      break;
+    }
+  }
+  return startedCount;
+}
+
 export async function refreshSocialFollowerCounts(db: D1Database, brandId: number) {
   await db.prepare(`UPDATE social_post_metrics SET follower_count = COALESCE((
       SELECT snapshot.follower_count FROM social_author_snapshots snapshot
@@ -847,7 +1027,7 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   const candidates: MonitoringCandidate[] = [];
   await registerHistoricalCommentTargets(db, brandId);
   const pending = await db.prepare(`SELECT id, run_id, mention_id, stage, status, terms FROM monid_jobs
-    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 4`)
+    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 8`)
     .bind(brandId).all<MonidJob>();
   const pendingSearchStages = new Set(pending.results.filter((job) => job.stage.startsWith("search")).map((job) => job.stage));
   const polled = await Promise.all(pending.results.map(async (job) => ({ job, run: await getRun(apiKey, job.run_id) })));
@@ -897,6 +1077,7 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   // Newly discovered post URLs are archived by the caller, queued as comment targets,
   // resolved to platform post IDs, then analyzed after comment text is stored.
   await startCommentJobs(db, brandId, apiKey);
+  await startTranslationJobs(db, brandId, apiKey);
   return candidates;
 }
 

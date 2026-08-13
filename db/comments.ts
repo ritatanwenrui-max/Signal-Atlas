@@ -158,7 +158,13 @@ async function storeCollection(db: D1Database, brandId: number, mentionId: numbe
     const statements = analyzed.slice(index, index + 40).map((item) => db.prepare(`INSERT INTO mention_comments
       (mention_id, brand_id, platform, source_comment_id, content, sentiment, emotion, sentiment_score, language, topic, keywords, likes, replies, published_at, collected_at, fetched_via)
       VALUES (?, ?, '网页新闻', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '公开网页适配器')
-      ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET content = excluded.content,
+      ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET
+        translation_en = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_en END,
+        translation_status = CASE WHEN mention_comments.content != excluded.content THEN 'pending' ELSE mention_comments.translation_status END,
+        translation_source_hash = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_source_hash END,
+        translation_provider = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translation_provider END,
+        translated_at = CASE WHEN mention_comments.content != excluded.content THEN '' ELSE mention_comments.translated_at END,
+        content = excluded.content,
         sentiment = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment ELSE excluded.sentiment END,
         emotion = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.emotion ELSE excluded.emotion END,
         sentiment_score = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment_score ELSE excluded.sentiment_score END,
