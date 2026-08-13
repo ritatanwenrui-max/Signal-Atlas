@@ -207,7 +207,11 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(translation, /translation_error/);
   assert.match(translation, /translation_next_retry_at/);
   assert.match(translation, /翻译已迁移到独立队列/);
+  assert.match(translation, /MAX_REMOTE_ITEMS_PER_CYCLE = 2/);
+  assert.match(translation, /\.\.\.mentions\.results[\s\S]*\.\.\.comments\.results/);
+  assert.match(translation, /Promise\.all\(remote\.map/);
   assert.match(sync, /runTranslationCycle/);
+  assert.match(sync, /inserted > 0 \? await runTranslationCycle/);
   assert.match(schema, /translationEn: text\("translation_en"\)/);
   assert.match(schema, /translationError: text\("translation_error"\)/);
   assert.match(schema, /idx_mentions_brand_translation/);

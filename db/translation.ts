@@ -5,8 +5,8 @@ type TranslationRow = { kind: TranslationKind; id: number; source: string; langu
 type TranslationResult = { text: string; provider: string; detectedLanguage: string };
 
 const MYMEMORY_ENDPOINT = "https://api.mymemory.translated.net/get";
-const MAX_ITEMS_PER_CYCLE = 8;
-const MAX_SOURCE_CHARACTERS = 1_400;
+const MAX_CANDIDATES_PER_CYCLE = 40;
+const MAX_REMOTE_ITEMS_PER_CYCLE = 2;
 const MAX_SEGMENT_BYTES = 450;
 
 const languageCodes: Record<string, string> = {
@@ -62,19 +62,15 @@ function sourceHash(value: string) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function splitByBytes(value: string) {
+function truncateByBytes(value: string) {
   const encoder = new TextEncoder();
-  const segments: string[] = [];
   let current = "";
   for (const character of value) {
     const candidate = current + character;
-    if (current && encoder.encode(candidate).length > MAX_SEGMENT_BYTES) {
-      segments.push(current.trim());
-      current = character;
-    } else current = candidate;
+    if (encoder.encode(candidate).length > MAX_SEGMENT_BYTES) break;
+    current = candidate;
   }
-  if (current.trim()) segments.push(current.trim());
-  return segments.filter(Boolean);
+  return current.trim();
 }
 
 function decodeEntities(value: string) {
@@ -83,29 +79,24 @@ function decodeEntities(value: string) {
 
 async function translateWithMyMemory(source: string, language: string): Promise<TranslationResult> {
   const sourceLanguage = sourceLanguageCode(language, source);
-  const translated: string[] = [];
-  let detectedLanguage = sourceLanguage;
-  for (const segment of splitByBytes(source)) {
-    const url = new URL(MYMEMORY_ENDPOINT);
-    url.searchParams.set("q", segment);
-    url.searchParams.set("langpair", `${sourceLanguage}|en`);
-    url.searchParams.set("mt", "1");
-    if (env.TRANSLATION_CONTACT_EMAIL) url.searchParams.set("de", env.TRANSLATION_CONTACT_EMAIL);
-    const response = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
-    const payload = await response.json().catch(() => ({})) as {
-      responseData?: { translatedText?: string; detectedLanguage?: string };
-      responseStatus?: number; responseDetails?: string; quotaFinished?: boolean;
-    };
-    const status = Number(payload.responseStatus ?? response.status);
-    if (!response.ok || status >= 400 || payload.quotaFinished) {
-      throw new Error(payload.quotaFinished ? "独立翻译服务当日免费额度已用完" : payload.responseDetails || `独立翻译服务 HTTP ${status}`);
-    }
-    const text = decodeEntities(String(payload.responseData?.translatedText ?? "").trim());
-    if (!text) throw new Error("独立翻译服务未返回译文");
-    detectedLanguage = String(payload.responseData?.detectedLanguage ?? detectedLanguage);
-    translated.push(text);
+  const segment = truncateByBytes(source);
+  const url = new URL(MYMEMORY_ENDPOINT);
+  url.searchParams.set("q", segment);
+  url.searchParams.set("langpair", `${sourceLanguage}|en`);
+  url.searchParams.set("mt", "1");
+  if (env.TRANSLATION_CONTACT_EMAIL) url.searchParams.set("de", env.TRANSLATION_CONTACT_EMAIL);
+  const response = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(6_000) });
+  const payload = await response.json().catch(() => ({})) as {
+    responseData?: { translatedText?: string; detectedLanguage?: string };
+    responseStatus?: number; responseDetails?: string; quotaFinished?: boolean;
+  };
+  const status = Number(payload.responseStatus ?? response.status);
+  if (!response.ok || status >= 400 || payload.quotaFinished) {
+    throw new Error(payload.quotaFinished ? "独立翻译服务当日免费额度已用完" : payload.responseDetails || `独立翻译服务 HTTP ${status}`);
   }
-  return { text: translated.join("\n"), provider: "MyMemory", detectedLanguage };
+  const text = decodeEntities(String(payload.responseData?.translatedText ?? "").trim());
+  if (!text) throw new Error("独立翻译服务未返回译文");
+  return { text, provider: "MyMemory", detectedLanguage: String(payload.responseData?.detectedLanguage ?? sourceLanguage) };
 }
 
 async function translateWithLibreTranslate(source: string): Promise<TranslationResult> {
@@ -196,13 +187,19 @@ export async function runTranslationCycle(db: D1Database, brandId: number) {
       .all<{ id: number; content: string; language: string; attempts: number }>(),
   ]);
   const queue: TranslationRow[] = [
-    ...comments.results.map((row) => ({ kind: "comment" as const, id: row.id, source: row.content.trim().slice(0, MAX_SOURCE_CHARACTERS), language: row.language, attempts: Number(row.attempts ?? 0) })),
     ...mentions.results.map((row) => ({ kind: "mention" as const, id: row.id,
-      source: [row.title, row.excerpt || row.summary].filter(Boolean).join("\n").trim().slice(0, MAX_SOURCE_CHARACTERS), language: row.language, attempts: Number(row.attempts ?? 0) })),
-  ].filter((item) => item.source).slice(0, MAX_ITEMS_PER_CYCLE);
-  const summary = { queued: queue.length, translated: 0, skipped: 0, errors: 0 };
-  for (const item of queue) {
-    const result = await processItem(db, brandId, item);
+      source: [row.title, row.excerpt || row.summary].filter(Boolean).join("\n").trim(), language: row.language, attempts: Number(row.attempts ?? 0) })),
+    ...comments.results.map((row) => ({ kind: "comment" as const, id: row.id, source: row.content.trim(), language: row.language, attempts: Number(row.attempts ?? 0) })),
+  ].filter((item) => item.source).slice(0, MAX_CANDIDATES_PER_CYCLE);
+  const skipped = queue.filter((item) => translationNotNeeded(item.language, item.source));
+  const remote = queue.filter((item) => !translationNotNeeded(item.language, item.source)).slice(0, MAX_REMOTE_ITEMS_PER_CYCLE);
+  const summary = { queued: skipped.length + remote.length, translated: 0, skipped: 0, errors: 0 };
+  for (const item of skipped) {
+    await updateSkipped(db, brandId, item);
+    summary.skipped += 1;
+  }
+  const remoteResults = await Promise.all(remote.map((item) => processItem(db, brandId, item)));
+  for (const result of remoteResults) {
     if (result === "translated") summary.translated += 1;
     else if (result === "skipped") summary.skipped += 1;
     else summary.errors += 1;
