@@ -83,6 +83,15 @@ const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"],
 ] as const;
+type ViewId = (typeof nav)[number][0];
+const routeByView: Record<ViewId, string> = {
+  overview: "/overview", archive: "/archive", propagation: "/propagation", analytics: "/analytics",
+  comments: "/comments", coverage: "/coverage", reports: "/reports", settings: "/settings",
+};
+function viewFromPath(pathname: string): ViewId {
+  const segment = pathname.split("/").filter(Boolean)[0] as ViewId | undefined;
+  return segment && Object.hasOwn(routeByView, segment) ? segment : "overview";
+}
 const platformCatalog = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"] as const;
 const platformVisuals = [["网页新闻", "web"], ["Instagram", "instagram"], ["Facebook", "facebook"], ["TikTok", "tiktok"], ["X", "x"], ["YouTube", "youtube"]] as const;
 function platformSlug(value: string) { return platformVisuals.find(([label]) => label === value)?.[1] ?? "other"; }
@@ -132,7 +141,7 @@ function EnglishTranslation({ value, status, language }: { value?: string; statu
 }
 
 export default function Home() {
-  const [view, setView] = useState("overview");
+  const [view, setView] = useState<ViewId>("overview");
   const [data, setData] = useState<DashboardData>(emptyData);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -143,6 +152,27 @@ export default function Home() {
   const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const monidPollAttempts = useRef(0);
+
+  function navigateTo(nextView: ViewId, replace = false) {
+    setView(nextView);
+    const path = routeByView[nextView];
+    if (window.location.pathname !== path) window.history[replace ? "replaceState" : "pushState"]({ view: nextView }, "", path);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    const syncRoute = () => setView(viewFromPath(window.location.pathname));
+    const initialView = viewFromPath(window.location.pathname);
+    setView(initialView);
+    if (window.location.pathname === "/") window.history.replaceState({ view: initialView }, "", routeByView[initialView]);
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  useEffect(() => {
+    const label = nav.find(([id]) => id === view)?.[1] ?? "品牌舆情监测";
+    document.title = `${label} · Signal Atlas`;
+  }, [view]);
 
   async function syncNews(force = false, announce = false) {
     if (syncing) return;
@@ -244,7 +274,7 @@ export default function Home() {
   return <main className="app-shell">
     <aside className="sidebar">
       <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><strong>SIGNAL ATLAS</strong><small>GLOBAL MEDIA INTELLIGENCE</small></div></div>
-      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <button key={id} disabled={!data.viewer.authenticated} className={view === id ? "nav-item active" : "nav-item"} onClick={() => setView(id)}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</button>)}</nav>
+      <nav aria-label="主要导航">{nav.map(([id, label, number]) => <a key={id} href={routeByView[id]} aria-current={view === id ? "page" : undefined} className={view === id ? "nav-item active" : "nav-item"} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigateTo(id); }}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</a>)}</nav>
       {data.viewer.authenticated && <div className="system-card">
         <div className="system-title"><i /> 混合监测已运行</div>
         <div className="system-row"><span>调度巡检</span><strong>每小时 :17</strong></div>
@@ -268,8 +298,8 @@ export default function Home() {
       </header>
 
       <div className="content-area">
-        {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
-          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={setView} selectCluster={(key) => { setSelectedCluster(key); setView("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} canEdit={Boolean(data.workspace?.canEdit)} />}
+        {loading ? <LoadingState /> : !data.viewer.authenticated ? <PublicAccess returnTo={routeByView[view]} /> : !data.brand ? <BrandOnboarding submit={async (payload) => { await post(payload, "品牌档案已创建，正在启动全球发现"); void syncNews(true, true); }} /> : <>
+          {view === "overview" && <Overview data={data} brand={data.brand} clusters={clusters} alerts={activeAlerts} setView={navigateTo} selectCluster={(key) => { setSelectedCluster(key); navigateTo("propagation"); }} acknowledge={(id) => post({ action: "acknowledgeAlert", id }, "告警已确认")} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "archive" && <ArchiveView mentions={filteredMentions} allCount={data.mentions.length} countries={countries} platforms={platforms} platformCounts={platformCounts} country={country} platform={platform} sentiment={sentiment} setCountry={setCountry} setPlatform={setPlatform} setSentiment={setSentiment} submit={post} canEdit={Boolean(data.workspace?.canEdit)} />}
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
@@ -286,10 +316,10 @@ export default function Home() {
 
 function LoadingState() { return <div className="loading-state"><span /><p>正在读取长期新闻档案与传播图谱…</p></div>; }
 
-function PublicAccess() {
+function PublicAccess({ returnTo }: { returnTo: string }) {
   return <section className="onboarding">
     <div className="onboarding-copy panel-dark"><h2>品牌舆情监测</h2><p>自动搜索网页新闻与已接入的社交平台内容，并按地区归档、聚类事件、分析情绪和推断传播路径。</p><div className="architecture-mini"><span>搜索与归档</span><b>→</b><span>事件与传播</span><b>→</b><span>情绪与风险</span></div></div>
-    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>如果管理员已邀请你的邮箱，登录后会直接进入同一个团队工作区，品牌、档案、分析和连接器配置无需重新建立。</p><a className="primary-button wide" href="/signin-with-chatgpt?return_to=%2F">使用 ChatGPT 登录 →</a><small>未受邀账号会获得独立的新工作区。</small></div>
+    <div className="onboarding-form surface"><p className="eyebrow">ACCOUNT ACCESS</p><h3>登录后使用</h3><p>如果管理员已邀请你的邮箱，登录后会直接进入同一个团队工作区，品牌、档案、分析和连接器配置无需重新建立。</p><a className="primary-button wide" href={`/signin-with-chatgpt?return_to=${encodeURIComponent(returnTo)}`}>使用 ChatGPT 登录 →</a><small>未受邀账号会获得独立的新工作区。</small></div>
   </section>;
 }
 
@@ -307,7 +337,7 @@ function BrandOnboarding({ submit }: { submit: (payload: Record<string, unknown>
   </section>;
 }
 
-function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge, canEdit }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: string) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown>; canEdit: boolean }) {
+function Overview({ data, brand, clusters, alerts, setView, selectCluster, acknowledge, canEdit }: { data: DashboardData; brand: BrandProfile; clusters: StoryCluster[]; alerts: Alert[]; setView: (view: ViewId) => void; selectCluster: (key: string) => void; acknowledge: (id: number) => Promise<unknown>; canEdit: boolean }) {
   const topCountry = data.analytics.countries[0];
   const negative = data.analytics.sentiment.negative;
   const total = data.mentions.length || 1;

@@ -18,7 +18,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /采集计划/);
   assert.doesNotMatch(page, /少量付费发现|大部分追踪免费完成|正在被归档和溯源|输入一次品牌名/);
   assert.match(page, /!data\.viewer\.authenticated \? <PublicAccess/);
-  assert.match(page, /\/signin-with-chatgpt\?return_to=%2F/);
+  assert.match(page, /\/signin-with-chatgpt\?return_to=\$\{encodeURIComponent\(returnTo\)\}/);
   assert.match(page, /登录后会直接进入同一个团队工作区/);
   assert.match(page, /全球报道热力分布/);
   assert.match(page, /world-map-flat\.svg/);
@@ -54,6 +54,24 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /Monid.*五个平台|Monid.*Instagram/);
   assert.match(page, /60 \* 60 \* 1000/);
   assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
+});
+
+test("every sidebar feature has a durable URL with refresh and browser history support", async () => {
+  const page = await source("app/page.tsx");
+  const routeFiles = await Promise.all(["overview", "archive", "propagation", "analytics", "comments", "coverage", "reports", "settings"]
+    .map((route) => source(`app/${route}/page.tsx`)));
+  assert.match(page, /overview: "\/overview"/);
+  assert.match(page, /archive: "\/archive"/);
+  assert.match(page, /propagation: "\/propagation"/);
+  assert.match(page, /comments: "\/comments"/);
+  assert.match(page, /settings: "\/settings"/);
+  assert.match(page, /window\.history\[replace \? "replaceState" : "pushState"\]/);
+  assert.match(page, /window\.addEventListener\("popstate", syncRoute\)/);
+  assert.match(page, /viewFromPath\(window\.location\.pathname\)/);
+  assert.match(page, /href=\{routeByView\[id\]\}/);
+  assert.match(page, /aria-current=\{view === id \? "page"/);
+  assert.match(page, /<PublicAccess returnTo=\{routeByView\[view\]\}/);
+  for (const routeFile of routeFiles) assert.match(routeFile, /export \{ default \} from "\.\.\/page"/);
 });
 
 test("hybrid collection discovers globally and continuously follows free media sources", async () => {
