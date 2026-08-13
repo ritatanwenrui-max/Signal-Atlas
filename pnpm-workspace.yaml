@@ -1,6 +1,6 @@
-onlyBuiltDependencies:
-  - core-js
-  - esbuild
-  - sharp
-  - unrs-resolver
-  - workerd
+allowBuilds:
+  core-js: true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+  workerd: true
