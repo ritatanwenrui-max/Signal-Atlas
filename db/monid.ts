@@ -343,23 +343,38 @@ function translationChunks(value: string, count: number) {
   return chunks.every(Boolean) ? chunks : [];
 }
 
-async function translationSource(db: D1Database, brandId: number, target: TranslationTarget) {
-  if (target.kind === "mention") {
-    const row = await db.prepare("SELECT title, excerpt, summary FROM mentions WHERE brand_id = ? AND id = ?")
-      .bind(brandId, target.id).first<{ title: string; excerpt: string; summary: string }>();
-    if (!row) return "";
-    return [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800);
-  }
-  const row = await db.prepare("SELECT content FROM mention_comments WHERE brand_id = ? AND id = ?")
-    .bind(brandId, target.id).first<{ content: string }>();
-  return row?.content.trim().slice(0, 1_800) ?? "";
+function shouldSkipTranslation(language: string, source: string) {
+  const normalized = language.trim().toLocaleLowerCase().replaceAll("_", "-");
+  if (language.includes("中文") || ["zh", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant", "chinese"].includes(normalized)) return true;
+  if (["英文", "英语", "en", "en-us", "en-gb", "english"].includes(normalized)) return true;
+  if (["日语", "韩语", "泰语", "japanese", "korean", "thai"].includes(normalized)) return false;
+  if (/\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(source)) return false;
+  const han = (source.match(/\p{Script=Han}/gu) ?? []).length;
+  const latin = (source.match(/[A-Za-z]/g) ?? []).length;
+  return han >= 4 && han >= latin * 0.4;
 }
 
-async function setTranslationState(db: D1Database, brandId: number, targets: TranslationTarget[], status: "pending" | "translating" | "error" | "blocked") {
+async function translationSource(db: D1Database, brandId: number, target: TranslationTarget) {
+  if (target.kind === "mention") {
+    const row = await db.prepare("SELECT title, excerpt, summary, language FROM mentions WHERE brand_id = ? AND id = ?")
+      .bind(brandId, target.id).first<{ title: string; excerpt: string; summary: string; language: string }>();
+    if (!row) return { source: "", language: "" };
+    return { source: [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800), language: row.language };
+  }
+  const row = await db.prepare("SELECT content, language FROM mention_comments WHERE brand_id = ? AND id = ?")
+    .bind(brandId, target.id).first<{ content: string; language: string }>();
+  return { source: row?.content.trim().slice(0, 1_800) ?? "", language: row?.language ?? "" };
+}
+
+async function setTranslationState(db: D1Database, brandId: number, targets: TranslationTarget[], status: "pending" | "translating" | "error" | "blocked" | "skipped") {
   const attemptedAt = status === "error" || status === "blocked" ? new Date().toISOString() : "";
-  const statements = targets.map((target) => db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
-    SET translation_status = ?, translated_at = CASE WHEN ? != '' THEN ? ELSE translated_at END
-    WHERE brand_id = ? AND id = ?`).bind(status, attemptedAt, attemptedAt, brandId, target.id));
+  const statements = targets.map((target) => status === "skipped"
+    ? db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+      SET translation_en = '', translation_status = 'skipped', translation_provider = '', translation_source_hash = '', translated_at = ''
+      WHERE brand_id = ? AND id = ?`).bind(brandId, target.id)
+    : db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+      SET translation_status = ?, translated_at = CASE WHEN ? != '' THEN ? ELSE translated_at END
+      WHERE brand_id = ? AND id = ?`).bind(status, attemptedAt, attemptedAt, brandId, target.id));
   if (statements.length) await db.batch(statements);
 }
 
@@ -372,8 +387,14 @@ async function processTranslationJob(db: D1Database, brandId: number, job: Monid
   const statements: D1PreparedStatement[] = [];
   for (let index = 0; index < targets.length; index += 1) {
     const target = targets[index];
-    const currentSource = await translationSource(db, brandId, target);
-    if (!currentSource || translationHash(currentSource) !== target.sourceHash) {
+    const current = await translationSource(db, brandId, target);
+    if (shouldSkipTranslation(current.language, current.source)) {
+      statements.push(db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
+        SET translation_en = '', translation_status = 'skipped', translation_source_hash = '', translation_provider = '', translated_at = ''
+        WHERE brand_id = ? AND id = ?`).bind(brandId, target.id));
+      continue;
+    }
+    if (!current.source || translationHash(current.source) !== target.sourceHash) {
       statements.push(db.prepare(`UPDATE ${target.kind === "mention" ? "mentions" : "mention_comments"}
         SET translation_en = '', translation_status = 'pending', translation_source_hash = '', translation_provider = '', translated_at = ''
         WHERE brand_id = ? AND id = ?`).bind(brandId, target.id));
@@ -963,24 +984,38 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
 }
 
 async function startTranslationJobs(db: D1Database, brandId: number, apiKey: string) {
+  await db.batch([
+    db.prepare(`UPDATE mentions SET translation_en = '', translation_status = 'skipped', translation_provider = '',
+      translation_source_hash = '', translated_at = '' WHERE brand_id = ?
+      AND (language LIKE '%中文%' OR lower(replace(language, '_', '-')) IN ('zh','zh-cn','zh-tw','zh-hk','zh-hans','zh-hant','chinese','英文','英语','en','en-us','en-gb','english'))
+      AND translation_status != 'skipped'`).bind(brandId),
+    db.prepare(`UPDATE mention_comments SET translation_en = '', translation_status = 'skipped', translation_provider = '',
+      translation_source_hash = '', translated_at = '' WHERE brand_id = ?
+      AND (language LIKE '%中文%' OR lower(replace(language, '_', '-')) IN ('zh','zh-cn','zh-tw','zh-hk','zh-hans','zh-hant','chinese','英文','英语','en','en-us','en-gb','english'))
+      AND translation_status != 'skipped'`).bind(brandId),
+  ]);
   const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
     AND stage = 'translation' AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
   let available = Math.max(0, TRANSLATION_JOBS_PER_CYCLE - Number(active?.count ?? 0));
   if (!available) return 0;
 
   const [mentionRows, commentRows] = await Promise.all([
-    db.prepare(`SELECT id, title, excerpt, summary FROM mentions WHERE brand_id = ?
+    db.prepare(`SELECT id, title, excerpt, summary, language FROM mentions WHERE brand_id = ?
       AND (translation_status = 'pending' OR (translation_status = 'error' AND datetime(translated_at) <= datetime('now', '-6 hours')))
-      ORDER BY published_at DESC, id DESC LIMIT 60`).bind(brandId).all<{ id: number; title: string; excerpt: string; summary: string }>(),
-    db.prepare(`SELECT id, content FROM mention_comments WHERE brand_id = ?
+      ORDER BY published_at DESC, id DESC LIMIT 60`).bind(brandId).all<{ id: number; title: string; excerpt: string; summary: string; language: string }>(),
+    db.prepare(`SELECT id, content, language FROM mention_comments WHERE brand_id = ?
       AND (translation_status = 'pending' OR (translation_status = 'error' AND datetime(translated_at) <= datetime('now', '-6 hours')))
-      ORDER BY COALESCE(NULLIF(published_at, ''), collected_at) DESC, id DESC LIMIT 120`).bind(brandId).all<{ id: number; content: string }>(),
+      ORDER BY COALESCE(NULLIF(published_at, ''), collected_at) DESC, id DESC LIMIT 120`).bind(brandId).all<{ id: number; content: string; language: string }>(),
   ]);
-  const queue = [
-    ...commentRows.results.map((row) => ({ kind: "comment" as const, id: row.id, source: row.content.trim().slice(0, 1_800) })),
+  const candidates = [
+    ...commentRows.results.map((row) => ({ kind: "comment" as const, id: row.id, source: row.content.trim().slice(0, 1_800), language: row.language })),
     ...mentionRows.results.map((row) => ({ kind: "mention" as const, id: row.id,
-      source: [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800) })),
+      source: [`Title: ${row.title}`, `Text: ${row.excerpt || row.summary}`].filter((item) => !item.endsWith(": ")).join("\n").slice(0, 1_800), language: row.language })),
   ].filter((item) => item.source);
+  const skipped = candidates.filter((item) => shouldSkipTranslation(item.language, item.source))
+    .map((item) => ({ kind: item.kind, id: item.id, sourceHash: "" } satisfies TranslationTarget));
+  await setTranslationState(db, brandId, skipped, "skipped");
+  const queue = candidates.filter((item) => !shouldSkipTranslation(item.language, item.source));
 
   let startedCount = 0;
   let cursor = 0;

@@ -184,6 +184,9 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(monid, /target_language: "English"/);
   assert.match(monid, /TRANSLATION_ITEMS_PER_JOB = 6/);
   assert.match(monid, /translation_status = 'translated'/);
+  assert.match(monid, /function shouldSkipTranslation/);
+  assert.match(monid, /"英文", "英语", "en", "en-us", "en-gb", "english"/);
+  assert.match(monid, /translation_status = 'skipped'/);
   assert.match(monid, /Monid · Strale/);
   assert.match(schema, /translationEn: text\("translation_en"\)/);
   assert.match(schema, /idx_mentions_brand_translation/);
@@ -192,6 +195,8 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(repository, /ALTER TABLE mention_comments ADD COLUMN translation_en/);
   assert.match(comments, /translation_status = CASE WHEN mention_comments\.content != excluded\.content THEN 'pending'/);
   assert.match(page, /function EnglishTranslation/);
+  assert.match(page, /function translationNotNeeded/);
+  assert.match(page, /status === "skipped" \|\| translationNotNeeded\(language\)/);
   assert.match(page, /English translation queued/);
   assert.match(page, /<EnglishTranslation value=\{item\.translation_en\}/);
   assert.match(page, /<EnglishTranslation value=\{comment\.translation_en\}/);
