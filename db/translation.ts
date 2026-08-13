@@ -130,6 +130,10 @@ function retryAt(attempts: number) {
   return new Date(Date.now() + delays[Math.min(delays.length - 1, Math.max(0, attempts - 1))]).toISOString();
 }
 
+function isDailyQuotaError(message: string) {
+  return /免费额度已用完|USED ALL AVAILABLE FREE TRANSLATIONS|USAGELIMITS/i.test(message);
+}
+
 async function updateSkipped(db: D1Database, brandId: number, item: TranslationRow) {
   await db.prepare(`UPDATE ${tableFor(item.kind)} SET translation_en = '', translation_status = 'skipped',
     translation_provider = '', translation_source_hash = ?, translation_error = '', translation_next_retry_at = '', translated_at = ?
@@ -158,10 +162,13 @@ async function processItem(db: D1Database, brandId: number, item: TranslationRow
       WHERE brand_id = ? AND id = ?`).bind(result.text, result.provider, hash, new Date().toISOString(), brandId, item.id).run();
     return "translated" as const;
   } catch (error) {
-    const message = (error instanceof Error ? error.message : "独立翻译失败").slice(0, 500);
+    const rawMessage = error instanceof Error ? error.message : "独立翻译失败";
+    const dailyQuota = isDailyQuotaError(rawMessage);
+    const message = (dailyQuota ? "独立翻译服务当日免费额度已用完" : rawMessage).slice(0, 500);
+    const nextRetryAt = dailyQuota ? new Date(Date.now() + 24 * 60 * 60_000).toISOString() : retryAt(attempt);
     await db.prepare(`UPDATE ${table} SET translation_status = 'error', translation_provider = 'Independent translator',
       translation_error = ?, translation_next_retry_at = ?, translated_at = ? WHERE brand_id = ? AND id = ?`)
-      .bind(message, retryAt(attempt), new Date().toISOString(), brandId, item.id).run();
+      .bind(message, nextRetryAt, new Date().toISOString(), brandId, item.id).run();
     return "error" as const;
   }
 }

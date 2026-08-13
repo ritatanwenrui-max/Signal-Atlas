@@ -208,6 +208,8 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(translation, /translation_next_retry_at/);
   assert.match(translation, /翻译已迁移到独立队列/);
   assert.match(translation, /MAX_REMOTE_ITEMS_PER_CYCLE = 2/);
+  assert.match(translation, /USED ALL AVAILABLE FREE TRANSLATIONS/);
+  assert.match(translation, /24 \* 60 \* 60_000/);
   assert.match(translation, /\.\.\.mentions\.results[\s\S]*\.\.\.comments\.results/);
   assert.match(translation, /Promise\.all\(remote\.map/);
   assert.match(sync, /runTranslationCycle/);
