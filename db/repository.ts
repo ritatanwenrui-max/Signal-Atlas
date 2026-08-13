@@ -274,6 +274,33 @@ const tables = [
     published_at TEXT NOT NULL DEFAULT '',
     collected_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS comment_annotations (
+    comment_id INTEGER PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    workspace_id INTEGER NOT NULL DEFAULT 0,
+    mention_id INTEGER NOT NULL,
+    annotator_user_id TEXT NOT NULL,
+    model_sentiment TEXT NOT NULL,
+    model_emotion TEXT NOT NULL,
+    model_topic TEXT NOT NULL,
+    model_score INTEGER NOT NULL DEFAULT 0,
+    manual_sentiment TEXT NOT NULL,
+    manual_emotion TEXT NOT NULL,
+    manual_topic TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS sentiment_calibration_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    sentiment TEXT NOT NULL,
+    emotion TEXT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS social_comment_targets (
     mention_id INTEGER PRIMARY KEY,
     brand_id INTEGER NOT NULL,
@@ -283,6 +310,9 @@ const tables = [
     reported_count INTEGER NOT NULL DEFAULT 0,
     collected_count INTEGER NOT NULL DEFAULT 0,
     cursor TEXT NOT NULL DEFAULT '',
+    adapter TEXT NOT NULL DEFAULT 'v2',
+    v2_failures INTEGER NOT NULL DEFAULT 0,
+    v1_failures INTEGER NOT NULL DEFAULT 0,
     top_level_complete INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued',
     pages_fetched INTEGER NOT NULL DEFAULT 0,
@@ -335,6 +365,10 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_mention ON mention_comments(brand_id, mention_id)",
   "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_platform_time ON mention_comments(brand_id, platform, published_at)",
   "CREATE INDEX IF NOT EXISTS idx_mention_comments_brand_sentiment ON mention_comments(brand_id, sentiment, sentiment_score)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_annotations_brand_updated ON comment_annotations(brand_id, updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_annotations_workspace ON comment_annotations(workspace_id, brand_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sentiment_calibration_brand_token ON sentiment_calibration_rules(brand_id, token)",
+  "CREATE INDEX IF NOT EXISTS idx_sentiment_calibration_brand_weight ON sentiment_calibration_rules(brand_id, weight)",
   "CREATE INDEX IF NOT EXISTS idx_social_comment_targets_brand_status ON social_comment_targets(brand_id, status, updated_at)",
   "CREATE INDEX IF NOT EXISTS idx_social_comment_replies_brand_status ON social_comment_reply_queue(brand_id, status, updated_at)",
 ] as const;
@@ -350,6 +384,12 @@ export async function ensureDatabase() {
     "ALTER TABLE brand_profiles ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE mentions ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
     "ALTER TABLE mention_comments ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN adapter TEXT NOT NULL DEFAULT 'v2'",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN v2_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_reply_queue ADD COLUMN v1_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN adapter TEXT NOT NULL DEFAULT 'v2'",
+    "ALTER TABLE social_comment_targets ADD COLUMN v2_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN v1_failures INTEGER NOT NULL DEFAULT 0",
   ];
   for (const statement of columns) {
     try { await db.prepare(statement).run(); } catch { /* Existing deployment already has the column. */ }

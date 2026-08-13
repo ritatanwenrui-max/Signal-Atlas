@@ -1,4 +1,5 @@
 import { ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { applyCalibrationRules, loadCalibrationRules } from "./comment-calibration";
 import { analyzeCommentText, keywordCounts } from "./text-analysis";
 
 type JsonObject = Record<string, unknown>;
@@ -11,20 +12,22 @@ type MonidRun = {
 };
 type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
-type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number };
+type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1"; replyAdapter?: "v2" | "v1" };
 type SocialComment = {
   id: string; parentId: string; text: string; authorId: string; authorUsername: string; authorName: string;
   verified: boolean; likes: number; replies: number; publishedAt: string; commentUrl: string;
 };
-type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number };
-type ReplyTarget = { mention_id: number; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number };
+type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" };
+type ReplyTarget = { mention_id: number; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" };
 
 const API_BASE = "https://api.monid.ai";
 const SEARCH_ENDPOINT = "/apify/instagram-hashtag-scraper";
 const PROFILE_ENDPOINT = "/apify/instagram-profile-scraper";
 const POST_BY_URL_ENDPOINT = "/api/v1/instagram/v1/fetch_post_by_url";
-const COMMENTS_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
-const REPLIES_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
+const COMMENTS_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_post_comments";
+const COMMENTS_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
+const REPLIES_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_comment_replies";
+const REPLIES_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
 const SOCIAL_SEARCHES = {
   X: { stage: "search_x" as const, provider: "tikhub", endpoint: "/api/v1/twitter/web/fetch_search_timeline" },
   YouTube: { stage: "search_youtube" as const, provider: "tikhub", endpoint: "/api/v1/youtube/web_v2/get_general_search_v2" },
@@ -359,17 +362,22 @@ async function brandTermsFor(db: D1Database, brandId: number) {
 async function storeSocialComments(db: D1Database, brandId: number, mentionId: number, platform: string, rows: SocialComment[], brandTerms: string[]) {
   const capturedAt = new Date().toISOString();
   const unique = [...new Map(rows.map((item) => [item.id, item])).values()];
+  const calibrationRules = await loadCalibrationRules(db, brandId);
   for (let index = 0; index < unique.length; index += 35) {
     const statements = unique.slice(index, index + 35).map((item) => {
-      const analysis = analyzeCommentText(item.text);
+      const analysis = applyCalibrationRules(item.text, analyzeCommentText(item.text), calibrationRules);
       return db.prepare(`INSERT INTO mention_comments
         (mention_id, brand_id, platform, source_comment_id, parent_comment_id, author_id, author_username, author_name, is_verified,
          content, sentiment, emotion, sentiment_score, language, topic, keywords, likes, replies, comment_url, fetched_via, published_at, collected_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Monid', ?, ?)
         ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET parent_comment_id = excluded.parent_comment_id,
           author_id = excluded.author_id, author_username = excluded.author_username, author_name = excluded.author_name,
-          is_verified = excluded.is_verified, content = excluded.content, sentiment = excluded.sentiment, emotion = excluded.emotion,
-          sentiment_score = excluded.sentiment_score, language = excluded.language, topic = excluded.topic,
+          is_verified = excluded.is_verified, content = excluded.content,
+          sentiment = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment ELSE excluded.sentiment END,
+          emotion = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.emotion ELSE excluded.emotion END,
+          sentiment_score = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment_score ELSE excluded.sentiment_score END,
+          language = excluded.language,
+          topic = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.topic ELSE excluded.topic END,
           keywords = excluded.keywords, likes = excluded.likes, replies = excluded.replies, comment_url = excluded.comment_url,
           fetched_via = excluded.fetched_via, published_at = excluded.published_at, collected_at = excluded.collected_at`)
         .bind(mentionId, brandId, platform, item.id, item.parentId, item.authorId, item.authorUsername, item.authorName, item.verified ? 1 : 0,
@@ -428,7 +436,7 @@ async function refreshSocialCommentAnalysis(db: D1Database, brandId: number, men
 async function processCommentPage(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const platform = descriptor.platform || "Instagram";
-  const payload = nestedObjectWithArray(output, job.stage === "post_comments" ? ["comments", "replies", "items", "data"] : ["child_comments", "replies", "comments"]);
+  const payload = nestedObjectWithArray(output, job.stage === "post_comments" ? ["comments", "replies", "items", "data"] : ["child_comments", "replies", "comments", "items", "data"]);
   const rawRows = payload ? (["comments", "replies", "child_comments", "items", "data"].map((key) => payload[key]).find(Array.isArray) as unknown[] | undefined) : undefined;
   const sourceRows = rawRows ?? walkObjects(output);
   const brandTerms = await brandTermsFor(db, brandId);
@@ -456,20 +464,35 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
         .bind(brandId, descriptor.mentionId).first<{ reported_count: number; pages_fetched: number }>();
       const reported = Math.max(Number(target?.reported_count ?? 0), firstNumber(output, ["comment_count", "comments_count", "total"]));
       const attempt = Number(target?.pages_fetched ?? 0) + 1;
-      const shouldRetry = reported > 0 && attempt < 3;
-      const status = shouldRetry ? "retrying" : "not_returned";
-      const message = shouldRetry
-        ? `${platform} 显示有评论，本次指定帖子接口未返回文本；系统将更换时间窗口自动重试（${attempt}/3）`
-        : reported > 0 ? `${platform} 显示有评论，但连续 ${attempt} 次未取得文本；保留为待核验，不判定为平台未开放`
-        : `指定帖子接口本次未返回评论文本；保留为待核验，不判定为没有评论`;
-      await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), top_level_complete = 1,
-        status = ?, pages_fetched = pages_fetched + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
-        .bind(reported, status, message, now, brandId, descriptor.mentionId).run();
-      if (shouldRetry) await db.prepare("UPDATE social_comment_targets SET top_level_complete = 0 WHERE brand_id = ? AND mention_id = ?")
-        .bind(brandId, descriptor.mentionId).run();
+      if (platform === "Instagram" && descriptor.commentAdapter === "v2") {
+        await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), adapter = 'v1', cursor = '',
+          top_level_complete = 0, status = 'queued', v2_failures = v2_failures + 1, pages_fetched = pages_fetched + 1,
+          last_error = 'TikHub V2 主评论未返回文本，已自动切换 V1 继续核验', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+          .bind(reported, now, brandId, descriptor.mentionId).run();
+      } else {
+        const shouldRetry = reported > 0 && attempt < 3;
+        const status = shouldRetry ? "retrying" : "not_returned";
+        const message = shouldRetry
+          ? `${platform} 显示有评论，本次指定帖子接口未返回文本；系统将自动重试（${attempt}/3）`
+          : reported > 0 ? `${platform} 显示有评论，但 V2 与 V1 连续 ${attempt} 次未取得文本；保留为待核验`
+          : `V2 与 V1 本次均未返回评论文本；保留为待核验，不判定为没有评论`;
+        await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), top_level_complete = 1,
+          status = ?, v1_failures = v1_failures + CASE WHEN platform = 'Instagram' THEN 1 ELSE 0 END,
+          pages_fetched = pages_fetched + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+          .bind(reported, status, message, now, brandId, descriptor.mentionId).run();
+        if (shouldRetry) await db.prepare("UPDATE social_comment_targets SET top_level_complete = 0 WHERE brand_id = ? AND mention_id = ?")
+          .bind(brandId, descriptor.mentionId).run();
+      }
+    } else if (descriptor.replyAdapter === "v2") {
+      await db.prepare(`UPDATE social_comment_reply_queue SET adapter = 'v1', cursor = '', status = 'queued',
+        v2_failures = v2_failures + 1, pages_fetched = pages_fetched + 1,
+        last_error = 'TikHub V2 本页未返回回复，已自动切换 V1 继续核验', updated_at = ?
+        WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
+        .bind(now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
     } else {
-      await db.prepare(`UPDATE social_comment_reply_queue SET status = 'complete', pages_fetched = pages_fetched + 1,
-        last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
+      await db.prepare(`UPDATE social_comment_reply_queue SET status = 'complete', v1_failures = v1_failures + 1,
+        pages_fetched = pages_fetched + 1, last_error = 'V2 与 V1 均未返回更多回复，采集到的文本已保留', updated_at = ?
+        WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
         .bind(now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
     }
     await refreshSocialCommentAnalysis(db, brandId, descriptor.mentionId, brandTerms);
@@ -480,14 +503,16 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
   if (job.stage === "post_comments") {
     for (let index = 0; index < replyQueue.length; index += 40) {
       const statements = replyQueue.slice(index, index + 40).map((reply) => db.prepare(`INSERT INTO social_comment_reply_queue
-        (mention_id, brand_id, media_id, parent_comment_id, reported_count, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'queued', ?)
+        (mention_id, brand_id, media_id, parent_comment_id, reported_count, adapter, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'v2', 'queued', ?)
         ON CONFLICT(mention_id, parent_comment_id) DO UPDATE SET reported_count = MAX(social_comment_reply_queue.reported_count, excluded.reported_count), updated_at = excluded.updated_at`)
         .bind(descriptor.mentionId, brandId, descriptor.mediaId, reply.parentId, reply.count, now));
       if (statements.length) await db.batch(statements);
     }
-    const nextCursor = cursorText(payload?.next_min_id ?? payload?.continuation_token ?? payload?.cursor ?? pathValue(output, "data.cursor"));
+    const nextCursor = cursorText(payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
+      ?? payload?.next_min_id ?? payload?.continuation_token ?? payload?.cursor ?? pathValue(output, "data.cursor"));
     const hasMore = platform === "Facebook" || platform === "X" ? false : firstBoolean(payload ?? output, ["has_more_headload_comments", "has_more", "more_available"])
+      || Boolean(payload?.pagination_token) || Boolean(pathValue(output, "pagination_token")) || Boolean(pathValue(output, "data.pagination_token"))
       || Boolean(payload?.continuation_token) || Number(pathValue(output, "data.has_more") ?? 0) === 1;
     const reported = firstNumber(payload ?? output, ["comment_count", "comments_count", "total"]);
     await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), cursor = ?,
@@ -496,8 +521,9 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
       .bind(reported, hasMore && nextCursor ? nextCursor : "", hasMore && nextCursor ? 0 : 1,
         hasMore && nextCursor ? "queued" : "collecting", now, brandId, descriptor.mentionId).run();
   } else {
-    const nextCursor = cursorText(payload?.next_min_child_cursor ?? pathValue(payload, "page_info.next_min_id"));
-    const hasMore = firstBoolean(payload ?? output, ["has_more_tail_child_comments", "page_info.has_more", "has_more"]);
+    const nextCursor = cursorText(payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
+      ?? payload?.next_min_child_cursor ?? pathValue(payload, "page_info.next_min_id"));
+    const hasMore = Boolean(nextCursor) || firstBoolean(payload ?? output, ["has_more_tail_child_comments", "page_info.has_more", "has_more"]);
     const reported = firstNumber(payload ?? output, ["child_comment_count", "total"]);
     const collected = await db.prepare("SELECT COUNT(*) AS count FROM mention_comments WHERE mention_id = ? AND parent_comment_id = ?")
       .bind(descriptor.mentionId, descriptor.commentId ?? "").first<{ count: number }>();
@@ -643,11 +669,28 @@ async function markCommentJobError(db: D1Database, brandId: number, job: MonidJo
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const now = new Date().toISOString();
   if (job.stage === "resolve_post" || job.stage === "post_comments") {
-    await db.prepare("UPDATE social_comment_targets SET status = ?, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?")
-      .bind(status, message, now, brandId, descriptor.mentionId).run();
+    if (job.stage === "post_comments" && descriptor.platform === "Instagram" && descriptor.commentAdapter === "v2" && status !== "blocked") {
+      await db.prepare(`UPDATE social_comment_targets SET adapter = 'v1', cursor = '', top_level_complete = 0, status = 'queued',
+        v2_failures = v2_failures + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+        .bind(`TikHub V2 主评论失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId).run();
+    } else {
+      await db.prepare(`UPDATE social_comment_targets SET status = ?,
+        v1_failures = v1_failures + CASE WHEN platform = 'Instagram' AND adapter = 'v1' THEN 1 ELSE 0 END,
+        last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+        .bind(status, message, now, brandId, descriptor.mentionId).run();
+    }
   } else {
-    await db.prepare("UPDATE social_comment_reply_queue SET status = ?, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
-      .bind(status, message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+    if (descriptor.replyAdapter === "v2" && status !== "blocked") {
+      await db.prepare(`UPDATE social_comment_reply_queue SET adapter = 'v1', cursor = '', status = 'queued',
+        v2_failures = v2_failures + 1, last_error = ?, updated_at = ?
+        WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
+        .bind(`TikHub V2 失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+    } else {
+      await db.prepare(`UPDATE social_comment_reply_queue SET status = ?,
+        v1_failures = v1_failures + CASE WHEN adapter = 'v1' THEN 1 ELSE 0 END, last_error = ?, updated_at = ?
+        WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
+        .bind(status, message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+    }
   }
 }
 
@@ -655,7 +698,7 @@ export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
       (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0) > 0;
 }
@@ -664,7 +707,7 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
       (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0);
 }
@@ -675,11 +718,13 @@ export async function queueSocialCommentTarget(db: D1Database, brandId: number, 
   const count = Math.max(0, reportedCount);
   const now = new Date().toISOString();
   await db.prepare(`INSERT INTO social_comment_targets
-    (mention_id, brand_id, platform, media_id, post_url, reported_count, status, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+    (mention_id, brand_id, platform, media_id, post_url, reported_count, adapter, status, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'v2', 'queued', ?)
     ON CONFLICT(mention_id) DO UPDATE SET media_id = excluded.media_id, post_url = excluded.post_url,
       top_level_complete = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 0 ELSE social_comment_targets.top_level_complete END,
       status = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'queued' ELSE social_comment_targets.status END,
+      adapter = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'v2' ELSE social_comment_targets.adapter END,
+      cursor = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN '' ELSE social_comment_targets.cursor END,
       reported_count = MAX(social_comment_targets.reported_count, excluded.reported_count),
       updated_at = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.updated_at ELSE social_comment_targets.updated_at END`)
     .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, now).run();
@@ -697,6 +742,12 @@ async function registerHistoricalCommentTargets(db: D1Database, brandId: number)
     media_id = CASE WHEN platform = 'Instagram' THEN post_url ELSE media_id END,
     last_error = '旧状态结论已撤销；正在通过指定帖子 URL 重新识别并采集', updated_at = datetime('now', '-31 minutes')
     WHERE brand_id = ? AND status IN ('empty','unavailable')`).bind(brandId).run();
+  await db.prepare(`UPDATE social_comment_targets SET status = 'queued', top_level_complete = 0, adapter = 'v2', cursor = '',
+    last_error = '旧版待核验状态已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
+    WHERE brand_id = ? AND status = 'not_returned' AND datetime(updated_at) <= datetime('now', '-6 hours')`).bind(brandId).run();
+  await db.prepare(`UPDATE social_comment_reply_queue SET status = 'queued', adapter = 'v2', cursor = '',
+    last_error = '旧回复队列已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
+    WHERE brand_id = ? AND status = 'complete' AND reported_count > collected_count AND v2_failures = 0`).bind(brandId).run();
   const posts = await db.prepare(`SELECT metrics.mention_id, metrics.platform, metrics.post_id, metrics.comments, mentions.url
     FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
     WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook') AND metrics.post_id != ''`)
@@ -713,14 +764,16 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
   if (!available) return 0;
   let startedCount = 0;
 
-  const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched
+  const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched, target.adapter
     FROM social_comment_targets target
     WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying') AND target.top_level_complete = 0
       AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage IN ('resolve_post','post_comments') AND job.status IN (${PENDING_SQL}))
     ORDER BY target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
   for (const target of targets.results) {
-    const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url, cursor: target.cursor, page: target.pages_fetched + 1 };
+    const commentAdapter = target.adapter === "v1" ? "v1" : "v2";
+    const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url,
+      cursor: target.cursor, page: target.pages_fetched + 1, commentAdapter };
     let run: MonidRun;
     let stage: "resolve_post" | "post_comments" = "post_comments";
     if (target.platform === "Instagram" && !/^\d{10,}$/.test(target.media_id)) {
@@ -737,9 +790,11 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     } else if (target.platform === "Facebook") {
       run = await startProviderRun(apiKey, "apify", "/apify/facebook-comments-scraper", { body: { startUrls: [{ url: target.post_url }], resultsLimit: 100, includeNestedComments: true, viewOption: "RECENT_ACTIVITY" } });
     } else {
-      const queryParams: JsonObject = { media_id: target.media_id, sort_order: "recent" };
-      if (target.cursor) queryParams.min_id = target.cursor;
-      run = await startQueryRun(apiKey, COMMENTS_ENDPOINT, queryParams);
+      const queryParams: JsonObject = commentAdapter === "v2"
+        ? { code_or_url: target.post_url, sort_by: "recent" }
+        : { media_id: target.media_id, sort_order: "recent" };
+      if (target.cursor) queryParams[commentAdapter === "v2" ? "pagination_token" : "min_id"] = target.cursor;
+      run = await startQueryRun(apiKey, commentAdapter === "v2" ? COMMENTS_V2_ENDPOINT : COMMENTS_V1_ENDPOINT, queryParams);
     }
     const job = await saveJob(db, brandId, run, stage, descriptor, target.mention_id);
     await db.prepare("UPDATE social_comment_targets SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ?")
@@ -750,18 +805,23 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     if (!available) return startedCount;
   }
 
-  const replies = await db.prepare(`SELECT reply.mention_id, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched
+  const replies = await db.prepare(`SELECT reply.mention_id, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched, reply.adapter
     FROM social_comment_reply_queue reply
-    WHERE reply.brand_id = ? AND reply.status = 'queued'
+    WHERE reply.brand_id = ? AND reply.status IN ('queued','retrying')
+      AND (reply.status != 'retrying' OR datetime(reply.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = reply.mention_id AND job.stage = 'comment_replies'
         AND job.status IN (${PENDING_SQL}) AND json_extract(job.terms, '$.commentId') = reply.parent_comment_id)
     ORDER BY reply.updated_at ASC LIMIT ?`).bind(brandId, available).all<ReplyTarget>();
   for (const reply of replies.results) {
     const mention = await db.prepare("SELECT url FROM mentions WHERE brand_id = ? AND id = ?").bind(brandId, reply.mention_id).first<{ url: string }>();
-    const descriptor: CommentJobPayload = { mentionId: reply.mention_id, mediaId: reply.media_id, postUrl: mention?.url ?? "", cursor: reply.cursor, commentId: reply.parent_comment_id, page: reply.pages_fetched + 1 };
-    const queryParams: JsonObject = { media_id: reply.media_id, comment_id: reply.parent_comment_id };
-    if (reply.cursor) queryParams.min_id = reply.cursor;
-    const run = await startQueryRun(apiKey, REPLIES_ENDPOINT, queryParams);
+    const replyAdapter = reply.adapter === "v1" ? "v1" : "v2";
+    const descriptor: CommentJobPayload = { mentionId: reply.mention_id, platform: "Instagram", mediaId: reply.media_id,
+      postUrl: mention?.url ?? "", cursor: reply.cursor, commentId: reply.parent_comment_id, page: reply.pages_fetched + 1, replyAdapter };
+    const queryParams: JsonObject = replyAdapter === "v2"
+      ? { code_or_url: mention?.url ?? reply.media_id, comment_id: reply.parent_comment_id }
+      : { media_id: reply.media_id, comment_id: reply.parent_comment_id };
+    if (reply.cursor) queryParams[replyAdapter === "v2" ? "pagination_token" : "min_id"] = reply.cursor;
+    const run = await startQueryRun(apiKey, replyAdapter === "v2" ? REPLIES_V2_ENDPOINT : REPLIES_V1_ENDPOINT, queryParams);
     const job = await saveJob(db, brandId, run, "comment_replies", descriptor, reply.mention_id);
     await db.prepare("UPDATE social_comment_reply_queue SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
       .bind(new Date().toISOString(), brandId, reply.mention_id, reply.parent_comment_id).run();

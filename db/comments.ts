@@ -131,7 +131,8 @@ async function collectForMention(mention: MentionRow): Promise<Collection> {
 
 async function storeCollection(db: D1Database, brandId: number, mentionId: number, collection: Collection, brandTerms: string[]) {
   const capturedAt = new Date().toISOString();
-  const analyzed = collection.samples.map((sample) => ({ ...sample, ...analyzeCommentText(sample.text) }));
+  const calibrationRules = await loadCalibrationRules(db, brandId);
+  const analyzed = collection.samples.map((sample) => ({ ...sample, ...applyCalibrationRules(sample.text, analyzeCommentText(sample.text), calibrationRules) }));
   const counts = { positive: 0, neutral: 0, negative: 0, mixed: 0 };
   let score = 0;
   for (const item of analyzed) {
@@ -157,8 +158,13 @@ async function storeCollection(db: D1Database, brandId: number, mentionId: numbe
     const statements = analyzed.slice(index, index + 40).map((item) => db.prepare(`INSERT INTO mention_comments
       (mention_id, brand_id, platform, source_comment_id, content, sentiment, emotion, sentiment_score, language, topic, keywords, likes, replies, published_at, collected_at, fetched_via)
       VALUES (?, ?, '网页新闻', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '公开网页适配器')
-      ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET content = excluded.content, sentiment = excluded.sentiment,
-        emotion = excluded.emotion, sentiment_score = excluded.sentiment_score, language = excluded.language, topic = excluded.topic, keywords = excluded.keywords,
+      ON CONFLICT(mention_id, source_comment_id) DO UPDATE SET content = excluded.content,
+        sentiment = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment ELSE excluded.sentiment END,
+        emotion = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.emotion ELSE excluded.emotion END,
+        sentiment_score = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.sentiment_score ELSE excluded.sentiment_score END,
+        language = excluded.language,
+        topic = CASE WHEN EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = mention_comments.id) THEN mention_comments.topic ELSE excluded.topic END,
+        keywords = excluded.keywords,
         likes = excluded.likes, replies = excluded.replies, published_at = excluded.published_at, collected_at = excluded.collected_at`)
       .bind(mentionId, brandId, item.id, item.text, item.sentiment, item.emotion, item.score, item.language, item.topic,
         JSON.stringify(keywordCounts([item.text], brandTerms, 8)), item.likes, item.replies, item.publishedAt, capturedAt));
@@ -185,4 +191,5 @@ export async function refreshPublicCommentAnalyses(db: D1Database, brandId: numb
   }
   return { checkedArticles: rows.results.length, analyzedArticles, analyzedComments, warnings };
 }
+import { applyCalibrationRules, loadCalibrationRules } from "./comment-calibration";
 import { analyzeCommentText, keywordCounts } from "./text-analysis";

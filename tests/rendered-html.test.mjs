@@ -228,6 +228,39 @@ test("workspace exclusion terms immediately hide archived mentions and their com
   assert.match(sync, /exclusions\.some\(\(term\) => body\.includes/);
 });
 
+test("human comment labels override model output and retrain a workspace calibration layer", async () => {
+  const [page, route, calibration, commentsRoute, schema] = await Promise.all([
+    source("app/page.tsx"), source("app/api/comment-labels/route.ts"), source("db/comment-calibration.ts"),
+    source("app/api/comments/route.ts"), source("db/schema.ts"),
+  ]);
+  assert.match(page, /人工标注与模型校准/);
+  assert.match(page, /仅未标注/);
+  assert.match(page, /人机有分歧/);
+  assert.match(route, /model_sentiment/);
+  assert.match(route, /manual_sentiment/);
+  assert.match(route, /rebuildCommentCalibration/);
+  assert.match(calibration, /state\.samples < 2/);
+  assert.match(calibration, /applyCalibrationRules/);
+  assert.match(commentsRoute, /getCommentCalibrationStats/);
+  assert.match(schema, /commentAnnotations/);
+  assert.match(schema, /sentimentCalibrationRules/);
+});
+
+test("Instagram comments and replies use TikHub V2 with V1 fallback and independent pagination cursors", async () => {
+  const [monid, schema, page] = await Promise.all([source("db/monid.ts"), source("db/schema.ts"), source("app/page.tsx")]);
+  assert.match(monid, /\/api\/v1\/instagram\/v2\/fetch_post_comments/);
+  assert.match(monid, /\/api\/v1\/instagram\/v1\/fetch_post_comments_v2/);
+  assert.match(monid, /\/api\/v1\/instagram\/v2\/fetch_comment_replies/);
+  assert.match(monid, /\/api\/v1\/instagram\/v1\/fetch_comment_replies/);
+  assert.match(monid, /code_or_url/);
+  assert.match(monid, /pagination_token/);
+  assert.match(monid, /next_min_child_cursor/);
+  assert.match(monid, /adapter = 'v1'/);
+  assert.match(schema, /v2Failures/);
+  assert.match(schema, /v1Failures/);
+  assert.match(page, /V2\/V1 失败/);
+});
+
 test("worker runs the hybrid monitor hourly", async () => {
   const [worker, vite] = await Promise.all([source("worker/index.ts"), source("vite.config.ts")]);
   assert.match(worker, /async scheduled/);

@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getCommentCalibrationStats } from "../../../db/comment-calibration";
 import { queueSocialCommentTarget } from "../../../db/monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "../../../db/repository";
 import { meaningfulTokens } from "../../../db/text-analysis";
@@ -108,6 +109,7 @@ export async function GET(request: Request) {
   const sentiment = ["正面", "中性", "负面", "混合"].includes(url.searchParams.get("sentiment") ?? "") ? url.searchParams.get("sentiment")! : "";
   const platform = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
   const sort = ["newest", "liked", "risk"].includes(url.searchParams.get("sort") ?? "") ? url.searchParams.get("sort")! : "newest";
+  const annotation = ["unlabeled", "labeled", "disagreed"].includes(url.searchParams.get("annotation") ?? "") ? url.searchParams.get("annotation")! : "";
   const query = (url.searchParams.get("query") ?? "").trim().slice(0, 120);
   const postId = integerParam(url.searchParams.get("post"), 0, 0, Number.MAX_SAFE_INTEGER);
 
@@ -117,6 +119,10 @@ export async function GET(request: Request) {
   if (sentiment) { clauses.push("c.sentiment = ?"); binds.push(sentiment); }
   if (platform) { clauses.push("c.platform = ?"); binds.push(platform); }
   if (postId) { clauses.push("c.mention_id = ?"); binds.push(postId); }
+  if (annotation === "unlabeled") clauses.push("NOT EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id)");
+  if (annotation === "labeled") clauses.push("EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id)");
+  if (annotation === "disagreed") clauses.push(`EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id
+    AND (annotation.model_sentiment != annotation.manual_sentiment OR annotation.model_emotion != annotation.manual_emotion))`);
   if (query) {
     clauses.push("(c.content LIKE ? OR c.author_username LIKE ? OR c.author_name LIKE ? OR m.title LIKE ?)");
     const needle = `%${query}%`;
@@ -143,9 +149,13 @@ export async function GET(request: Request) {
       COALESCE(ROUND(AVG(c.sentiment_score)), 0) AS average_score
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}`;
   const commentsSql = `SELECT c.*, m.title AS post_title, m.url AS post_url, m.source AS post_source,
-      metrics.author_username AS post_author, metrics.follower_count AS post_author_followers
+      metrics.author_username AS post_author, metrics.follower_count AS post_author_followers,
+      annotation.model_sentiment, annotation.model_emotion, annotation.model_topic, annotation.model_score,
+      annotation.manual_sentiment, annotation.manual_emotion, annotation.manual_topic,
+      annotation.note AS annotation_note, annotation.updated_at AS annotation_updated_at
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     LEFT JOIN social_post_metrics metrics ON metrics.mention_id = c.mention_id
+    LEFT JOIN comment_annotations annotation ON annotation.comment_id = c.id
     WHERE ${where} ORDER BY ${ordering} LIMIT ? OFFSET ?`;
   const sentimentSql = `SELECT c.sentiment AS label, COUNT(*) AS count FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${where} GROUP BY c.sentiment ORDER BY count DESC`;
@@ -167,7 +177,7 @@ export async function GET(request: Request) {
   const keywordSql = `SELECT c.keywords FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${where} ORDER BY c.id DESC LIMIT 5000`;
 
-  const [summary, comments, sentimentRows, emotionRows, timeline, topics, topPosts, keywordRows, targets, targetTotals, riskComments] = await Promise.all([
+  const [summary, comments, sentimentRows, emotionRows, timeline, topics, topPosts, keywordRows, targets, targetTotals, riskComments, calibration] = await Promise.all([
     db.prepare(summarySql).bind(...binds).first<Record<string, number>>(),
     db.prepare(commentsSql).bind(...binds, pageSize, (page - 1) * pageSize).all<Record<string, unknown>>(),
     db.prepare(sentimentSql).bind(...binds).all<Record<string, unknown>>(),
@@ -184,9 +194,13 @@ export async function GET(request: Request) {
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
       FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
       WHERE target.brand_id = ?${mentionOnlyWhere}`).bind(brandId, ...mentionOnlyBinds).first<{ reported: number; collected: number }>(),
-    db.prepare(`SELECT c.*, m.title AS post_title, m.url AS post_url FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+    db.prepare(`SELECT c.*, m.title AS post_title, m.url AS post_url,
+      annotation.model_sentiment, annotation.model_emotion, annotation.manual_sentiment, annotation.manual_emotion
+      FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+      LEFT JOIN comment_annotations annotation ON annotation.comment_id = c.id
       WHERE ${where} AND c.sentiment IN ('负面','混合')
       ORDER BY c.sentiment_score ASC, c.likes DESC, c.published_at DESC LIMIT 8`).bind(...binds).all<Record<string, unknown>>(),
+    getCommentCalibrationStats(db, brandId),
   ]);
 
   const wordCounts = new Map<string, number>();
@@ -229,7 +243,8 @@ export async function GET(request: Request) {
     targets: targets.results,
     riskComments: riskComments.results,
     comments: comments.results,
+    calibration,
     pagination: { page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)) },
-    filters: { range, sentiment, platform, query, postId, sort },
+    filters: { range, sentiment, platform, query, postId, sort, annotation },
   });
 }

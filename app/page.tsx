@@ -51,6 +51,14 @@ type SocialCommentRow = {
   author_username: string; author_name: string; is_verified: number; content: string; sentiment: string; emotion: string; sentiment_score: number;
   language: string; topic: string; likes: number; replies: number; comment_url: string; published_at: string; collected_at: string;
   post_title: string; post_url: string; post_source?: string; post_author?: string; post_author_followers?: number;
+  model_sentiment?: string; model_emotion?: string; model_topic?: string; model_score?: number;
+  manual_sentiment?: string; manual_emotion?: string; manual_topic?: string; annotation_note?: string; annotation_updated_at?: string;
+};
+type CommentCalibration = {
+  total: number; labeled: number; remaining: number; progress: number; sentimentAccuracy: number | null; emotionAccuracy: number | null;
+  disagreements: number; ruleCount: number; lastUpdated: string;
+  confusion: Array<{ model: string; human: string; count: number }>;
+  emotionDifferences: Array<{ model: string; human: string; count: number }>;
 };
 type SocialCommentsData = {
   summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; average_score: number; reported: number; collected: number; coverage: number };
@@ -60,9 +68,10 @@ type SocialCommentsData = {
   topics: Array<{ topic: string; count: number; negative: number }>;
   words: Array<{ word: string; count: number }>;
   topPosts: Array<{ mention_id: number; title: string; url: string; source: string; comments: number; negative: number; likes: number }>;
-  targets: Array<{ mention_id: number; status: string; reported_count: number; collected_count: number; pages_fetched: number; last_error: string; updated_at: string; post_title: string; post_source: string; mention_url: string }>;
+  targets: Array<{ mention_id: number; status: string; adapter?: string; v2_failures?: number; v1_failures?: number; reported_count: number; collected_count: number; pages_fetched: number; last_error: string; updated_at: string; post_title: string; post_source: string; mention_url: string }>;
   riskComments: SocialCommentRow[]; comments: SocialCommentRow[];
   pagination: { page: number; pageSize: number; total: number; pages: number };
+  calibration: CommentCalibration;
 };
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 
@@ -534,6 +543,41 @@ function AnalyticsView({ analytics, mentions }: { analytics: Analytics; mentions
   </div>;
 }
 
+const annotationEmotions = ["认可赞赏", "兴奋期待", "购买意向", "好奇讨论", "轻松戏谑", "中性陈述", "担忧顾虑", "怀疑质疑", "失望抱怨", "愤怒抵制", "反感不适", "伦理争议"];
+
+function CommentAnnotationControls({ comment, canEdit, onSaved }: { comment: SocialCommentRow; canEdit: boolean; onSaved: () => void }) {
+  const [sentiment, setSentiment] = useState(comment.manual_sentiment || comment.sentiment || "中性");
+  const [emotion, setEmotion] = useState(comment.manual_emotion || comment.emotion || "中性陈述");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    setSentiment(comment.manual_sentiment || comment.sentiment || "中性");
+    setEmotion(comment.manual_emotion || comment.emotion || "中性陈述");
+  }, [comment.emotion, comment.manual_emotion, comment.manual_sentiment, comment.sentiment]);
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canEdit || busy) return;
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch("/api/comment-labels", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commentId: comment.id, sentiment, emotion }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "人工标注保存失败");
+      setMessage("已保存并重新校准");
+      onSaved();
+    } catch (reason) { setMessage(reason instanceof Error ? reason.message : "人工标注保存失败"); }
+    finally { setBusy(false); }
+  }
+  const labeled = Boolean(comment.manual_sentiment);
+  return <form className={`comment-annotation ${labeled ? "labeled" : ""}`} onSubmit={save}>
+    <div><strong>{labeled ? "人工结论" : "人工标注"}</strong><small>{labeled ? `模型原判：${comment.model_sentiment} · ${comment.model_emotion}` : `模型当前判断：${comment.sentiment} · ${comment.emotion}`}</small></div>
+    <label><span>极性</span><select value={sentiment} disabled={!canEdit || busy} onChange={(event) => setSentiment(event.target.value)}><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select></label>
+    <label><span>具体情绪</span><select value={emotion} disabled={!canEdit || busy} onChange={(event) => setEmotion(event.target.value)}>{annotationEmotions.map((item) => <option key={item}>{item}</option>)}</select></label>
+    <button disabled={!canEdit || busy}>{busy ? "保存中" : labeled ? "更新" : "确认"}</button>
+    {message && <em>{message}</em>}
+  </form>;
+}
+
 function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandProfile; monidConfigured: boolean; canEdit: boolean }) {
   const [data, setData] = useState<SocialCommentsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -542,6 +586,7 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
   const [tone, setTone] = useState("");
   const [platform, setPlatform] = useState("");
   const [sort, setSort] = useState("newest");
+  const [annotation, setAnnotation] = useState("");
   const [draftQuery, setDraftQuery] = useState("");
   const [query, setQuery] = useState("");
   const [postId, setPostId] = useState(0);
@@ -563,6 +608,7 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     if (platform) params.set("platform", platform);
     if (query) params.set("query", query);
     if (postId) params.set("post", String(postId));
+    if (annotation) params.set("annotation", annotation);
     fetch(`/api/comments?${params}`, { signal: controller.signal }).then(async (response) => {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "评论数据加载失败");
@@ -570,9 +616,11 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     }).catch((reason) => { if (reason?.name !== "AbortError") setError(reason instanceof Error ? reason.message : "评论数据加载失败"); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [page, platform, postId, query, range, refreshKey, sort, tone]);
+  }, [annotation, page, platform, postId, query, range, refreshKey, sort, tone]);
 
   const summary = data?.summary ?? { total: 0, authors: 0, likes: 0, replies: 0, positive: 0, neutral: 0, negative: 0, mixed: 0, average_score: 0, reported: 0, collected: 0, coverage: 0 };
+  const calibration = data?.calibration ?? { total: 0, labeled: 0, remaining: 0, progress: 0, sentimentAccuracy: null, emotionAccuracy: null,
+    disagreements: 0, ruleCount: 0, lastUpdated: "", confusion: [], emotionDifferences: [] };
   const sentimentTotal = Math.max(1, summary.positive + summary.neutral + summary.negative + summary.mixed);
   const positivePct = summary.positive / sentimentTotal * 100;
   const neutralPct = summary.neutral / sentimentTotal * 100;
@@ -633,15 +681,22 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
 
     <section className="surface top-posts-card"><div className="section-head"><div><p className="eyebrow">TOP POSTS</p><h3>讨论最集中的帖子</h3></div></div><div className="comment-rank-list">{data?.topPosts.map((item, index) => <button key={item.mention_id} className={postId === item.mention_id ? "active" : ""} onClick={() => { setPostId(postId === item.mention_id ? 0 : item.mention_id); setPage(1); }}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.title}</strong><small>{item.source} · {item.comments} 条 · {item.negative} 条负面</small></div><em>{item.likes.toLocaleString()} 赞</em></button>)}</div></section>
 
+    <section className="surface calibration-card">
+      <div className="section-head"><div><p className="eyebrow">HUMAN CALIBRATION</p><h3>人工标注与模型校准</h3></div><span className="count-chip">{calibration.labeled} / {calibration.total}</span></div>
+      <div className="calibration-layout"><div className="calibration-progress"><div><strong>{calibration.progress}%</strong><span>全量标注进度</span></div><i><b style={{ width: `${calibration.progress}%` }} /></i><p>逐条选择人工结论。保存后以人工标签为准，并用重复出现且经过至少 2 条样本验证的词语校准其余未标注评论。</p></div>
+        <div className="calibration-metrics"><article><small>原模型极性准确率</small><strong>{calibration.sentimentAccuracy == null ? "—" : `${calibration.sentimentAccuracy}%`}</strong></article><article><small>具体情绪准确率</small><strong>{calibration.emotionAccuracy == null ? "—" : `${calibration.emotionAccuracy}%`}</strong></article><article><small>人机分歧</small><strong>{calibration.disagreements}</strong></article><article><small>已学习规则</small><strong>{calibration.ruleCount}</strong></article></div>
+        <div className="calibration-differences"><strong>主要差异</strong>{calibration.confusion.filter((item) => item.model !== item.human).slice(0, 5).map((item) => <span key={`${item.model}-${item.human}`}>{item.model} → {item.human}<b>{item.count}</b></span>)}{!calibration.disagreements && <small>完成标注后，这里会显示模型与人工判断的偏差。</small>}</div></div>
+    </section>
+
     <section className="surface comment-feed-card">
-      <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
-      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className="comment-archive-card" key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
+      <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={annotation} onChange={(event) => resetPage(setAnnotation, event.target.value)}><option value="">全部标注状态</option><option value="unlabeled">仅未标注</option><option value="labeled">已人工标注</option><option value="disagreed">人机有分歧</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
+      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className={`comment-archive-card ${comment.manual_sentiment ? "human-labeled" : ""}`} key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><CommentAnnotationControls comment={comment} canEdit={canEdit} onSaved={() => setRefreshKey((value) => value + 1)} /><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
       <div className="comment-pagination"><span>共 {data?.pagination.total ?? 0} 条 · 第 {data?.pagination.page ?? page} / {data?.pagination.pages ?? 1} 页</span><div><button disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><button disabled={page >= (data?.pagination.pages ?? 1) || loading} onClick={() => setPage((value) => value + 1)}>下一页</button></div></div>
     </section>
 
     <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
 
-    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 已请求 {target.pages_fetched} 页{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
+    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 主评论 TikHub {String(target.adapter || "v2").toUpperCase()} · 已请求 {target.pages_fetched} 页{target.v2_failures || target.v1_failures ? ` · V2/V1 失败 ${target.v2_failures || 0}/${target.v1_failures || 0}` : ""}{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
   </div>;
 }
 

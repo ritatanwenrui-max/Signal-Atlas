@@ -323,6 +323,41 @@ export const mentionComments = sqliteTable("mention_comments", {
   index("idx_mention_comments_brand_sentiment").on(table.brandId, table.sentiment, table.sentimentScore),
 ]);
 
+export const commentAnnotations = sqliteTable("comment_annotations", {
+  commentId: integer("comment_id").primaryKey(),
+  brandId: integer("brand_id").notNull(),
+  workspaceId: integer("workspace_id").notNull().default(0),
+  mentionId: integer("mention_id").notNull(),
+  annotatorUserId: text("annotator_user_id").notNull(),
+  modelSentiment: text("model_sentiment").notNull(),
+  modelEmotion: text("model_emotion").notNull(),
+  modelTopic: text("model_topic").notNull(),
+  modelScore: integer("model_score").notNull().default(0),
+  manualSentiment: text("manual_sentiment").notNull(),
+  manualEmotion: text("manual_emotion").notNull(),
+  manualTopic: text("manual_topic").notNull().default(""),
+  note: text("note").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("idx_comment_annotations_brand_updated").on(table.brandId, table.updatedAt),
+  index("idx_comment_annotations_workspace").on(table.workspaceId, table.brandId),
+]);
+
+export const sentimentCalibrationRules = sqliteTable("sentiment_calibration_rules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull(),
+  token: text("token").notNull(),
+  sentiment: text("sentiment").notNull(),
+  emotion: text("emotion").notNull(),
+  weight: integer("weight").notNull().default(0),
+  sampleCount: integer("sample_count").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_sentiment_calibration_brand_token").on(table.brandId, table.token),
+  index("idx_sentiment_calibration_brand_weight").on(table.brandId, table.weight),
+]);
+
 export const socialCommentTargets = sqliteTable("social_comment_targets", {
   mentionId: integer("mention_id").primaryKey(),
   brandId: integer("brand_id").notNull(),
@@ -332,6 +367,9 @@ export const socialCommentTargets = sqliteTable("social_comment_targets", {
   reportedCount: integer("reported_count").notNull().default(0),
   collectedCount: integer("collected_count").notNull().default(0),
   cursor: text("cursor").notNull().default(""),
+  adapter: text("adapter").notNull().default("v2"),
+  v2Failures: integer("v2_failures").notNull().default(0),
+  v1Failures: integer("v1_failures").notNull().default(0),
   topLevelComplete: integer("top_level_complete", { mode: "boolean" }).notNull().default(false),
   status: text("status").notNull().default("queued"),
   pagesFetched: integer("pages_fetched").notNull().default(0),
@@ -347,6 +385,9 @@ export const socialCommentReplyQueue = sqliteTable("social_comment_reply_queue",
   reportedCount: integer("reported_count").notNull().default(0),
   collectedCount: integer("collected_count").notNull().default(0),
   cursor: text("cursor").notNull().default(""),
+  adapter: text("adapter").notNull().default("v2"),
+  v2Failures: integer("v2_failures").notNull().default(0),
+  v1Failures: integer("v1_failures").notNull().default(0),
   status: text("status").notNull().default("queued"),
   pagesFetched: integer("pages_fetched").notNull().default(0),
   lastError: text("last_error").notNull().default(""),
