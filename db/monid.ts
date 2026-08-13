@@ -431,12 +431,13 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   }
   if (run.status === "BLOCKED") {
     await updateJob(db, job, run, "Monid 工作区预算或单次任务上限阻止了执行");
-    await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行");
+    await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "queued");
     throw new Error("Monid 工作区预算或单次任务上限已触发，请在 Monid 后台调整后重试");
   }
   if (run.status !== "COMPLETED") {
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
     await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}`);
+    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error(`Monid Instagram 任务未完成：${run.status}`);
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
@@ -444,6 +445,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     const message = run.providerResponse?.error?.message ?? `Instagram 数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
     await markCommentJobError(db, brandId, job, message);
+    if (job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
   }
   if (job.stage === "profiles") {
@@ -452,8 +454,14 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     return [];
   }
   if (job.stage === "post_comments" || job.stage === "comment_replies") {
-    await processCommentPage(db, brandId, job, run.output);
-    await updateJob(db, job, run);
+    try {
+      await processCommentPage(db, brandId, job, run.output);
+      await updateJob(db, job, run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Monid 评论结果无法解析";
+      await updateJob(db, job, run, message);
+      await markCommentJobError(db, brandId, job, message);
+    }
     return [];
   }
   const terms = JSON.parse(job.terms || "[]") as string[];
@@ -463,16 +471,16 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   return candidates;
 }
 
-async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string) {
+async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string, status: "queued" | "error" = "error") {
   if (job.stage !== "post_comments" && job.stage !== "comment_replies") return;
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const now = new Date().toISOString();
   if (job.stage === "post_comments") {
-    await db.prepare("UPDATE social_comment_targets SET status = 'queued', last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?")
-      .bind(message, now, brandId, descriptor.mentionId).run();
+    await db.prepare("UPDATE social_comment_targets SET status = ?, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?")
+      .bind(status, message, now, brandId, descriptor.mentionId).run();
   } else {
-    await db.prepare("UPDATE social_comment_reply_queue SET status = 'queued', last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
-      .bind(message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+    await db.prepare("UPDATE social_comment_reply_queue SET status = ?, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
+      .bind(status, message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
   }
 }
 

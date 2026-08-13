@@ -461,7 +461,7 @@ function SocialCommentsView({ brand, monidConfigured }: { brand: BrandProfile; m
   const maxWord = Math.max(1, ...(data?.words ?? []).map((item) => Number(item.count)));
   const maxTopic = Math.max(1, ...(data?.topics ?? []).map((item) => Number(item.count)));
   const netSentiment = summary.total ? Math.round((summary.positive - summary.negative) / summary.total * 100) : 0;
-  const targetStatus = (value: string) => value === "complete" ? "已完成" : value === "running" ? "请求中" : value === "queued" ? "排队中" : value === "collecting" ? "抓取回复中" : "需重试";
+  const targetStatus = (value: string) => value === "complete" ? "已完成" : value === "running" ? "请求中" : value === "queued" ? "排队中" : value === "collecting" ? "抓取回复中" : "无法采集";
   function resetPage(value: (next: string) => void, next: string) { value(next); setPage(1); }
 
   return <div className="comments-page">
