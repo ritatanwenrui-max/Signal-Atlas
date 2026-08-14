@@ -60,11 +60,17 @@ node --test tests/rendered-html.test.mjs
 | `MONID_API_KEY` | Monid 社媒帖子、评论与回复采集 | 可选 |
 | `X_BEARER_TOKEN` | X 官方接口 | 可选 |
 | `YOUTUBE_API_KEY` | YouTube Data API | 可选 |
+| `AZURE_TRANSLATOR_KEY` | Azure Translator F0 密钥 | 可选 |
+| `AZURE_TRANSLATOR_REGION` | Azure Translator 资源区域 | 可选 |
+| `AZURE_TRANSLATOR_ENDPOINT` | Azure Translator 自定义端点 | 可选 |
+| `DEEPL_API_KEY` | DeepL API Free 密钥 | 可选 |
 | `LIBRETRANSLATE_URL` | 自建/第三方 LibreTranslate 地址 | 可选 |
 | `LIBRETRANSLATE_API_KEY` | LibreTranslate 密钥 | 可选 |
-| `TRANSLATION_CONTACT_EMAIL` | 公共翻译服务联络标识 | 可选 |
+| `TRANSLATION_CONTACT_EMAIL` | MyMemory 联系邮箱（最后一级兜底） | 可选 |
 
 用户也可以在网站的“数据连接器”页面录入自己的 API Key；密钥会加密后存入 D1，不会进入 GitHub。
+
+英文翻译使用独立后台队列。若配置了服务，系统按 LibreTranslate 自托管、Azure Translator F0、DeepL API Free、MyMemory 的顺序自动回退；没有配置时仅使用匿名 MyMemory，并主动限制每轮请求量以避免连续触发公共额度限制。配置任一专用翻译服务后，先前因免费额度暂停的任务会自动恢复，不需要重新导入新闻或评论。
 
 ## Cloudflare / Sites 部署要求
 

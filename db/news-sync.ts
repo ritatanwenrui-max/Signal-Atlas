@@ -396,7 +396,7 @@ export async function runNewsSync(force = false, userId = "") {
     await rebuildStoryClusters(db, brandId, terms);
     await rebuildPropagationEdges(db, brandId, terms);
     const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
-    const translationBefore = await runTranslationCycle(db, brandId);
+    const translationBefore = await runTranslationCycle(db, brandId, credentialOwnerId);
     const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
@@ -518,7 +518,7 @@ export async function runNewsSync(force = false, userId = "") {
       }
       await rebuildStoryClusters(db, brandId, terms);
       await rebuildPropagationEdges(db, brandId, terms);
-      const translationAfter = inserted > 0 ? await runTranslationCycle(db, brandId) : { queued: 0, translated: 0, skipped: 0, errors: 0 };
+      const translationAfter = inserted > 0 ? await runTranslationCycle(db, brandId, credentialOwnerId) : { queued: 0, translated: 0, skipped: 0, errors: 0 };
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();

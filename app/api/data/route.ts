@@ -2,11 +2,33 @@ import { env } from "cloudflare:workers";
 import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
 import { verifyMonidApiKey } from "../../../db/monid";
+import { runTranslationCycle } from "../../../db/translation";
 import { analyzeCommentText } from "../../../db/text-analysis";
 import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
+
+function validateTranslationCredential(provider: string, credential: string) {
+  if (!["Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory"].includes(provider)) return "";
+  if (!credential.trim()) return "翻译服务配置不能为空";
+  if (provider === "DeepL API Free") return "";
+  if (provider === "MyMemory") {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(credential.trim()) ? "" : "请填写有效的联系邮箱";
+  }
+  try {
+    const parsed = JSON.parse(credential) as Record<string, unknown>;
+    if (provider === "Azure Translator") {
+      return String(parsed.key ?? "").trim() ? "" : "Azure Translator Key 不能为空";
+    }
+    const endpoint = new URL(String(parsed.url ?? "").trim());
+    const local = endpoint.hostname === "localhost" || endpoint.hostname === "127.0.0.1";
+    if (endpoint.protocol !== "https:" && !local) return "LibreTranslate 地址必须使用 HTTPS";
+    return "";
+  } catch {
+    return provider === "LibreTranslate" ? "请填写有效的 LibreTranslate 服务地址" : "翻译服务配置格式无效";
+  }
+}
 
 export async function GET() {
   const user = await getChatGPTUser();
@@ -83,6 +105,8 @@ export async function POST(request: Request) {
     await requireWorkspaceAccess(db, user.userId, "manage");
     const provider = String(payload.provider ?? "");
     const credential = String(payload.credential ?? "");
+    const translationCredentialError = validateTranslationCredential(provider, credential);
+    if (translationCredentialError) return Response.json({ error: translationCredentialError }, { status: 400 });
     if (provider === "Monid / Instagram") {
       try {
         await verifyMonidApiKey(credential.trim());
@@ -92,6 +116,9 @@ export async function POST(request: Request) {
       }
     }
     await saveConnectorCredential(db, String(workspace.credential_owner_user_id), provider, credential, String(payload.lastFour ?? ""));
+    if (["Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory"].includes(provider) && existingBrand?.id) {
+      await runTranslationCycle(db, Number(existingBrand.id), String(workspace.credential_owner_user_id));
+    }
   } else if (action === "deleteConnectorCredential") {
     await requireWorkspaceAccess(db, user.userId, "manage");
     await deleteConnectorCredential(db, String(workspace.credential_owner_user_id), String(payload.provider ?? ""));

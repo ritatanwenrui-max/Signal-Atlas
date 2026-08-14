@@ -194,12 +194,16 @@ test("Monid searches five social platforms and archives public comments and repl
 });
 
 test("collected posts and comments receive persisted English translations", async () => {
-  const [monid, translation, sync, schema, repository, page, comments] = await Promise.all([
+  const [monid, translation, sync, schema, repository, page, comments, dataRoute] = await Promise.all([
     source("db/monid.ts"), source("db/translation.ts"), source("db/news-sync.ts"), source("db/schema.ts"),
-    source("db/repository.ts"), source("app/page.tsx"), source("db/comments.ts"),
+    source("db/repository.ts"), source("app/page.tsx"), source("db/comments.ts"), source("app/api/data/route.ts"),
   ]);
   assert.doesNotMatch(monid, /api\.strale\.io|x402\/translate|startTranslationJobs|Monid · Strale/);
   assert.match(translation, /api\.mymemory\.translated\.net\/get/);
+  assert.match(translation, /api\.cognitive\.microsofttranslator\.com/);
+  assert.match(translation, /api-free\.deepl\.com\/v2\/translate/);
+  assert.match(translation, /translateWithLibreTranslate/);
+  assert.match(translation, /loadConnectorCredential/);
   assert.match(translation, /function translationNotNeeded/);
   assert.match(translation, /"英文", "英语", "en", "en-us", "en-gb", "english"/);
   assert.match(translation, /translation_status = 'translated'/);
@@ -207,7 +211,10 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(translation, /translation_error/);
   assert.match(translation, /translation_next_retry_at/);
   assert.match(translation, /翻译已迁移到独立队列/);
-  assert.match(translation, /MAX_REMOTE_ITEMS_PER_CYCLE = 2/);
+  assert.match(translation, /MAX_ANONYMOUS_ITEMS_PER_CYCLE = 2/);
+  assert.match(translation, /MAX_CONFIGURED_ITEMS_PER_CYCLE = 12/);
+  assert.match(translation, /hasDedicatedTranslator\(credentials\)/);
+  assert.match(translation, /!hasDedicatedTranslator\(credentials\) && isDailyQuotaError/);
   assert.match(translation, /USED ALL AVAILABLE FREE TRANSLATIONS/);
   assert.match(translation, /24 \* 60 \* 60_000/);
   assert.match(translation, /\.\.\.mentions\.results[\s\S]*\.\.\.comments\.results/);
@@ -221,6 +228,9 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(repository, /ALTER TABLE mentions ADD COLUMN translation_en/);
   assert.match(repository, /ALTER TABLE mentions ADD COLUMN translation_error/);
   assert.match(repository, /ALTER TABLE mention_comments ADD COLUMN translation_en/);
+  assert.match(repository, /Azure Translator F0/);
+  assert.match(repository, /DeepL API Free/);
+  assert.match(repository, /LibreTranslate 自托管/);
   assert.match(comments, /translation_status = CASE WHEN mention_comments\.content != excluded\.content THEN 'pending'/);
   assert.match(page, /function EnglishTranslation/);
   assert.match(page, /function translationNotNeeded/);
@@ -228,6 +238,7 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(page, /等待英文翻译/);
   assert.match(page, /翻译失败/);
   assert.match(page, /系统将在额度恢复后自动重试/);
+  assert.match(dataRoute, /await runTranslationCycle\(db, Number\(existingBrand\.id\)/);
   assert.doesNotMatch(page, /Translation will retry automatically|check Monid balance/);
   assert.match(page, /<EnglishTranslation value=\{item\.translation_en\}/);
   assert.match(page, /<EnglishTranslation value=\{comment\.translation_en\}/);

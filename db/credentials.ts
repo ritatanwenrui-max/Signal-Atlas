@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 
-const supportedProviders = new Set(["NewsAPI.ai", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok"]);
+const supportedProviders = new Set([
+  "NewsAPI.ai", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
+  "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory",
+]);
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -41,7 +44,13 @@ export async function deleteConnectorCredential(db: D1Database, userId: string, 
 
 export async function loadConnectorCredential(db: D1Database, provider: string, userId = "") {
   const environmentValue = provider === "NewsAPI.ai" ? env.NEWSAPI_AI_KEY : provider === "Monid / Instagram" ? env.MONID_API_KEY
-    : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY : undefined;
+    : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY
+    : provider === "Azure Translator" && env.AZURE_TRANSLATOR_KEY
+      ? JSON.stringify({ key: env.AZURE_TRANSLATOR_KEY, region: env.AZURE_TRANSLATOR_REGION || "", endpoint: env.AZURE_TRANSLATOR_ENDPOINT || "" })
+    : provider === "DeepL API Free" ? env.DEEPL_API_KEY
+    : provider === "LibreTranslate" && env.LIBRETRANSLATE_URL
+      ? JSON.stringify({ url: env.LIBRETRANSLATE_URL, key: env.LIBRETRANSLATE_API_KEY || "" })
+    : provider === "MyMemory" ? env.TRANSLATION_CONTACT_EMAIL : undefined;
   if (!userId) return environmentValue;
   const row = await db.prepare("SELECT encrypted_value, iv FROM connector_credentials WHERE user_id = ? AND provider = ?").bind(userId, provider)
     .first<{ encrypted_value: string; iv: string }>();

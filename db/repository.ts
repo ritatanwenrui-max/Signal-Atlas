@@ -532,6 +532,10 @@ export async function loadDashboardData(userId = "") {
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
   const metaConfigured = storedCredentials.has("Meta / Instagram");
   const tiktokConfigured = storedCredentials.has("TikTok");
+  const azureTranslatorConfigured = Boolean(env.AZURE_TRANSLATOR_KEY || storedCredentials.has("Azure Translator"));
+  const deepLConfigured = Boolean(env.DEEPL_API_KEY || storedCredentials.has("DeepL API Free"));
+  const libreTranslateConfigured = Boolean(env.LIBRETRANSLATE_URL || storedCredentials.has("LibreTranslate"));
+  const myMemoryIdentified = Boolean(env.TRANSLATION_CONTACT_EMAIL || storedCredentials.has("MyMemory"));
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
   const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
@@ -664,6 +668,18 @@ export async function loadDashboardData(userId = "") {
     connectors: [
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
+      { id: "translator-azure", provider: "Azure Translator", configurable: true, configured: azureTranslatorConfigured,
+        lastFour: storedCredentials.get("Azure Translator")?.last_four ?? (env.AZURE_TRANSLATOR_KEY ? "环境密钥" : ""), name: "Azure Translator F0",
+        status: azureTranslatorConfigured ? "online" : "credentials", detail: azureTranslatorConfigured ? "后台自动翻译主力 · 免费层每月 200 万字符" : "可配置 F0 免费层，适合大量后台自动翻译" },
+      { id: "translator-deepl", provider: "DeepL API Free", configurable: true, configured: deepLConfigured,
+        lastFour: storedCredentials.get("DeepL API Free")?.last_four ?? (env.DEEPL_API_KEY ? "环境密钥" : ""), name: "DeepL API Free",
+        status: deepLConfigured ? "online" : "credentials", detail: deepLConfigured ? "高质量英文翻译备用 · 免费层每月 50 万字符" : "可作为 Azure 或自托管翻译的备用服务" },
+      { id: "translator-libre", provider: "LibreTranslate", configurable: true, configured: libreTranslateConfigured,
+        lastFour: storedCredentials.get("LibreTranslate")?.last_four ?? (env.LIBRETRANSLATE_URL ? "环境配置" : ""), name: "LibreTranslate 自托管",
+        status: libreTranslateConfigured ? "online" : "credentials", detail: libreTranslateConfigured ? "优先使用团队自有翻译实例，不消耗第三方字符额度" : "开源自托管；服务器成本自理，应用侧不设字符额度" },
+      { id: "translator-mymemory", provider: "MyMemory", configurable: true, configured: myMemoryIdentified,
+        lastFour: storedCredentials.get("MyMemory")?.last_four ?? (env.TRANSLATION_CONTACT_EMAIL ? "环境配置" : ""), name: "MyMemory 免费兜底",
+        status: myMemoryIdentified ? "online" : "limited", detail: myMemoryIdentified ? "已添加联系邮箱，作为最后一级免费兜底" : "匿名额度很小；建议配置联系邮箱并至少再接入一个免费层" },
       { id: "monid-vault", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
