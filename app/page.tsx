@@ -139,9 +139,11 @@ function EnglishTranslation({ value, status, language, error, nextRetryAt, provi
 }) {
   if (status === "skipped" || translationNotNeeded(language)) return null;
   if (value?.trim()) return <div className="english-translation"><span>EN</span><p>{value.trim()}</p>{provider && <small>{provider}</small>}</div>;
-  const retry = nextRetryAt ? ` · ${formatDate(nextRetryAt, true)} 后重试` : "";
+  const quotaLimited = /免费额度已用完|USED ALL AVAILABLE FREE TRANSLATIONS|USAGELIMITS/i.test(error || "");
+  const readableError = quotaLimited ? "独立翻译服务当日免费额度已用完；系统将在额度恢复后自动重试" : error || "服务暂时不可用";
+  const retry = !quotaLimited && nextRetryAt ? ` · ${formatDate(nextRetryAt, true)} 后重试` : "";
   const label = status === "translating" ? "正在翻译为英文…" : status === "blocked" ? "等待独立翻译队列接管"
-    : status === "error" ? `翻译失败：${error || "服务暂时不可用"}${retry}` : "等待英文翻译";
+    : status === "error" ? `翻译失败：${readableError}${retry}` : "等待英文翻译";
   return <div className={`english-translation translation-${status || "pending"}`}><span>EN</span><p>{label}</p></div>;
 }
 

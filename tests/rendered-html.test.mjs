@@ -227,6 +227,7 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(page, /status === "skipped" \|\| translationNotNeeded\(language\)/);
   assert.match(page, /等待英文翻译/);
   assert.match(page, /翻译失败/);
+  assert.match(page, /系统将在额度恢复后自动重试/);
   assert.doesNotMatch(page, /Translation will retry automatically|check Monid balance/);
   assert.match(page, /<EnglishTranslation value=\{item\.translation_en\}/);
   assert.match(page, /<EnglishTranslation value=\{comment\.translation_en\}/);
