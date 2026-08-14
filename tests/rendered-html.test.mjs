@@ -242,6 +242,7 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.doesNotMatch(page, /Translation will retry automatically|check Monid balance/);
   assert.match(page, /<EnglishTranslation value=\{item\.translation_en\}/);
   assert.match(page, /<EnglishTranslation value=\{comment\.translation_en\}/);
+  assert.doesNotMatch(page, /<small>\{provider\}<\/small>|provider=\{item\.translation_provider\}|provider=\{comment\.translation_provider\}/);
   assert.match(page, /"英文翻译"/);
 });
 
