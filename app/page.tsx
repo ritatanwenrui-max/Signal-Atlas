@@ -57,6 +57,7 @@ type SocialCommentRow = {
   post_title: string; post_url: string; post_source?: string; post_author?: string; post_author_followers?: number;
   model_sentiment?: string; model_emotion?: string; model_topic?: string; model_score?: number;
   manual_sentiment?: string; manual_emotion?: string; manual_topic?: string; annotation_note?: string; annotation_updated_at?: string;
+  audience_region?: string; region_confidence?: string; region_basis?: string; resonance_weight?: number; discussion_weight?: number;
 };
 type CommentCalibration = {
   total: number; labeled: number; remaining: number; progress: number; sentimentAccuracy: number | null; emotionAccuracy: number | null;
@@ -65,14 +66,17 @@ type CommentCalibration = {
   emotionDifferences: Array<{ model: string; human: string; count: number }>;
 };
 type SocialCommentsData = {
-  summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; average_score: number; reported: number; collected: number; coverage: number };
-  sentiment: Array<{ label: string; count: number }>;
-  emotions: Array<{ label: string; count: number }>;
-  timeline: Array<{ date: string; total: number; negative: number; positive: number }>;
-  topics: Array<{ topic: string; count: number; negative: number }>;
+  summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; average_score: number; reported: number; collected: number; coverage: number;
+    weighted_positive: number; weighted_neutral: number; weighted_negative: number; weighted_mixed: number; weighted_total: number; weighted_net: number };
+  sentiment: Array<{ label: string; count: number; weight: number }>;
+  emotions: Array<{ label: string; count: number; weight: number }>;
+  timeline: Array<{ date: string; total: number; negative: number; positive: number; weight?: number; negativeWeight?: number }>;
+  topics: Array<{ topic: string; count: number; negative: number; weight: number; negativeWeight: number }>;
   words: Array<{ word: string; count: number }>;
   topPosts: Array<{ mention_id: number; title: string; url: string; source: string; comments: number; negative: number; likes: number }>;
-  targets: Array<{ mention_id: number; status: string; adapter?: string; v2_failures?: number; v1_failures?: number; reported_count: number; collected_count: number; pages_fetched: number; last_error: string; updated_at: string; post_title: string; post_source: string; mention_url: string }>;
+  targets: Array<{ mention_id: number; platform: string; status: string; adapter?: string; v2_failures?: number; v1_failures?: number; reported_count: number; collected_count: number; pages_fetched: number; last_error: string; updated_at: string; next_retry_at?: string; failure_count?: number; post_title: string; post_source: string; mention_url: string }>;
+  regions: Array<{ region: string; confidence: string; basis: string; total: number; weight: number; positive: number; negative: number; weightedPositive: number; weightedNegative: number; net: number; acceptance: string; topTopic: string }>;
+  insights: Array<{ title: string; finding: string; evidence: string; action: string; tone: "positive" | "watch" | "risk" | "neutral" }>;
   riskComments: SocialCommentRow[]; comments: SocialCommentRow[];
   pagination: { page: number; pageSize: number; total: number; pages: number };
   calibration: CommentCalibration;
@@ -83,12 +87,12 @@ const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neu
 const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, viewer: { authenticated: false }, workspace: null };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
-  ["analytics", "舆情分析", "04"], ["comments", "评论舆情", "05"], ["coverage", "来源覆盖", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"],
+  ["analytics", "内容舆情", "04"], ["comments", "受众舆情", "05"], ["coverage", "数据采集", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"], ["guide", "产品使用说明", "09"],
 ] as const;
 type ViewId = (typeof nav)[number][0];
 const routeByView: Record<ViewId, string> = {
   overview: "/overview", archive: "/archive", propagation: "/propagation", analytics: "/analytics",
-  comments: "/comments", coverage: "/coverage", reports: "/reports", settings: "/settings",
+  comments: "/comments", coverage: "/coverage", reports: "/reports", settings: "/settings", guide: "/guide",
 };
 function viewFromPath(pathname: string): ViewId {
   const segment = pathname.split("/").filter(Boolean)[0] as ViewId | undefined;
@@ -148,7 +152,7 @@ function EnglishTranslation({ value, status, language, error, nextRetryAt }: {
 }
 
 export default function Home() {
-  const [view, setView] = useState<ViewId>("overview");
+  const [view, setView] = useState<ViewId>(() => typeof window === "undefined" ? "overview" : viewFromPath(window.location.pathname));
   const [data, setData] = useState<DashboardData>(emptyData);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -158,7 +162,6 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const monidPollAttempts = useRef(0);
 
   function navigateTo(nextView: ViewId, replace = false) {
     setView(nextView);
@@ -170,7 +173,6 @@ export default function Home() {
   useEffect(() => {
     const syncRoute = () => setView(viewFromPath(window.location.pathname));
     const initialView = viewFromPath(window.location.pathname);
-    setView(initialView);
     if (window.location.pathname === "/") window.history.replaceState({ view: initialView }, "", routeByView[initialView]);
     window.addEventListener("popstate", syncRoute);
     return () => window.removeEventListener("popstate", syncRoute);
@@ -265,18 +267,18 @@ export default function Home() {
 
   useEffect(() => {
     if (!data.viewer.authenticated || !data.workspace?.canEdit || !data.brand || monidConnector?.status !== "online" || !monidConnector.pending) {
-      monidPollAttempts.current = 0;
       return;
     }
-    if (syncing || monidPollAttempts.current >= 30) return;
+    if (syncing) return;
+    const retryAt = monidConnector.retryAt ? new Date(monidConnector.retryAt).getTime() : 0;
+    const delay = retryAt > Date.now() ? Math.min(30 * 60_000, Math.max(20_000, retryAt - Date.now() + 1_000)) : 20_000;
     const timer = window.setTimeout(() => {
-      monidPollAttempts.current += 1;
       void syncNews(false, false);
-    }, 12_000);
+    }, delay);
     return () => window.clearTimeout(timer);
-    // Pending Monid jobs must be reclaimed independently of the regular 20-minute provider cooldown.
+    // Keep long-running Monid queues moving; retrying targets wait until their explicit retry time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.brand, data.viewer.authenticated, data.workspace?.canEdit, monidConnector?.pending, monidConnector?.status, syncing]);
+  }, [data.brand, data.viewer.authenticated, data.workspace?.canEdit, monidConnector?.pending, monidConnector?.retryAt, monidConnector?.status, syncing]);
 
   return <main className="app-shell">
     <aside className="sidebar">
@@ -314,6 +316,7 @@ export default function Home() {
           {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
           {view === "reports" && <ReportView brand={data.brand} workspaceName={data.workspace?.name ?? data.brand.name} mentions={data.mentions} analytics={data.analytics} clusters={clusters} countryCodes={countryCode} />}
           {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
+          {view === "guide" && <ProductGuide />}
         </>}
       </div>
     </section>
@@ -602,10 +605,6 @@ function CommentAnnotationControls({ comment, canEdit, onSaved }: { comment: Soc
   const [emotion, setEmotion] = useState(comment.manual_emotion || comment.emotion || "中性陈述");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  useEffect(() => {
-    setSentiment(comment.manual_sentiment || comment.sentiment || "中性");
-    setEmotion(comment.manual_emotion || comment.emotion || "中性陈述");
-  }, [comment.emotion, comment.manual_emotion, comment.manual_sentiment, comment.sentiment]);
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canEdit || busy) return;
@@ -637,6 +636,8 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
   const [range, setRange] = useState("30");
   const [tone, setTone] = useState("");
   const [platform, setPlatform] = useState("");
+  const [region, setRegion] = useState("");
+  const [metricMode, setMetricMode] = useState<"count" | "weighted">("weighted");
   const [sort, setSort] = useState("newest");
   const [annotation, setAnnotation] = useState("");
   const [draftQuery, setDraftQuery] = useState("");
@@ -658,6 +659,7 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     const params = new URLSearchParams({ range, sort, page: String(page) });
     if (tone) params.set("sentiment", tone);
     if (platform) params.set("platform", platform);
+    if (region) params.set("region", region);
     if (query) params.set("query", query);
     if (postId) params.set("post", String(postId));
     if (annotation) params.set("annotation", annotation);
@@ -668,22 +670,33 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     }).catch((reason) => { if (reason?.name !== "AbortError") setError(reason instanceof Error ? reason.message : "评论数据加载失败"); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [annotation, page, platform, postId, query, range, refreshKey, sort, tone]);
+  }, [annotation, page, platform, postId, query, range, refreshKey, region, sort, tone]);
 
-  const summary = data?.summary ?? { total: 0, authors: 0, likes: 0, replies: 0, positive: 0, neutral: 0, negative: 0, mixed: 0, average_score: 0, reported: 0, collected: 0, coverage: 0 };
+  useEffect(() => {
+    if (!monidConfigured || !data?.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status))) return;
+    const timer = window.setInterval(() => setRefreshKey((value) => value + 1), 15_000);
+    return () => window.clearInterval(timer);
+  }, [data?.targets, monidConfigured]);
+
+  const summary = data?.summary ?? { total: 0, authors: 0, likes: 0, replies: 0, positive: 0, neutral: 0, negative: 0, mixed: 0, average_score: 0, reported: 0, collected: 0, coverage: 0,
+    weighted_positive: 0, weighted_neutral: 0, weighted_negative: 0, weighted_mixed: 0, weighted_total: 0, weighted_net: 0 };
   const calibration = data?.calibration ?? { total: 0, labeled: 0, remaining: 0, progress: 0, sentimentAccuracy: null, emotionAccuracy: null,
     disagreements: 0, ruleCount: 0, lastUpdated: "", confusion: [], emotionDifferences: [] };
-  const sentimentTotal = Math.max(1, summary.positive + summary.neutral + summary.negative + summary.mixed);
-  const positivePct = summary.positive / sentimentTotal * 100;
-  const neutralPct = summary.neutral / sentimentTotal * 100;
-  const negativePct = summary.negative / sentimentTotal * 100;
+  const sentimentTotal = Math.max(1, metricMode === "weighted" ? summary.weighted_total : summary.positive + summary.neutral + summary.negative + summary.mixed);
+  const displayedSentiment = metricMode === "weighted" ? {
+    positive: summary.weighted_positive, neutral: summary.weighted_neutral, negative: summary.weighted_negative, mixed: summary.weighted_mixed,
+  } : { positive: summary.positive, neutral: summary.neutral, negative: summary.negative, mixed: summary.mixed };
+  const positivePct = displayedSentiment.positive / sentimentTotal * 100;
+  const neutralPct = displayedSentiment.neutral / sentimentTotal * 100;
+  const negativePct = displayedSentiment.negative / sentimentTotal * 100;
   const maxDay = Math.max(1, ...(data?.timeline ?? []).map((item) => Number(item.total)));
   const maxWord = Math.max(1, ...(data?.words ?? []).map((item) => Number(item.count)));
-  const maxTopic = Math.max(1, ...(data?.topics ?? []).map((item) => Number(item.count)));
-  const netSentiment = summary.total ? Math.round((summary.positive - summary.negative) / summary.total * 100) : 0;
+  const maxTopic = Math.max(1, ...(data?.topics ?? []).map((item) => Number(metricMode === "weighted" ? item.weight : item.count)));
+  const maxEmotion = Math.max(1, ...(data?.emotions ?? []).map((item) => Number(metricMode === "weighted" ? item.weight : item.count)));
+  const netSentiment = metricMode === "weighted" ? summary.weighted_net : summary.total ? Math.round((summary.positive - summary.negative) / summary.total * 100) : 0;
   const targetStatus = (value: string) => ({
     complete: "已完成", empty: "待重新核验", unavailable: "待重新核验", not_returned: "暂未取得文本", blocked: "权限或预算受限",
-    running: "请求中", queued: "排队中", retrying: "重新获取中", collecting: "抓取回复中", error: "采集失败",
+    running: "请求中", queued: "排队中", retrying: "等待重试", collecting: "抓取回复中", error: "采集失败", review: "待人工复核",
   }[value] ?? "待识别");
   function resetPage(value: (next: string) => void, next: string) { value(next); setPage(1); }
   async function collectDirectPost(event: FormEvent<HTMLFormElement>) {
@@ -705,8 +718,8 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
 
   return <div className="comments-page">
     <section className="comment-hero panel-dark">
-      <div><p className="eyebrow">COMMENT INTELLIGENCE</p><h2>{brand.name} 评论舆情</h2><p>社交平台帖子和网页新闻的公开评论会被统一归档，再按具体情绪、主题、时间、来源和参与者交叉分析。</p></div>
-      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>MONID COMMENT PIPELINE</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status)) ? "持续采集中" : data.targets.some((item) => ["blocked", "unavailable", "empty", "not_returned", "error"].includes(item.status)) ? "部分帖子待核验" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
+      <div><p className="eyebrow">AUDIENCE INTELLIGENCE</p><h2>{brand.name} 受众舆情</h2><p>系统把评论原文、互动共鸣、具体情绪、讨论议题和受众地区放在一起分析，并为每条结论保留可核对的评论依据。</p></div>
+      <div className="comment-collection-state"><span className={monidConfigured ? "online" : "offline"} /><div><small>COMMENT COLLECTION</small><strong>{!monidConfigured ? "尚未配置" : !data?.targets.length ? "等待建立帖子目标" : data.targets.some((item) => ["running", "queued", "retrying", "collecting"].includes(item.status)) ? "持续采集中" : data.targets.some((item) => ["blocked", "unavailable", "empty", "not_returned", "error", "review"].includes(item.status)) ? "部分帖子待核验" : "当前队列已完成"}</strong><em>{summary.collected.toLocaleString()} / {summary.reported.toLocaleString()} 条已归档 · {summary.coverage}%</em></div></div>
     </section>
 
     <section className="surface comment-pipeline" aria-label="自动评论舆情处理流程"><div><b>01</b><strong>关键词搜帖</strong><span>Monid 多平台发现</span></div><i>→</i><div><b>02</b><strong>归档帖子 URL</strong><span>保留来源与互动</span></div><i>→</i><div><b>03</b><strong>逐帖采集评论</strong><span>主评论与回复分页</span></div><i>→</i><div><b>04</b><strong>内部语义分析</strong><span>分词、情绪与议题</span></div><i>→</i><div><b>05</b><strong>舆情展示</strong><span>词云、趋势与风险</span></div></section>
@@ -714,22 +727,28 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     <section className="comment-kpis surface">
       <Metric label="已归档评论" value={summary.total.toLocaleString()} note="当前筛选范围内的真实文本" />
       <Metric label="独立参与者" value={summary.authors.toLocaleString()} note="按公开账号 ID 去重" />
-      <Metric label="净情绪指数" value={`${netSentiment > 0 ? "+" : ""}${netSentiment}`} note="正面占比减负面占比" danger={netSentiment < -15} />
-      <Metric label="负面占比" value={`${Math.round(summary.negative / Math.max(1, summary.total) * 100)}%`} note={`${summary.negative.toLocaleString()} 条负面评论`} danger={summary.negative > summary.total * .2} />
+      <Metric label="共鸣净情绪" value={`${summary.weighted_net > 0 ? "+" : ""}${summary.weighted_net}`} note="按评论获赞标准化加权" danger={summary.weighted_net < -15} />
+      <Metric label="高共鸣负面" value={`${Math.round(summary.weighted_negative / Math.max(1, summary.weighted_total) * 100)}%`} note={`原始数量占比 ${Math.round(summary.negative / Math.max(1, summary.total) * 100)}%`} danger={summary.weighted_negative > summary.weighted_total * .2} />
       <Metric label="评论互动" value={(summary.likes + summary.replies).toLocaleString()} note="评论获赞与回复合计" />
     </section>
 
-    {!monidConfigured && <section className="comment-callout surface"><strong>社媒评论采集尚未启动</strong><p>网页新闻公开评论仍会持续检查；在“来源覆盖”配置 Monid 后，将为 Instagram、X、YouTube、TikTok、Facebook 相关帖子建立评论任务。</p></section>}
-    {error && <section className="comment-callout error surface"><strong>读取评论舆情失败</strong><p>{error}</p></section>}
+    {!monidConfigured && <section className="comment-callout surface"><strong>社媒评论采集尚未启动</strong><p>网页新闻公开评论仍会持续检查；在“数据采集”配置 Monid 后，将为 Instagram、X、YouTube、TikTok、Facebook 相关帖子建立评论任务。</p></section>}
+    {error && <section className="comment-callout error surface"><strong>读取受众舆情失败</strong><p>{error}</p></section>}
     <section className="surface direct-comment-collector"><div><p className="eyebrow">SPECIFIC POST COLLECTION</p><h3>指定帖子评论采集</h3><p>粘贴公开帖子链接。Instagram 会先根据帖子 URL 校验 Media ID，再分页获取主评论及回复；其他已支持平台会按帖子 ID 建立采集任务。</p></div><form onSubmit={collectDirectPost}><input type="url" value={directPostUrl} disabled={!monidConfigured || !canEdit || directBusy} onChange={(event) => setDirectPostUrl(event.target.value)} placeholder="https://www.instagram.com/p/.../" aria-label="指定帖子公开链接" required /><button className="primary-button" disabled={!monidConfigured || !canEdit || directBusy}>{directBusy ? "正在加入…" : "采集此帖评论"}</button>{directMessage && <small>{directMessage}</small>}</form></section>
 
+    <section className="surface audience-insights"><div className="section-head"><div><p className="eyebrow">EVIDENCE-BASED FINDINGS</p><h3>当前受众结论</h3></div><span className="subtle-note">结论随筛选范围更新</span></div><div className="audience-insight-grid">{data?.insights.map((insight) => <article className={insight.tone} key={insight.title}><span>{insight.title}</span><h4>{insight.finding}</h4><p>{insight.evidence}</p><small>{insight.action}</small></article>)}{!data?.insights.length && <div className="comment-empty compact">积累更多评论后生成带证据的结论。</div>}</div></section>
+
+    <div className="analysis-mode-bar surface"><div><strong>统计口径</strong><span>人数反映观点数量，共鸣反映获得更多点赞的观点。</span></div><div><button className={metricMode === "count" ? "active" : ""} onClick={() => setMetricMode("count")}>原始数量</button><button className={metricMode === "weighted" ? "active" : ""} onClick={() => setMetricMode("weighted")}>互动共鸣</button></div></div>
+
     <div className="comment-intelligence-grid">
-      <section className="surface sentiment-card"><div className="section-head"><div><p className="eyebrow">COMMENT SENTIMENT</p><h3>评论情绪结构</h3></div><span className="count-chip">{summary.total}</span></div><div className="sentiment-layout"><div className="sentiment-donut" style={{ "--positive": positivePct, "--neutral": neutralPct, "--negative": negativePct } as CSSProperties}><div><strong>{netSentiment}</strong><span>净情绪指数</span></div></div><div className="sentiment-legend">{[["正面", summary.positive, "positive"], ["中性", summary.neutral, "neutral"], ["负面", summary.negative, "negative"], ["混合", summary.mixed, "mixed"]].map(([label, count, value]) => <div key={String(label)}><i className={String(value)} /><span>{label}</span><strong>{Number(count).toLocaleString()}</strong></div>)}</div></div></section>
-      <section className="surface emotion-spectrum-card"><div className="section-head"><div><p className="eyebrow">COMMENT EMOTIONS</p><h3>具体情绪与行动意图</h3></div></div><div className="emotion-spectrum">{data?.emotions.map((item) => <article key={item.label}><span>{item.label}</span><i><b style={{ width: `${Number(item.count) / Math.max(1, ...(data?.emotions ?? []).map((entry) => Number(entry.count))) * 100}%` }} /></i><strong>{Number(item.count).toLocaleString()}</strong></article>)}{!data?.emotions.length && <div className="comment-empty compact">暂无评论样本</div>}</div></section>
-      <section className="surface comment-topic-card"><div className="section-head"><div><p className="eyebrow">DISCUSSION THEMES</p><h3>核心议题</h3></div></div><div className="comment-topic-list">{data?.topics.map((item) => <article key={item.topic}><div><strong>{item.topic}</strong><span>{item.count} 条 · {item.negative ? `${Math.round(item.negative / item.count * 100)}% 负面` : "无负面"}</span></div><i><b style={{ width: `${item.count / maxTopic * 100}%` }} /></i></article>)}{!data?.topics.length && <div className="comment-empty compact">暂无评论样本</div>}</div></section>
+      <section className="surface sentiment-card"><div className="section-head"><div><p className="eyebrow">COMMENT SENTIMENT</p><h3>评论情绪结构</h3></div><span className="count-chip">{metricMode === "weighted" ? "共鸣口径" : `${summary.total} 条`}</span></div><div className="sentiment-layout"><div className="sentiment-donut" style={{ "--positive": positivePct, "--neutral": neutralPct, "--negative": negativePct } as CSSProperties}><div><strong>{netSentiment}</strong><span>{metricMode === "weighted" ? "共鸣净情绪" : "数量净情绪"}</span></div></div><div className="sentiment-legend">{[["正面", displayedSentiment.positive, "positive"], ["中性", displayedSentiment.neutral, "neutral"], ["负面", displayedSentiment.negative, "negative"], ["混合", displayedSentiment.mixed, "mixed"]].map(([label, count, value]) => <div key={String(label)}><i className={String(value)} /><span>{label}</span><strong>{metricMode === "weighted" ? Number(count).toFixed(1) : Number(count).toLocaleString()}</strong></div>)}</div></div></section>
+      <section className="surface emotion-spectrum-card"><div className="section-head"><div><p className="eyebrow">COMMENT EMOTIONS</p><h3>具体情绪与行动意图</h3></div></div><div className="emotion-spectrum">{data?.emotions.map((item) => { const value = metricMode === "weighted" ? item.weight : item.count; return <article key={item.label}><span>{item.label}</span><i><b style={{ width: `${Number(value) / maxEmotion * 100}%` }} /></i><strong>{metricMode === "weighted" ? Number(value).toFixed(1) : Number(value).toLocaleString()}</strong></article>; })}{!data?.emotions.length && <div className="comment-empty compact">暂无评论样本</div>}</div></section>
+      <section className="surface comment-topic-card"><div className="section-head"><div><p className="eyebrow">DISCUSSION THEMES</p><h3>核心议题</h3></div></div><div className="comment-topic-list">{data?.topics.map((item) => { const value = metricMode === "weighted" ? item.weight : item.count; const negative = metricMode === "weighted" ? item.negativeWeight : item.negative; return <article key={item.topic}><div><strong>{item.topic}</strong><span>{metricMode === "weighted" ? `${value.toFixed(1)} 共鸣分` : `${item.count} 条`} · {negative ? `${Math.round(negative / Math.max(1, value) * 100)}% 负面` : "无负面"}</span></div><i><b style={{ width: `${value / maxTopic * 100}%` }} /></i></article>; })}{!data?.topics.length && <div className="comment-empty compact">暂无评论样本</div>}</div></section>
       <section className="surface comment-trend-card"><div className="section-head"><div><p className="eyebrow">CONVERSATION VOLUME</p><h3>评论量与负面走势</h3></div><span className="subtle-note">{range === "0" ? "全部历史" : `过去 ${range} 天`}</span></div><div className="comment-trend">{data?.timeline.map((day) => <div key={day.date} title={`${day.date}：${day.total} 条，负面 ${day.negative} 条`}><span><b style={{ height: `${Math.max(4, day.total / maxDay * 100)}%` }}><i style={{ height: `${day.total ? day.negative / day.total * 100 : 0}%` }} /></b></span><small>{day.date.slice(5)}</small></div>)}</div>{!data?.timeline.length && <div className="comment-empty compact">等待形成时间序列</div>}</section>
       <section className="surface comment-cloud-card"><div className="section-head"><div><p className="eyebrow">MEANINGFUL TERMS</p><h3>评论高频词云</h3></div><span className="subtle-note">中英文分词 · 已过滤虚词</span></div>{data?.words.length ? <div className="word-cloud">{data.words.map((item, index) => <span key={item.word} className={index < 6 ? "hot" : ""} style={{ fontSize: `${11 + item.count / maxWord * 25}px`, opacity: .5 + item.count / maxWord * .5 }} title={`${item.count} 次`}>{item.word}<sup>{item.count}</sup></span>)}</div> : <div className="comment-empty">暂无可统计的有效词</div>}</section>
     </div>
+
+    <section className="surface audience-region-card"><div className="section-head"><div><p className="eyebrow">REGIONAL AUDIENCE</p><h3>国家 / 地区接受情况</h3></div><span className="subtle-note">地区为公开资料或讨论语境推测，不等同于国籍</span></div><div className="audience-region-table"><header><span>地区</span><span>样本</span><span>共鸣净情绪</span><span>接受情况</span><span>主要议题</span><span>判断依据</span></header>{data?.regions.map((item) => <button key={item.region} className={region === item.region ? "active" : ""} onClick={() => { setRegion(region === item.region ? "" : item.region); setPage(1); }}><strong>{item.region}</strong><span>{item.total} 条</span><b className={item.net < -10 ? "negative" : item.net > 10 ? "positive" : ""}>{item.net > 0 ? "+" : ""}{item.net}</b><em>{item.acceptance}</em><span>{item.topTopic}</span><small>{item.confidence}置信 · {item.basis}</small></button>)}{!data?.regions.length && <div className="comment-empty compact">尚无可用于地区比较的评论。</div>}</div></section>
 
     <section className="surface top-posts-card"><div className="section-head"><div><p className="eyebrow">TOP POSTS</p><h3>讨论最集中的帖子</h3></div></div><div className="comment-rank-list">{data?.topPosts.map((item, index) => <button key={item.mention_id} className={postId === item.mention_id ? "active" : ""} onClick={() => { setPostId(postId === item.mention_id ? 0 : item.mention_id); setPage(1); }}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.title}</strong><small>{item.source} · {item.comments} 条 · {item.negative} 条负面</small></div><em>{item.likes.toLocaleString()} 赞</em></button>)}</div></section>
 
@@ -741,15 +760,32 @@ function SocialCommentsView({ brand, monidConfigured, canEdit }: { brand: BrandP
     </section>
 
     <section className="surface comment-feed-card">
-      <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={annotation} onChange={(event) => resetPage(setAnnotation, event.target.value)}><option value="">全部标注状态</option><option value="unlabeled">仅未标注</option><option value="labeled">已人工标注</option><option value="disagreed">人机有分歧</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
-      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className={`comment-archive-card ${comment.manual_sentiment ? "human-labeled" : ""}`} key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><EnglishTranslation value={comment.translation_en} status={comment.translation_status} language={comment.language} error={comment.translation_error} nextRetryAt={comment.translation_next_retry_at} /><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small></div><CommentAnnotationControls comment={comment} canEdit={canEdit} onSaved={() => setRefreshKey((value) => value + 1)} /><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
+      <div className="comment-feed-heading"><div><p className="eyebrow">COMMENT ARCHIVE</p><h3>评论明细档案</h3></div><div className="comment-feed-filters"><input aria-label="搜索评论" placeholder="搜索评论、账号或帖子" value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} /><select value={range} onChange={(event) => resetPage(setRange, event.target.value)}><option value="1">24 小时</option><option value="7">7 天</option><option value="30">30 天</option><option value="0">全部历史</option></select><select value={platform} onChange={(event) => resetPage(setPlatform, event.target.value)}><option value="">全部平台</option><option>网页新闻</option><option>Instagram</option><option>Facebook</option><option>TikTok</option><option>X</option><option>YouTube</option></select><select value={region} onChange={(event) => resetPage(setRegion, event.target.value)}><option value="">全部地区</option>{data?.regions.map((item) => <option key={item.region}>{item.region}</option>)}</select><select value={tone} onChange={(event) => resetPage(setTone, event.target.value)}><option value="">全部极性</option><option>正面</option><option>中性</option><option>负面</option><option>混合</option></select><select value={annotation} onChange={(event) => resetPage(setAnnotation, event.target.value)}><option value="">全部标注状态</option><option value="unlabeled">仅未标注</option><option value="labeled">已人工标注</option><option value="disagreed">人机有分歧</option></select><select value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="newest">最新发布</option><option value="liked">获赞最多</option><option value="risk">风险优先</option></select>{postId > 0 && <button onClick={() => { setPostId(0); setPage(1); }}>清除帖子筛选 ×</button>}</div></div>
+      <div className="comment-card-grid">{loading && !data ? <div className="comment-empty">正在读取评论档案…</div> : data?.comments.map((comment) => <article className={`comment-archive-card ${comment.manual_sentiment ? "human-labeled" : ""}`} key={comment.id}><header><div className="comment-author"><strong>{comment.author_username ? `@${comment.author_username}` : comment.author_name || "公开账号"}{comment.is_verified ? " ✓" : ""}</strong><small>{formatDate(comment.published_at, true)} · {comment.language}{comment.parent_comment_id ? " · 回复" : ""}</small></div><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span></header><p>{comment.content}</p><EnglishTranslation value={comment.translation_en} status={comment.translation_status} language={comment.language} error={comment.translation_error} nextRetryAt={comment.translation_next_retry_at} /><div className="comment-card-analysis"><span className="emotion-pill">{comment.emotion || "中性陈述"}</span><small>{comment.topic} · 情绪分 {comment.sentiment_score > 0 ? `+${comment.sentiment_score}` : comment.sentiment_score}</small><small title={comment.region_basis}>地区：{comment.audience_region || "地区未知"} · {comment.region_confidence || "低"}置信</small><small>共鸣权重 {Number(comment.resonance_weight ?? 1).toFixed(2)}</small></div><CommentAnnotationControls key={`${comment.id}-${comment.manual_sentiment}-${comment.manual_emotion}`} comment={comment} canEdit={canEdit} onSaved={() => setRefreshKey((value) => value + 1)} /><footer><a href={comment.comment_url || comment.post_url} target="_blank" rel="noreferrer">{comment.post_title}</a><span>{comment.platform} · ♥ {comment.likes.toLocaleString()} · ↳ {comment.replies.toLocaleString()}</span></footer></article>)}{!loading && !data?.comments.length && <div className="comment-empty">当前筛选条件下没有评论。</div>}</div>
       <div className="comment-pagination"><span>共 {data?.pagination.total ?? 0} 条 · 第 {data?.pagination.page ?? page} / {data?.pagination.pages ?? 1} 页</span><div><button disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><button disabled={page >= (data?.pagination.pages ?? 1) || loading} onClick={() => setPage((value) => value + 1)}>下一页</button></div></div>
     </section>
 
     <section className="surface risk-queue"><div className="section-head"><div><p className="eyebrow">RISK REVIEW QUEUE</p><h3>负面与混合情绪复核</h3></div><span className="subtle-note">按情绪分与互动量排序</span></div><div>{data?.riskComments.map((comment) => <article key={comment.id}><header><span className={`sentiment-pill ${sentimentClass(comment.sentiment)}`}>{comment.sentiment}</span><strong>{comment.likes} 赞</strong></header><p>{comment.content}</p><EnglishTranslation value={comment.translation_en} status={comment.translation_status} language={comment.language} error={comment.translation_error} nextRetryAt={comment.translation_next_retry_at} /><a href={comment.post_url} target="_blank" rel="noreferrer">{comment.post_title} ↗</a></article>)}{!data?.riskComments.length && <div className="comment-empty compact">暂无需要复核的高风险评论</div>}</div></section>
 
-    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION COVERAGE</p><h3>帖子评论抓取进度</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.post_source} · 主评论 TikHub {String(target.adapter || "v2").toUpperCase()} · 已请求 {target.pages_fetched} 页{target.v2_failures || target.v1_failures ? ` · V2/V1 失败 ${target.v2_failures || 0}/${target.v1_failures || 0}` : ""}{target.last_error ? ` · ${target.last_error}` : ""}</small></div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集进度。</div>}</div></section>
+    <section className="surface comment-progress-card"><div className="section-head"><div><p className="eyebrow">COLLECTION STATUS</p><h3>帖子评论采集状态</h3></div><span className="count-chip">{data?.targets.length ?? 0} 个帖子</span></div><div className="comment-progress-list">{data?.targets.map((target) => { const pct = target.reported_count ? Math.min(100, Math.round(target.collected_count / target.reported_count * 100)) : target.status === "complete" ? 100 : 0; return <article key={target.mention_id}><div><a href={target.mention_url} target="_blank" rel="noreferrer">{target.post_title}</a><small>{target.platform} · {target.post_source} · {String(target.adapter || "v2").toUpperCase()} · 已请求 {target.pages_fetched} 页 · 失败 {target.failure_count ?? (target.v2_failures || 0) + (target.v1_failures || 0)} 次</small>{target.last_error && <p>{target.last_error}</p>}{target.next_retry_at && target.status === "retrying" && <em>下次重试：{formatDate(target.next_retry_at, true)}</em>}{target.status === "review" && <em>已停止自动重试，请人工核验帖子地址、公开状态和接口返回。</em>}</div><span><i><b style={{ width: `${pct}%` }} /></i><em>{target.collected_count} / {target.reported_count || "?"}</em></span><strong className={target.status}>{targetStatus(target.status)}</strong></article>; })}{!data?.targets.length && <div className="comment-empty compact">发现带评论的相关帖子后，这里会显示逐帖采集状态。</div>}</div></section>
   </div>;
+}
+
+function ProductGuide() {
+  return <article className="product-guide">
+    <header className="guide-hero panel-dark"><p className="eyebrow">PRODUCT GUIDE</p><h2>产品使用说明</h2><p>本页说明系统能够采集什么、各页面如何使用，以及事件、传播、情绪、地区和互动指标的计算依据。规则发生变化时，说明页应与实际运行版本同时更新。</p></header>
+    <nav className="guide-index surface" aria-label="说明目录"><a href="#guide-purpose">产品用途</a><a href="#guide-start">开始使用</a><a href="#guide-archive">数据与档案</a><a href="#guide-events">事件与传播</a><a href="#guide-analysis">舆情分析</a><a href="#guide-weight">互动加权</a><a href="#guide-region">地区判断</a><a href="#guide-review">人工复核</a></nav>
+    <div className="guide-layout">
+      <section className="surface" id="guide-purpose"><span>01</span><h3>产品用途与数据边界</h3><p>本系统用于持续收集、整理和分析与品牌相关的公开网络信息。数据范围包括网页新闻、媒体报道、社交媒体公开帖子，以及帖子下方公开展示的评论和回复。系统会按照时间、平台、媒体和地区进行归档，并在此基础上识别事件、分析传播过程、总结讨论话题，观察媒体态度和受众反馈。</p><p>系统只处理公开可访问的数据，不读取私人账号、私密帖子或私信。部分平台会限制评论、互动数据和历史内容的访问，因此系统不能保证收录互联网上的全部相关信息。重要的公关、法律和商业判断仍应回到原文并经过人工复核。</p></section>
+      <section className="surface" id="guide-start"><span>02</span><h3>开始使用</h3><p>首次使用时，应先在“品牌与团队”中填写品牌名称、别名、产品、官网、官方账号、相关人物、行业、主要市场和常用语言。品牌名称较为常见时，还应设置身份锚点和排除词。身份锚点用于证明候选内容确实指向当前品牌，排除词用于过滤其他同名公司和无关结果。</p><p>品牌配置完成后，在“数据采集”中连接需要使用的新闻和社交媒体渠道。页面会显示各渠道能够采集的数据、最近成功时间、当前任务、失败原因和下次运行时间。首次运行默认补充最近一个月内能够获取的公开数据，此后按照页面显示的实际计划持续更新。</p></section>
+      <section className="surface" id="guide-archive"><span>03</span><h3>采集、归档与数据缺失</h3><p>社交媒体评论按照“发现帖子、保存帖子地址、采集主评论、采集回复、翻译与分析”的顺序处理。内容档案保留发布时间、平台、原文、媒体或账号、地区、原始链接、事件编号和公开互动数据。平台没有披露点赞、分享或播放量时，字段留空而不是写成零；只有接口明确返回零时才显示零。</p><p>系统通过URL、平台内容ID和正文相似度识别重复内容。重复内容只保留一条主记录，但不同媒体之间的转载关系仍可进入传播链路。用户也可以手动补充遗漏内容，人工补充会保留标记，并与自动采集内容一起参与后续分析。</p><p>添加排除词后，命中内容会从新闻档案、事件、内容舆情、受众舆情、词云和报告中移除。原始记录可以保留用于审计，但不再参与正常指标。删除排除词后，系统可以重新评估此前被过滤的数据。</p></section>
+      <section className="surface" id="guide-events"><span>04</span><h3>同一事件与传播链路</h3><p>“同一事件”是围绕同一件具体事情形成的一组报道和帖子，并不等于某段时间内所有提到品牌的内容。系统综合比较发布时间、标题、正文、人物、产品、地点、关键事实、相同段落和引用来源。三天内出现且内容高度相似的内容通常归入同一事件；相隔三至七天时，需要存在相同关键事实或明显文本继承；相隔超过七天时默认建立新事件，除非存在明确引用或持续更新。</p><p>传播链路只能从较早发布的内容指向较晚发布的内容。直接引用、链接或明显文本复制属于高置信关系；时间明确且内容高度相似但没有直接引用时属于中置信；只有时间和话题接近时属于低置信。低置信关系使用弱化样式展示，不能当作已经确认的转载事实。当前最早来源仅指系统现有数据中能够核实的最早公开内容。</p></section>
+      <section className="surface" id="guide-analysis"><span>05</span><h3>内容舆情与受众舆情</h3><p>“内容舆情”分析新闻报道和社交媒体原帖，用于观察媒体和发布者如何描述品牌。“受众舆情”分析评论及回复，用于观察公众为什么接受、质疑或拒绝产品。两者共享底层数据，但分析对象不同，因此作为并列页面存在。</p><p>受众舆情不只判断正面、负面和中立，还会识别认可、期待、购买意向、好奇、怀疑、担忧、失望、愤怒、反感、伦理争议和轻松戏谑等具体状态，并结合价格、产品体验、安全隐私、服务售后等议题形成结论。所有自动结论都应显示样本、互动权重和代表性原文，不能只给出无法核对的摘要。</p><p>情绪模型优先分析原文，翻译只用于展示。简体中文、繁体中文和英文原文不重复翻译，其他语言在原文下方显示英文译文。词云会进行中英文分词，并过滤虚词、网址、平台名和无分析意义的高频词。</p></section>
+      <section className="surface" id="guide-weight"><span>06</span><h3>评论数量与互动加权</h3><p>系统同时保留“原始数量”和“互动共鸣”两种口径。原始数量回答有多少评论表达了某种观点；互动共鸣回答哪些观点获得了更多点赞。回复数量主要代表讨论或争议强度，不直接视为对原评论的认同。</p><p>点赞采用对数转换和平台内标准化，避免一条爆款评论决定全部结果。同平台最近样本的点赞对数95分位数作为上限，标准化点赞和共鸣权重按以下方式计算：</p><pre>{`标准化点赞 = min(log(1 + 当前点赞数) ÷ 同平台点赞对数95分位数, 1)\n共鸣权重 = 1 + 2 × 标准化点赞`}</pre><p>每条有效评论至少保留权重1，高共鸣评论最高为3。该上限是防止极端值支配结果的产品约束，不代表一条评论等于三个人。不同平台分别标准化后才进行汇总。页面同时显示未加权结果和加权结果，避免高互动观点掩盖数量较多但互动较低的意见。</p></section>
+      <section className="surface" id="guide-region"><span>07</span><h3>国家、地区与文化语境</h3><p>系统区分媒体或发帖账号所在地区、评论者可能所在地区以及评论使用的语言。评论者地区优先使用公开所在地和地理信息；这些信息不存在时，会参考帖子主要市场、账号简介、语言、字形和当地用词进行推测。语言不能证明国籍，因此页面统一使用“受众地区（推测）”，并显示判断依据和置信度。</p><p>地区判断分为高、中、低和未知。平台或用户明确披露时为高置信；多个公开信息一致时为中置信；主要依靠讨论市场或语言时为低置信；无法可靠判断时保留未知。中国大陆、香港、澳门和台湾分别统计。样本过少的地区不会被用于推断整个市场的态度。</p></section>
+      <section className="surface" id="guide-review"><span>08</span><h3>人工标注、采集复核与团队共享</h3><p>用户可以修改评论的情绪、具体情绪、议题和事件归类。系统同时保留模型原始判断和人工结果，人工结果始终优先。重新采集、重新分析或升级模型时，不得覆盖已完成的人工标注。人工数据可以用于校准后续模型，并记录每个版本与人工判断的差异。</p><p>评论采集任务会明确区分排队、运行、等待重试、完成和人工复核。达到最大失败次数后，系统停止自动重试，并展示实际错误和最后一次尝试时间。仍有希望恢复的任务会显示下次重试时间。有效且公开可访问的Instagram帖子优先处理，避免无效地址长期占用队列。</p><p>同一团队工作区中的成员共享品牌配置、档案、事件、标注、分析和报告，无需重新建立监测流程。管理员负责成员和接口配置，编辑者可以维护数据与标注，查看者只能查看和导出结果。</p></section>
+    </div>
+  </article>;
 }
 
 function CoverageView({ connectors, sources, submit, canManage }: { connectors: Connector[]; sources: MediaSource[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean }) {
@@ -800,15 +836,15 @@ function SettingsView({ brand, connectors, entities, workspace, submit }: { bran
   const officialSocialConfigured = connectors.some((item) => ["Meta / Instagram", "TikTok"].includes(item.provider ?? "") && item.configured);
   async function handleEntitySubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; await submit({ action: "addEntity", ...Object.fromEntries(new FormData(form).entries()) }, "监测词已加入团队词典"); form.reset(); }
   async function removeEntity(item: Entity) { if (!window.confirm(`确认删除词条“${item.value}”？`)) return; await submit({ action: "deleteEntity", id: item.id }, "词条已从团队词典删除"); }
-  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "定位规则已更新；排除词已同步应用到档案、分析和评论舆情"); }
+  async function handleBrandSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await submit({ action: "saveBrandProfile", ...Object.fromEntries(new FormData(event.currentTarget).entries()) }, "定位规则已更新；排除词已同步应用到档案、内容舆情和受众舆情"); }
   return <div className="settings-page">
     <TeamWorkspacePanel workspace={workspace} submit={submit} />
     <div className="settings-grid">
       <section className="surface settings-main"><div className="section-head"><div><p className="eyebrow">BRAND PROFILE</p><h3>团队品牌监测档案与同名消歧</h3></div><span className="permission-chip">{workspace.canManage ? "管理员可编辑" : "仅管理员可修改"}</span></div><form className="brand-settings-form" onSubmit={handleBrandSubmit}><label className="field"><span>品牌名称</span><input disabled={!workspace.canManage} name="brandName" required defaultValue={brand.name} /></label><label className="field"><span>官网域名</span><input disabled={!workspace.canManage} name="website" defaultValue={brand.website} placeholder="brand.com" /></label><label className="field full"><span>品牌别名（每行一个）</span><textarea disabled={!workspace.canManage} name="aliases" rows={3} defaultValue={brand.aliases} /></label><label className="field"><span>匹配模式</span><select disabled={!workspace.canManage} name="matchMode" defaultValue={brand.match_mode || "precise"}><option value="precise">精准：品牌词 + 身份锚点</option><option value="balanced">平衡：长品牌名可单独命中</option><option value="broad">宽泛：仅品牌词即可</option></select></label><label className="field"><span>官方社媒账号</span><textarea disabled={!workspace.canManage} name="officialAccounts" rows={3} defaultValue={brand.official_accounts} placeholder={'每行一个，例如：@brand_official'} /></label><label className="field full"><span>身份锚点</span><textarea disabled={!workspace.canManage} name="scopeTerms" rows={4} defaultValue={brand.scope_terms} placeholder={'每行一个：产品名、创始人、核心技术、独特口号、行业定位'} /><small>精准模式下，候选内容必须同时出现品牌名/别名和至少一个锚点；官网或官方账号内容直接通过。</small></label><label className="field full"><span>排除词</span><textarea disabled={!workspace.canManage} name="excludeTerms" rows={3} defaultValue={brand.exclude_terms} placeholder={'每行一个：同名公司的行业、产品、城市或人名'} /></label>{workspace.canManage && <button className="secondary-button">保存定位规则</button>}</form><p className="form-warning">这套定位规则、历史档案、事件、传播链路和分析结果由整个团队共同使用。</p>
-        <p className="form-warning exclusion-note">排除词保存后会立即从新闻档案、事件与舆情分析、评论舆情和导出报告中隐藏匹配结果；删除排除词后可恢复显示，原始档案不会被永久删除。</p>
+        <p className="form-warning exclusion-note">排除词保存后会立即从新闻档案、事件、内容舆情、受众舆情和导出报告中隐藏匹配结果；删除排除词后可恢复显示，原始档案不会被永久删除。</p>
         <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => { const core = ["品牌", "别名", "官网域名"].includes(item.type); return <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i>{workspace.canEdit && (core ? <em title="请在上方品牌档案中修改">档案管理</em> : <button type="button" onClick={() => void removeEntity(item)} aria-label={`删除词条 ${item.value}`}>删除</button>)}</div>; })}</div>
       </section>
-      <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索五个平台" : "由管理员在来源覆盖页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
+      <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索五个平台" : "由管理员在数据采集页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
     </div>
   </div>;
 }

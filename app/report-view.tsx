@@ -223,11 +223,11 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
   return <div className="report-center">
     <section className="surface report-builder">
-      <div><p className="eyebrow">AUTOMATED REPORTING</p><h2>自动舆情分析报告</h2><p>系统按当前共享工作区的真实档案自动生成管理摘要、渠道、地区、情绪、事件传播、评论舆情与证据附录。</p></div>
+      <div><p className="eyebrow">AUTOMATED REPORTING</p><h2>自动舆情分析报告</h2><p>系统按当前共享工作区的真实档案自动生成管理摘要、渠道、地区、情绪、事件传播、受众舆情与证据附录。</p></div>
       <div className="report-controls">
         <label><span>报告名称</span><input value={title} onChange={(event) => setTitle(event.target.value.slice(0, 50))} /></label>
         <label><span>统计周期</span><select value={range} onChange={(event) => setRange(event.target.value)}><option value="7">过去 7 天</option><option value="30">过去 30 天</option><option value="all">全部历史</option></select></label>
-        <div className="report-options"><label><input type="checkbox" checked={includeEvents} onChange={(event) => setIncludeEvents(event.target.checked)} /> 事件与传播</label><label><input type="checkbox" checked={includeComments} onChange={(event) => setIncludeComments(event.target.checked)} /> 评论舆情</label><label><input type="checkbox" checked={includeAppendix} onChange={(event) => setIncludeAppendix(event.target.checked)} /> 证据附录</label></div>
+        <div className="report-options"><label><input type="checkbox" checked={includeEvents} onChange={(event) => setIncludeEvents(event.target.checked)} /> 事件与传播</label><label><input type="checkbox" checked={includeComments} onChange={(event) => setIncludeComments(event.target.checked)} /> 受众舆情</label><label><input type="checkbox" checked={includeAppendix} onChange={(event) => setIncludeAppendix(event.target.checked)} /> 证据附录</label></div>
         <button className="primary-button" disabled={exporting || commentsLoading} onClick={() => void exportPdf()}>{exporting ? "正在生成 PDF…" : commentsLoading ? "正在汇总评论…" : `导出 PDF · ${reportPages} 页`}</button>
       </div>
       {exportError && <p className="report-export-error">{exportError}</p>}
@@ -281,7 +281,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       </section>}
 
       {includeComments && <section className="report-sheet">
-        <ReportHeader section="06 / 评论舆情" brand={brand.name} period={period} />
+        <ReportHeader section="06 / 受众舆情" brand={brand.name} period={period} />
         <div className="report-page-body"><div className="report-title-row"><div><p>COMMENT INTELLIGENCE</p><h2>受众反馈、核心议题与风险评论</h2></div><span>仅统计实际取得的公开评论文本</span></div>
           <div className="report-kpi-grid comments"><ReportKpi label="已分析评论" value={commentTotal.toLocaleString()} note={`${comments.summary.authors} 位公开参与者`} /><ReportKpi label="净情绪指数" value={`${commentNet > 0 ? "+" : ""}${commentNet}`} note="正面占比减负面占比" accent={commentNet < -15} /><ReportKpi label="负面评论" value={`${pct(comments.summary.negative, commentTotal)}%`} note={`${comments.summary.negative} 条`} accent={comments.summary.negative > commentTotal * .2} /><ReportKpi label="评论互动" value={(comments.summary.likes + comments.summary.replies).toLocaleString()} note="获赞与回复合计" /><ReportKpi label="采集覆盖" value={`${comments.summary.coverage}%`} note="已归档 / 平台披露" /></div>
           {commentTotal ? <div className="report-comments-layout"><section><h3>核心讨论议题</h3><BarRows items={comments.topics.slice(0, 8).map((item) => ({ label: item.topic, value: item.count, note: `${item.negative ? pct(item.negative, item.count) : 0}% 负面` }))} max={Math.max(1, ...comments.topics.map((item) => item.count))} /></section><section><h3>评论高频词</h3><div className="report-word-cloud compact">{comments.words.slice(0, 25).map((item, index) => <span key={item.word} className={index < 5 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, comments.words[0]?.count ?? 1) * 18}px` }}>{item.word}<sup>{item.count}</sup></span>)}</div></section><section className="report-risk-comments"><h3>优先复核评论</h3>{comments.riskComments.slice(0, 4).map((item) => <article key={item.id}><header><span>{item.sentiment} · {item.emotion}</span><b>{item.platform} · {item.likes} 赞</b></header><p>{item.content}</p><small>{item.author_username ? `@${item.author_username}` : "公开账号"} · {item.post_title}</small></article>)}</section></div> : <div className="report-empty"><strong>本期没有可用于分析的公开评论文本</strong><span>平台显示的评论总数不会被冒充为已分析样本；连接器取得正文后，报告会自动补充情绪、议题、词频和风险评论。</span></div>}

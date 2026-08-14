@@ -37,6 +37,7 @@ const SOCIAL_SEARCHES = {
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
 const COMMENT_JOBS_PER_CYCLE = 2;
+const MAX_COMMENT_FAILURES = 5;
 
 function pathValue(value: unknown, path: string) {
   return path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as JsonObject)[key] : undefined, value);
@@ -689,26 +690,35 @@ async function markCommentJobError(db: D1Database, brandId: number, job: MonidJo
   const now = new Date().toISOString();
   if (job.stage === "resolve_post" || job.stage === "post_comments") {
     if (job.stage === "post_comments" && descriptor.platform === "Instagram" && descriptor.commentAdapter === "v2" && status !== "blocked") {
-      await db.prepare(`UPDATE social_comment_targets SET adapter = 'v1', cursor = '', top_level_complete = 0, status = 'queued',
-        v2_failures = v2_failures + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
-        .bind(`TikHub V2 主评论失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId).run();
+      await db.prepare(`UPDATE social_comment_targets SET adapter = 'v1', cursor = '', top_level_complete = 0,
+        status = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN 'review' ELSE 'queued' END,
+        v2_failures = v2_failures + 1,
+        last_error = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN ? ELSE ? END,
+        updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+        .bind(MAX_COMMENT_FAILURES, MAX_COMMENT_FAILURES, `达到 ${MAX_COMMENT_FAILURES} 次失败上限：${message}`, `TikHub V2 主评论失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId).run();
     } else {
-      await db.prepare(`UPDATE social_comment_targets SET status = ?,
-        v1_failures = v1_failures + CASE WHEN platform = 'Instagram' AND adapter = 'v1' THEN 1 ELSE 0 END,
-        last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
-        .bind(status, message, now, brandId, descriptor.mentionId).run();
+      await db.prepare(`UPDATE social_comment_targets SET
+        status = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN 'review' ELSE ? END,
+        v1_failures = v1_failures + 1,
+        last_error = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN ? ELSE ? END,
+        updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+        .bind(MAX_COMMENT_FAILURES, status, MAX_COMMENT_FAILURES, `达到 ${MAX_COMMENT_FAILURES} 次失败上限：${message}`, message, now, brandId, descriptor.mentionId).run();
     }
   } else {
     if (descriptor.replyAdapter === "v2" && status !== "blocked") {
-      await db.prepare(`UPDATE social_comment_reply_queue SET adapter = 'v1', cursor = '', status = 'queued',
-        v2_failures = v2_failures + 1, last_error = ?, updated_at = ?
+      await db.prepare(`UPDATE social_comment_reply_queue SET adapter = 'v1', cursor = '',
+        status = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN 'review' ELSE 'queued' END,
+        v2_failures = v2_failures + 1,
+        last_error = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN ? ELSE ? END, updated_at = ?
         WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
-        .bind(`TikHub V2 失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+        .bind(MAX_COMMENT_FAILURES, MAX_COMMENT_FAILURES, `达到 ${MAX_COMMENT_FAILURES} 次失败上限：${message}`, `TikHub V2 失败（${message}）；已自动切换 V1`, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
     } else {
-      await db.prepare(`UPDATE social_comment_reply_queue SET status = ?,
-        v1_failures = v1_failures + CASE WHEN adapter = 'v1' THEN 1 ELSE 0 END, last_error = ?, updated_at = ?
+      await db.prepare(`UPDATE social_comment_reply_queue SET
+        status = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN 'review' ELSE ? END,
+        v1_failures = v1_failures + 1,
+        last_error = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN ? ELSE ? END, updated_at = ?
         WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?`)
-        .bind(status, message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
+        .bind(MAX_COMMENT_FAILURES, status, MAX_COMMENT_FAILURES, `达到 ${MAX_COMMENT_FAILURES} 次失败上限：${message}`, message, now, brandId, descriptor.mentionId, descriptor.commentId ?? "").run();
     }
   }
 }
@@ -754,16 +764,24 @@ export async function queueInstagramCommentTarget(db: D1Database, brandId: numbe
 }
 
 async function registerHistoricalCommentTargets(db: D1Database, brandId: number) {
+  await db.prepare(`UPDATE social_comment_targets SET status = 'review',
+    last_error = CASE WHEN last_error LIKE '达到 %失败上限:%' THEN last_error ELSE '达到 5 次失败上限：' || COALESCE(NULLIF(last_error, ''), '接口未返回可用评论') END,
+    updated_at = CURRENT_TIMESTAMP WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying','error','empty','unavailable','not_returned')
+      AND v2_failures + v1_failures >= ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
+  await db.prepare(`UPDATE social_comment_reply_queue SET status = 'review',
+    last_error = CASE WHEN last_error LIKE '达到 %失败上限:%' THEN last_error ELSE '达到 5 次失败上限：' || COALESCE(NULLIF(last_error, ''), '接口未返回可用回复') END,
+    updated_at = CURRENT_TIMESTAMP WHERE brand_id = ? AND status IN ('queued','running','retrying','error')
+      AND v2_failures + v1_failures >= ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
   await db.prepare(`UPDATE social_comment_targets SET status = 'retrying',
     last_error = CASE WHEN last_error = '' THEN '旧版采集失败，已进入新版退避重试队列' ELSE last_error END,
-    updated_at = datetime('now', '-31 minutes') WHERE brand_id = ? AND status = 'error'`).bind(brandId).run();
+    updated_at = datetime('now', '-31 minutes') WHERE brand_id = ? AND status = 'error' AND v2_failures + v1_failures < ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
   await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
     media_id = CASE WHEN platform = 'Instagram' THEN post_url ELSE media_id END,
     last_error = '旧状态结论已撤销；正在通过指定帖子 URL 重新识别并采集', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND status IN ('empty','unavailable')`).bind(brandId).run();
+    WHERE brand_id = ? AND status IN ('empty','unavailable') AND v2_failures + v1_failures < ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
   await db.prepare(`UPDATE social_comment_targets SET status = 'queued', top_level_complete = 0, adapter = 'v2', cursor = '',
     last_error = '旧版待核验状态已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND status = 'not_returned' AND datetime(updated_at) <= datetime('now', '-6 hours')`).bind(brandId).run();
+    WHERE brand_id = ? AND status = 'not_returned' AND v2_failures + v1_failures < ? AND datetime(updated_at) <= datetime('now', '-6 hours')`).bind(brandId, MAX_COMMENT_FAILURES).run();
   await db.prepare(`UPDATE social_comment_reply_queue SET status = 'queued', adapter = 'v2', cursor = '',
     last_error = '旧回复队列已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
     WHERE brand_id = ? AND status = 'complete' AND reported_count > collected_count AND v2_failures = 0`).bind(brandId).run();
@@ -788,7 +806,11 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying') AND target.top_level_complete = 0
       AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage IN ('resolve_post','post_comments') AND job.status IN (${PENDING_SQL}))
-    ORDER BY target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
+    ORDER BY CASE
+      WHEN target.platform = 'Instagram' AND target.reported_count > target.collected_count AND target.reported_count > 0 THEN 0
+      WHEN target.platform = 'Instagram' AND (target.media_id GLOB '[0-9]*' OR target.post_url LIKE '%instagram.com/%') THEN 1
+      WHEN target.platform = 'Instagram' THEN 2 ELSE 3 END,
+      (target.v2_failures + target.v1_failures) ASC, target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
   for (const target of targets.results) {
     const commentAdapter = target.adapter === "v1" ? "v1" : "v2";
     const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url,

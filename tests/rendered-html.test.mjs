@@ -58,12 +58,13 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
 
 test("every sidebar feature has a durable URL with refresh and browser history support", async () => {
   const page = await source("app/page.tsx");
-  const routeFiles = await Promise.all(["overview", "archive", "propagation", "analytics", "comments", "coverage", "reports", "settings"]
+  const routeFiles = await Promise.all(["overview", "archive", "propagation", "analytics", "comments", "coverage", "reports", "settings", "guide"]
     .map((route) => source(`app/${route}/page.tsx`)));
   assert.match(page, /overview: "\/overview"/);
   assert.match(page, /archive: "\/archive"/);
   assert.match(page, /propagation: "\/propagation"/);
   assert.match(page, /comments: "\/comments"/);
+  assert.match(page, /guide: "\/guide"/);
   assert.match(page, /settings: "\/settings"/);
   assert.match(page, /window\.history\[replace \? "replaceState" : "pushState"\]/);
   assert.match(page, /window\.addEventListener\("popstate", syncRoute\)/);
@@ -183,7 +184,7 @@ test("Monid searches five social platforms and archives public comments and repl
   assert.match(commentsRoute, /riskComments/);
   assert.match(page, /评论舆情/);
   assert.match(page, /评论明细档案/);
-  assert.match(page, /帖子评论抓取进度/);
+  assert.match(page, /帖子评论采集状态/);
   assert.match(page, /comment-card-grid/);
   assert.match(page, /关键词搜帖/);
   assert.match(page, /归档帖子 URL/);
@@ -191,6 +192,16 @@ test("Monid searches five social platforms and archives public comments and repl
   assert.match(page, /内部语义分析/);
   assert.doesNotMatch(page, /empty: "无公开评论"|unavailable: "平台未开放"/);
   assert.doesNotMatch(page, /ACTIVE AUTHORS|高活跃参与者/);
+  assert.match(page, /内容舆情/);
+  assert.match(page, /受众舆情/);
+  assert.match(page, /数据采集/);
+  assert.match(page, /产品使用说明/);
+  assert.match(page, /互动共鸣/);
+  assert.match(page, /国家 \/ 地区接受情况/);
+  assert.match(monid, /MAX_COMMENT_FAILURES = 5/);
+  assert.match(monid, /status = 'review'/);
+  assert.match(commentsRoute, /resonance_weight/);
+  assert.match(commentsRoute, /audience_region/);
 });
 
 test("collected posts and comments receive persisted English translations", async () => {
@@ -329,7 +340,7 @@ test("Instagram comments and replies use TikHub V2 with V1 fallback and independ
   assert.match(monid, /adapter = 'v1'/);
   assert.match(schema, /v2Failures/);
   assert.match(schema, /v1Failures/);
-  assert.match(page, /V2\/V1 失败/);
+  assert.match(page, /失败 \{target\.failure_count/);
 });
 
 test("worker runs the hybrid monitor hourly", async () => {

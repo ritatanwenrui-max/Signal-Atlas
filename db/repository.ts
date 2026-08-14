@@ -516,9 +516,15 @@ export async function loadDashboardData(userId = "") {
       .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
     db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN ('CREATED','QUEUED','PENDING','READY','RUNNING')) +
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count,
       (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS count`)
-      .bind(brandId, brandId, brandId).first<{ count: number }>(),
+      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS active_count,
+      (SELECT MIN(retry_at) FROM (
+        SELECT datetime(updated_at, '+30 minutes') AS retry_at FROM social_comment_targets WHERE brand_id = ? AND status = 'retrying'
+        UNION ALL SELECT datetime(updated_at, '+30 minutes') FROM social_comment_reply_queue WHERE brand_id = ? AND status = 'retrying'
+      )) AS next_retry_at`)
+      .bind(brandId, brandId, brandId, brandId, brandId, brandId, brandId).first<{ count: number; active_count: number; next_retry_at: string }>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -539,6 +545,8 @@ export async function loadDashboardData(userId = "") {
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
   const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
+  const monidActive = Number(monidQueueStats?.active_count ?? 0);
+  const monidRetryAt = monidHealth?.retry_after || (!monidActive ? monidQueueStats?.next_retry_at ?? "" : "");
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
@@ -683,10 +691,10 @@ export async function loadDashboardData(userId = "") {
       { id: "monid-vault", provider: "Monid / Instagram", configurable: true, configured: monidConfigured,
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
-        pending: monidPending, retryAt: monidHealth?.retry_after ?? "", lastError: monidHealth?.last_error ?? "",
+        pending: monidPending, retryAt: monidRetryAt, lastError: monidHealth?.last_error ?? "",
         detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook 搜索与公开评论采集"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
-          : monidPending ? `${monidPending} 个多平台采集步骤处理中` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
+          : monidPending ? `${monidPending} 个多平台采集步骤处理中${monidRetryAt && !monidActive ? ` · ${new Date(monidRetryAt).toLocaleString("zh-CN")} 继续重试` : ""}` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
       ...(["Instagram", "X", "YouTube", "TikTok", "Facebook"] as const).map((platform) => ({
         id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
         status: (!monidConfigured ? "credentials" : monidLimited ? "limited" : "online") as "credentials" | "limited" | "online",
