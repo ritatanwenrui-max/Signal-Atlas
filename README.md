@@ -2,6 +2,10 @@
 
 Signal Atlas 是一个面向品牌团队的全球新闻与社交媒体舆情监测工具。仓库保存的是完整全栈源码，不是静态网页导出。
 
+## 在线使用
+
+**[点击打开 Signal Atlas 在线网站](https://signal-atlas-intelligence.rita-tanwenrui.chatgpt.site/)**
+
 当前版本包括：
 
 - 全球网页新闻发现、免费媒体源持续追踪和手动补录
