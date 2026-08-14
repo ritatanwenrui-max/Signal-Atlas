@@ -19,17 +19,17 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
   return {
-    title: "Signal Atlas · 全球舆情雷达",
+    title: "Somnia Lab · GLOBAL MEDIA INTELLIGENCE",
     description: "全球品牌新闻自动发现、长期归档、传播溯源与舆情分析平台。",
     metadataBase: new URL(origin),
     openGraph: {
-      title: "Signal Atlas · 全球舆情雷达",
+      title: "Somnia Lab · GLOBAL MEDIA INTELLIGENCE",
       description: "少量全球发现、免费媒体持续追踪、新闻长期归档、传播链路与情绪分析。",
       images: [`${origin}/og-v2.png`],
     },
     twitter: {
       card: "summary_large_image",
-      title: "Signal Atlas · 全球舆情雷达",
+      title: "Somnia Lab · GLOBAL MEDIA INTELLIGENCE",
       description: "少量全球发现、免费媒体持续追踪、新闻长期归档、传播链路与情绪分析。",
       images: [`${origin}/og-v2.png`],
     },

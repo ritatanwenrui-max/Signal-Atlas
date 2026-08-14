@@ -182,7 +182,7 @@ export default function Home() {
 
   useEffect(() => {
     const label = nav.find(([id]) => id === view)?.[1] ?? "品牌舆情监测";
-    document.title = `${label} · Signal Atlas`;
+    document.title = `${label} · Somnia Lab`;
   }, [view]);
 
   async function syncNews(force = false, announce = false) {
@@ -284,7 +284,7 @@ export default function Home() {
 
   return <main className="app-shell">
     <aside className="sidebar">
-      <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><strong>SIGNAL ATLAS</strong><small>GLOBAL MEDIA INTELLIGENCE</small></div></div>
+      <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><strong>Somnia Lab</strong><small>GLOBAL MEDIA INTELLIGENCE</small></div></div>
       <nav aria-label="主要导航">{nav.map(([id, label, number]) => <a key={id} href={routeByView[id]} aria-current={view === id ? "page" : undefined} className={view === id ? "nav-item active" : "nav-item"} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigateTo(id); }}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</a>)}</nav>
       {data.viewer.authenticated && <div className="system-card">
         <div className="system-title"><i /> 混合监测已运行</div>

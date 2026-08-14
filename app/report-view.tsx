@@ -73,7 +73,7 @@ function keywordEntries(value: string) {
 }
 
 function ReportHeader({ section, brand, period }: { section: string; brand: string; period: string }) {
-  return <header className="report-page-header"><div><b>SIGNAL ATLAS</b><span>MEDIA INTELLIGENCE REPORT</span></div><div><strong>{section}</strong><span>{brand} · {period}</span></div></header>;
+  return <header className="report-page-header"><div><b>Somnia Lab</b><span>GLOBAL MEDIA INTELLIGENCE</span></div><div><strong>{section}</strong><span>{brand} · {period}</span></div></header>;
 }
 
 function ReportFooter({ page, generatedAt }: { page: number; generatedAt: string }) {
@@ -373,7 +373,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
     <div className="report-print-source" aria-hidden="true"><div className="report-document" ref={reportRef}>
       <section className="report-sheet report-cover">
-        <div className="report-cover-mark"><span /><span /><span /></div><div className="report-cover-copy"><p>SIGNAL ATLAS / MEDIA INTELLIGENCE</p><h1>{title || "品牌舆情数据分析报告"}</h1><h2>{brand.name}</h2><div className="report-cover-period"><span>{period}</span><b>{scopedMentions.length ? `${shortDate(scopedMentions.at(-1)?.published_at ?? "")} — ${shortDate(scopedMentions[0]?.published_at ?? "")}` : "等待数据"}</b></div><div className="report-cover-scope">{Object.keys(platformColors).map((item) => <span key={item}><i style={{ background: platformColors[item] }} />{item}</span>)}</div></div>
+        <div className="report-cover-mark"><span /><span /><span /></div><div className="report-cover-copy"><p>Somnia Lab / GLOBAL MEDIA INTELLIGENCE</p><h1>{title || "品牌舆情数据分析报告"}</h1><h2>{brand.name}</h2><div className="report-cover-period"><span>{period}</span><b>{scopedMentions.length ? `${shortDate(scopedMentions.at(-1)?.published_at ?? "")} — ${shortDate(scopedMentions[0]?.published_at ?? "")}` : "等待数据"}</b></div><div className="report-cover-scope">{Object.keys(platformColors).map((item) => <span key={item}><i style={{ background: platformColors[item] }} />{item}</span>)}</div></div>
         <div className="report-cover-meta"><div><span>WORKSPACE</span><strong>{workspaceName}</strong></div><div><span>GENERATED</span><strong>{generatedAt}</strong></div><div><span>DATA POLICY</span><strong>仅使用已归档与已实际采集数据</strong></div></div>
       </section>
 

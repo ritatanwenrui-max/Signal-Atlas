@@ -53,7 +53,8 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /social_follower_count/);
   assert.match(page, /Monid.*五个平台|Monid.*Instagram/);
   assert.match(page, /60 \* 60 \* 1000/);
-  assert.doesNotMatch(page, /Somnia|硅姬|矽姬/);
+  assert.match(page, /<strong>Somnia Lab<\/strong><small>GLOBAL MEDIA INTELLIGENCE<\/small>/);
+  assert.doesNotMatch(page, /硅姬|矽姬/);
 });
 
 test("every sidebar feature has a durable URL with refresh and browser history support", async () => {
