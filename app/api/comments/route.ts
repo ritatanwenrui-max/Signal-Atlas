@@ -134,7 +134,7 @@ export async function GET(request: Request) {
   const page = integerParam(url.searchParams.get("page"), 1, 1, 10_000);
   const pageSize = 40;
   const range = ["1", "7", "30", "0"].includes(url.searchParams.get("range") ?? "") ? url.searchParams.get("range")! : "30";
-  const sentiment = ["正面", "中性", "负面", "混合"].includes(url.searchParams.get("sentiment") ?? "") ? url.searchParams.get("sentiment")! : "";
+  const sentiment = ["正面", "中性", "负面", "混合", "无实意"].includes(url.searchParams.get("sentiment") ?? "") ? url.searchParams.get("sentiment")! : "";
   const platform = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
   const region = (url.searchParams.get("region") ?? "").trim().slice(0, 80);
   const sort = ["newest", "liked", "risk"].includes(url.searchParams.get("sort") ?? "") ? url.searchParams.get("sort")! : "newest";
@@ -151,6 +151,7 @@ export async function GET(request: Request) {
   if (annotation === "unlabeled") clauses.push("NOT EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id)");
   if (annotation === "labeled") clauses.push("EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id)");
   if (annotation === "disagreed") clauses.push(`EXISTS (SELECT 1 FROM comment_annotations annotation WHERE annotation.comment_id = c.id
+    AND annotation.manual_sentiment != '无实意'
     AND (annotation.model_sentiment != annotation.manual_sentiment OR annotation.model_emotion != annotation.manual_emotion))`);
   if (query) {
     clauses.push("(c.content LIKE ? OR c.author_username LIKE ? OR c.author_name LIKE ? OR m.title LIKE ?)");
@@ -167,6 +168,7 @@ export async function GET(request: Request) {
   const regionalBinds = [...binds];
   if (region) { clauses.push(`${audienceRegionSql} = ?`); binds.push(region); }
   const where = clauses.join(" AND ");
+  const analysisWhere = `${where} AND c.sentiment != '无实意'`;
   const mentionOnlyClauses = exclusions.map(() => `(${mentionText}) NOT LIKE ? ESCAPE '\\'`);
   const mentionOnlyWhere = mentionOnlyClauses.length ? ` AND ${mentionOnlyClauses.join(" AND ")}` : "";
   const mentionOnlyBinds = exclusions.map((term) => `%${escapedLikeTerm(term)}%`);
@@ -178,7 +180,9 @@ export async function GET(request: Request) {
       SUM(CASE WHEN c.sentiment = '中性' THEN 1 ELSE 0 END) AS neutral,
       SUM(CASE WHEN c.sentiment = '负面' THEN 1 ELSE 0 END) AS negative,
       SUM(CASE WHEN c.sentiment = '混合' THEN 1 ELSE 0 END) AS mixed,
-      COALESCE(ROUND(AVG(c.sentiment_score)), 0) AS average_score
+      SUM(CASE WHEN c.sentiment = '无实意' THEN 1 ELSE 0 END) AS meaningless,
+      SUM(CASE WHEN c.sentiment != '无实意' THEN 1 ELSE 0 END) AS meaningful_total,
+      COALESCE(ROUND(AVG(CASE WHEN c.sentiment != '无实意' THEN c.sentiment_score END)), 0) AS average_score
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}`;
   const commentsSql = `SELECT c.*, m.title AS post_title, m.url AS post_url, m.source AS post_source,
       ${audienceRegionSql} AS audience_region, ${regionConfidenceSql} AS region_confidence, ${regionBasisSql} AS region_basis,
@@ -195,15 +199,15 @@ export async function GET(request: Request) {
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}
     GROUP BY c.mention_id, m.title, m.url, m.source ORDER BY comments DESC, likes DESC LIMIT 8`;
   const keywordSql = `SELECT c.keywords FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-    WHERE ${where} ORDER BY c.id DESC LIMIT 5000`;
+    WHERE ${analysisWhere} ORDER BY c.id DESC LIMIT 5000`;
   const analysisRowsSql = `SELECT c.id, c.platform, c.likes, c.replies, c.sentiment, c.emotion, c.topic, c.language,
       c.content, c.published_at, m.title AS post_title, ${audienceRegionSql} AS audience_region,
       ${regionConfidenceSql} AS region_confidence, ${regionBasisSql} AS region_basis
-    FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}
+    FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${analysisWhere}
     ORDER BY c.id DESC LIMIT 10000`;
   const regionalRowsSql = `SELECT c.id, c.platform, c.likes, c.replies, c.sentiment, c.topic,
       ${audienceRegionSql} AS audience_region, ${regionConfidenceSql} AS region_confidence, ${regionBasisSql} AS region_basis
-    FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${regionalWhere}
+    FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${regionalWhere} AND c.sentiment != '无实意'
     ORDER BY c.id DESC LIMIT 10000`;
 
   const [summary, comments, topPosts, keywordRows, analysisRows, regionalRows, targets, targetTotals, riskComments, calibration] = await Promise.all([
@@ -384,6 +388,8 @@ export async function GET(request: Request) {
     neutral: Number(summary?.neutral ?? 0),
     negative: Number(summary?.negative ?? 0),
     mixed: Number(summary?.mixed ?? 0),
+    meaningless: Number(summary?.meaningless ?? 0),
+    meaningful_total: Number(summary?.meaningful_total ?? 0),
     average_score: Number(summary?.average_score ?? 0),
     weighted_positive: Number(weightedSentiment["正面"] ?? 0),
     weighted_neutral: Number(weightedSentiment["中性"] ?? 0),

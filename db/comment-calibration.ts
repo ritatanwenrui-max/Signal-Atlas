@@ -1,5 +1,7 @@
 import { analyzeCommentText, meaningfulTokens, type CommentTone, type DetailedEmotion } from "./text-analysis";
 
+export type ManualCommentTone = CommentTone | "无实意";
+
 export type CalibrationRule = {
   token: string;
   sentiment: CommentTone;
@@ -13,13 +15,13 @@ type AnnotationSample = {
   content: string;
   model_sentiment: string;
   model_emotion: string;
-  manual_sentiment: CommentTone;
+  manual_sentiment: ManualCommentTone;
   manual_emotion: DetailedEmotion;
 };
 
-const scoreForTone: Record<CommentTone, number> = { 正面: 75, 中性: 0, 负面: -75, 混合: 0 };
+const scoreForTone: Record<ManualCommentTone, number> = { 正面: 75, 中性: 0, 负面: -75, 混合: 0, 无实意: 0 };
 
-export function manualToneScore(tone: CommentTone) {
+export function manualToneScore(tone: ManualCommentTone) {
   return scoreForTone[tone];
 }
 
@@ -65,27 +67,32 @@ export async function getCommentCalibrationStats(db: D1Database, brandId: number
   const [totals, confusion, emotionConfusion, rules, recent] = await Promise.all([
     db.prepare(`SELECT (SELECT COUNT(*) FROM mention_comments WHERE brand_id = ?) AS total,
       COUNT(*) AS labeled,
-      SUM(CASE WHEN model_sentiment = manual_sentiment THEN 1 ELSE 0 END) AS sentiment_correct,
-      SUM(CASE WHEN model_emotion = manual_emotion THEN 1 ELSE 0 END) AS emotion_correct,
-      SUM(CASE WHEN model_sentiment != manual_sentiment OR model_emotion != manual_emotion THEN 1 ELSE 0 END) AS disagreements
+      SUM(CASE WHEN manual_sentiment = '无实意' THEN 1 ELSE 0 END) AS meaningless,
+      SUM(CASE WHEN manual_sentiment != '无实意' AND model_sentiment = manual_sentiment THEN 1 ELSE 0 END) AS sentiment_correct,
+      SUM(CASE WHEN manual_sentiment != '无实意' AND model_emotion = manual_emotion THEN 1 ELSE 0 END) AS emotion_correct,
+      SUM(CASE WHEN manual_sentiment != '无实意' AND (model_sentiment != manual_sentiment OR model_emotion != manual_emotion) THEN 1 ELSE 0 END) AS disagreements
       FROM comment_annotations WHERE brand_id = ?`).bind(brandId, brandId).first<Record<string, number>>(),
     db.prepare(`SELECT model_sentiment AS model, manual_sentiment AS human, COUNT(*) AS count
-      FROM comment_annotations WHERE brand_id = ? GROUP BY model_sentiment, manual_sentiment ORDER BY count DESC`).bind(brandId).all<Record<string, unknown>>(),
+      FROM comment_annotations WHERE brand_id = ? AND manual_sentiment != '无实意'
+      GROUP BY model_sentiment, manual_sentiment ORDER BY count DESC`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT model_emotion AS model, manual_emotion AS human, COUNT(*) AS count
-      FROM comment_annotations WHERE brand_id = ? AND model_emotion != manual_emotion
+      FROM comment_annotations WHERE brand_id = ? AND manual_sentiment != '无实意' AND model_emotion != manual_emotion
       GROUP BY model_emotion, manual_emotion ORDER BY count DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare("SELECT COUNT(*) AS count FROM sentiment_calibration_rules WHERE brand_id = ?").bind(brandId).first<{ count: number }>(),
     db.prepare("SELECT MAX(updated_at) AS updated_at FROM comment_annotations WHERE brand_id = ?").bind(brandId).first<{ updated_at: string }>(),
   ]);
   const labeled = Number(totals?.labeled ?? 0);
   const total = Number(totals?.total ?? 0);
+  const meaningless = Number(totals?.meaningless ?? 0);
+  const meaningfulLabeled = Math.max(0, labeled - meaningless);
   return {
     total,
     labeled,
     remaining: Math.max(0, total - labeled),
     progress: total ? Math.round(labeled / total * 100) : 0,
-    sentimentAccuracy: labeled ? Math.round(Number(totals?.sentiment_correct ?? 0) / labeled * 100) : null,
-    emotionAccuracy: labeled ? Math.round(Number(totals?.emotion_correct ?? 0) / labeled * 100) : null,
+    meaningless,
+    sentimentAccuracy: meaningfulLabeled ? Math.round(Number(totals?.sentiment_correct ?? 0) / meaningfulLabeled * 100) : null,
+    emotionAccuracy: meaningfulLabeled ? Math.round(Number(totals?.emotion_correct ?? 0) / meaningfulLabeled * 100) : null,
     disagreements: Number(totals?.disagreements ?? 0),
     ruleCount: Number(rules?.count ?? 0),
     lastUpdated: recent?.updated_at ?? "",
@@ -106,6 +113,7 @@ export async function rebuildCommentCalibration(db: D1Database, brandId: number)
     emotions: Map<string, number>;
   }>();
   for (const sample of samples.results) {
+    if (sample.manual_sentiment === "无实意") continue;
     for (const token of new Set(meaningfulTokens(sample.content))) {
       const state = tokenStats.get(token) ?? { samples: 0, mismatches: 0, sentiments: new Map(), emotions: new Map() };
       state.samples += 1;

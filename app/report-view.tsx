@@ -19,7 +19,7 @@ type Analytics = {
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 type CommentRow = { id: number; content: string; sentiment: string; emotion: string; topic: string; likes: number; replies?: number; platform: string; author_username: string; post_title: string; audience_region?: string; region_confidence?: string };
 type CommentData = {
-  summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; coverage: number;
+  summary: { total: number; meaningful_total?: number; meaningless?: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; coverage: number;
     weighted_positive?: number; weighted_neutral?: number; weighted_negative?: number; weighted_mixed?: number; weighted_total?: number; weighted_net?: number; reported?: number; collected?: number };
   emotions: Array<{ label: string; count: number }>;
   topics: Array<{ topic: string; count: number; positive?: number; neutral?: number; negative: number; mixed?: number; likes?: number; replies?: number }>;
@@ -215,7 +215,8 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const maxEmotion = Math.max(1, ...report.emotions.map((item) => item.value));
   const maxDay = Math.max(1, ...report.timeline.map((item) => item.total));
   const topCountry = report.countries[0]; const topPlatform = report.platforms[0]; const topEvent = report.clusters[0];
-  const commentTotal = comments.summary.total;
+  const commentArchivedTotal = comments.summary.total;
+  const commentTotal = comments.summary.meaningful_total ?? comments.summary.positive + comments.summary.neutral + comments.summary.negative + comments.summary.mixed;
   const contentNegativePct = pct(report.sentiment.negative, report.total);
   const audiencePositivePct = pct(comments.summary.positive, commentTotal);
   const audienceNegativePct = pct(comments.summary.negative, commentTotal);
@@ -307,7 +308,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
       <section className="report-dashboard-kpis">
         <article><span>归档内容</span><strong>{report.total.toLocaleString()}</strong><small>{rangeDays ? `${signed(volumeChange)}% 较上一周期` : "全部历史数据"}</small></article>
-        <article><span>已分析评论</span><strong>{commentTotal.toLocaleString()}</strong><small>采集覆盖 {comments.summary.coverage}%</small></article>
+        <article><span>有效评论</span><strong>{commentTotal.toLocaleString()}</strong><small>{comments.summary.meaningless ?? 0} 条无实意已排除</small></article>
         <article><span>总互动</span><strong>{totalEngagement.toLocaleString()}</strong><small>内容互动、评论获赞与回复</small></article>
         <article className={contentNegativePct >= 25 ? "negative" : ""}><span>负面内容</span><strong>{report.total ? `${contentNegativePct}%` : "—"}</strong><small>{report.sentiment.negative} / {report.total} 条内容</small></article>
         <article className={audienceNegativePct >= 25 ? "negative" : ""}><span>负面评论</span><strong>{commentTotal ? `${audienceNegativePct}%` : "—"}</strong><small>{comments.summary.negative} / {commentTotal} 条已采集评论</small></article>
@@ -367,7 +368,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
         <p>{executiveSummary}</p><p>{interpretation}</p><p>{actionSummary}</p>
       </section>
 
-      <section className="surface report-data-quality"><div><p className="eyebrow">DATA QUALITY</p><h3>数据完整度与判断边界</h3></div><p>当前评论采集覆盖率为 <strong>{comments.summary.coverage}%</strong>。报告仅分析已经归档的内容和已经取得正文的公开评论；地区表示媒体发布地或带置信度的语言文化区推断，不等同于评论者真实国籍。传播路径属于时间、文本和来源证据共同形成的可解释推断。</p><span>{comments.summary.collected ?? commentTotal} / {comments.summary.reported ?? commentTotal} 条评论已归档</span></section>
+      <section className="surface report-data-quality"><div><p className="eyebrow">DATA QUALITY</p><h3>数据完整度与判断边界</h3></div><p>当前评论采集覆盖率为 <strong>{comments.summary.coverage}%</strong>。共归档 {commentArchivedTotal} 条评论，其中人工标记为“无实意”的 {comments.summary.meaningless ?? 0} 条仅保留在档案中，不参与情绪、议题、词频和地区态度分析。地区表示媒体发布地或带置信度的语言文化区推断，不等同于评论者真实国籍。</p><span>{comments.summary.collected ?? commentArchivedTotal} / {comments.summary.reported ?? commentArchivedTotal} 条评论已归档</span></section>
     </div>
 
     <div className="report-print-source" aria-hidden="true"><div className="report-document" ref={reportRef}>

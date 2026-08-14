@@ -318,12 +318,16 @@ test("human comment labels override model output and retrain a workspace calibra
   assert.match(page, /人工标注与模型校准/);
   assert.match(page, /仅未标注/);
   assert.match(page, /人机有分歧/);
+  assert.match(page, /无实意/);
   assert.match(route, /model_sentiment/);
   assert.match(route, /manual_sentiment/);
+  assert.match(route, /ManualCommentTone/);
   assert.match(route, /rebuildCommentCalibration/);
   assert.match(calibration, /state\.samples < 2/);
+  assert.match(calibration, /sample\.manual_sentiment === "无实意"/);
   assert.match(calibration, /applyCalibrationRules/);
   assert.match(commentsRoute, /getCommentCalibrationStats/);
+  assert.match(commentsRoute, /c\.sentiment != '无实意'/);
   assert.match(schema, /commentAnnotations/);
   assert.match(schema, /sentimentCalibrationRules/);
 });

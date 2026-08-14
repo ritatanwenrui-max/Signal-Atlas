@@ -1,13 +1,13 @@
 import { env } from "cloudflare:workers";
-import { getCommentCalibrationStats, manualToneScore, rebuildCommentCalibration } from "../../../db/comment-calibration";
+import { getCommentCalibrationStats, manualToneScore, rebuildCommentCalibration, type ManualCommentTone } from "../../../db/comment-calibration";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "../../../db/repository";
-import type { CommentTone, DetailedEmotion } from "../../../db/text-analysis";
+import type { DetailedEmotion } from "../../../db/text-analysis";
 import { prepareWorkspaceForUser } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "edge";
 
-const sentiments = new Set<CommentTone>(["正面", "中性", "负面", "混合"]);
+const sentiments = new Set<ManualCommentTone>(["正面", "中性", "负面", "混合", "无实意"]);
 const emotions = new Set<DetailedEmotion>([
   "认可赞赏", "兴奋期待", "购买意向", "好奇讨论", "轻松戏谑", "中性陈述",
   "担忧顾虑", "怀疑质疑", "失望抱怨", "愤怒抵制", "反感不适", "伦理争议",
@@ -35,10 +35,10 @@ export async function POST(request: Request) {
   const value = await context();
   if ("error" in value) return value.error;
   if (String(value.workspace?.role ?? "viewer") === "viewer") return Response.json({ error: "当前账号只有查看权限" }, { status: 403 });
-  const body = await request.json().catch(() => ({})) as { commentId?: number; sentiment?: CommentTone; emotion?: DetailedEmotion; topic?: string; note?: string };
+  const body = await request.json().catch(() => ({})) as { commentId?: number; sentiment?: ManualCommentTone; emotion?: DetailedEmotion; topic?: string; note?: string };
   const commentId = Number(body.commentId ?? 0);
-  if (!Number.isInteger(commentId) || commentId <= 0 || !sentiments.has(body.sentiment as CommentTone) || !emotions.has(body.emotion as DetailedEmotion)) {
-    return Response.json({ error: "请选择有效的评论、情绪极性与具体情绪" }, { status: 400 });
+  if (!Number.isInteger(commentId) || commentId <= 0 || !sentiments.has(body.sentiment as ManualCommentTone) || !emotions.has(body.emotion as DetailedEmotion)) {
+    return Response.json({ error: "请选择有效的评论标注与具体情绪" }, { status: 400 });
   }
   const comment = await value.db.prepare(`SELECT id, mention_id, sentiment, emotion, topic, sentiment_score
     FROM mention_comments WHERE id = ? AND brand_id = ?`).bind(commentId, value.brandId)
@@ -46,8 +46,8 @@ export async function POST(request: Request) {
   if (!comment) return Response.json({ error: "这条评论不存在或不属于当前工作区" }, { status: 404 });
   const existing = await value.db.prepare("SELECT comment_id FROM comment_annotations WHERE comment_id = ? AND brand_id = ?")
     .bind(commentId, value.brandId).first<{ comment_id: number }>();
-  const manualSentiment = body.sentiment as CommentTone;
-  const manualEmotion = body.emotion as DetailedEmotion;
+  const manualSentiment = body.sentiment as ManualCommentTone;
+  const manualEmotion = manualSentiment === "无实意" ? "中性陈述" : body.emotion as DetailedEmotion;
   const manualTopic = String(body.topic ?? "").trim().slice(0, 80);
   const note = String(body.note ?? "").trim().slice(0, 500);
   const now = new Date().toISOString();

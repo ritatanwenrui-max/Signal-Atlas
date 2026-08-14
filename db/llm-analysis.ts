@@ -276,14 +276,15 @@ async function reportContext(db: D1Database, brandId: number) {
       GROUP BY platform ORDER BY count DESC LIMIT 6`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT topics label, COUNT(*) count FROM mentions WHERE brand_id = ? AND published_at >= datetime('now', '-30 days')
       AND topics != '' GROUP BY topics ORDER BY count DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
-    db.prepare(`SELECT COUNT(*) total, SUM(sentiment = '正面') positive, SUM(sentiment = '负面') negative,
+    db.prepare(`SELECT COUNT(*) total_collected, SUM(sentiment != '无实意') meaningful_total,
+      SUM(sentiment = '无实意') meaningless, SUM(sentiment = '正面') positive, SUM(sentiment = '负面') negative,
       SUM(sentiment = '中性') neutral, SUM(sentiment = '混合') mixed, SUM(likes) likes, SUM(replies) replies,
       COUNT(DISTINCT COALESCE(NULLIF(author_id, ''), NULLIF(author_username, ''))) authors
       FROM mention_comments WHERE brand_id = ? AND (published_at = '' OR published_at >= datetime('now', '-30 days'))`).bind(brandId).first<Record<string, unknown>>(),
     db.prepare(`SELECT topic, COUNT(*) count,
       SUM(sentiment = '正面') positive, SUM(sentiment = '中性') neutral, SUM(sentiment = '负面') negative, SUM(sentiment = '混合') mixed,
       SUM(likes) likes, SUM(replies) replies
-      FROM mention_comments WHERE brand_id = ? AND (published_at = '' OR published_at >= datetime('now', '-30 days'))
+      FROM mention_comments WHERE brand_id = ? AND sentiment != '无实意' AND (published_at = '' OR published_at >= datetime('now', '-30 days'))
       GROUP BY topic ORDER BY count DESC, likes DESC LIMIT 10`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT c.content, c.sentiment, c.emotion, c.topic, c.likes, c.replies, c.platform, c.language,
       m.title post_title, m.source post_source, m.source_country,
@@ -292,7 +293,7 @@ async function reportContext(db: D1Database, brandId: number) {
         WHEN c.language = '韩语' THEN '韩语文化区' WHEN c.language = '中文' THEN '华语地区'
         WHEN c.language = '英文' THEN '英语地区' ELSE '地区未知' END audience_region
       FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      WHERE c.brand_id = ? AND c.sentiment != '无实意' AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
       ORDER BY (c.likes + c.replies * 2) DESC, c.id DESC LIMIT 15`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT CASE WHEN COALESCE(m.source_country, '') NOT IN ('', '地区待确认', '地区未披露', '全球') THEN m.source_country
         WHEN c.language = '泰语' THEN '泰语文化区' WHEN c.language = '日语' THEN '日语文化区'
@@ -301,12 +302,12 @@ async function reportContext(db: D1Database, brandId: number) {
       COUNT(*) total, SUM(c.sentiment = '正面') positive, SUM(c.sentiment = '中性') neutral,
       SUM(c.sentiment = '负面') negative, SUM(c.sentiment = '混合') mixed, SUM(c.likes) likes, SUM(c.replies) replies
       FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      WHERE c.brand_id = ? AND c.sentiment != '无实意' AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
       GROUP BY region ORDER BY total DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT m.title, m.source, m.platform, COUNT(c.id) comments, SUM(c.likes) likes,
       SUM(c.sentiment = '负面') negative, SUM(c.sentiment = '正面') positive
       FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
-      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      WHERE c.brand_id = ? AND c.sentiment != '无实意' AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
       GROUP BY m.id, m.title, m.source, m.platform ORDER BY comments DESC, likes DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) reported, COALESCE(SUM(collected_count), 0) collected,
       SUM(status IN ('review','blocked','error','unavailable')) problem_targets
@@ -325,7 +326,7 @@ async function reportContext(db: D1Database, brandId: number) {
 
 async function runReportAgent(db: D1Database, brandId: number, brand: Record<string, unknown>, apiKey: string) {
   const context = await reportContext(db, brandId);
-  if (Number(context.content?.total ?? 0) + Number(context.comments?.total ?? 0) === 0) return { generated: false, reason: "no_data" };
+  if (Number(context.content?.total ?? 0) + Number(context.audience?.summary?.meaningful_total ?? 0) === 0) return { generated: false, reason: "no_data" };
   const sourceHash = stableHash(`audience-evidence-v2|${JSON.stringify(context)}`);
   const existing = await db.prepare(`SELECT source_hash, status FROM llm_analysis_jobs WHERE brand_id = ? AND kind = 'report' AND target_id = ?`)
     .bind(brandId, brandId).first<{ source_hash: string; status: string }>();
