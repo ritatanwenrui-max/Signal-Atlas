@@ -414,3 +414,25 @@ export const socialCommentReplyQueue = sqliteTable("social_comment_reply_queue",
   primaryKey({ columns: [table.mentionId, table.parentCommentId] }),
   index("idx_social_comment_replies_brand_status").on(table.brandId, table.status, table.updatedAt),
 ]);
+
+export const llmAnalysisJobs = sqliteTable("llm_analysis_jobs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull(),
+  kind: text("kind").notNull(),
+  targetId: integer("target_id").notNull(),
+  sourceHash: text("source_hash").notNull(),
+  status: text("status").notNull().default("queued"),
+  model: text("model").notNull(),
+  triggerReason: text("trigger_reason").notNull().default(""),
+  resultJson: text("result_json").notNull().default(""),
+  confidence: integer("confidence").notNull().default(0),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  nextRetryAt: text("next_retry_at").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  completedAt: text("completed_at").notNull().default(""),
+}, (table) => [
+  uniqueIndex("idx_llm_analysis_jobs_target").on(table.brandId, table.kind, table.targetId),
+  index("idx_llm_analysis_jobs_brand_status").on(table.brandId, table.kind, table.status, table.updatedAt),
+]);

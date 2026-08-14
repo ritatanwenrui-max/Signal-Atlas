@@ -37,6 +37,7 @@ type ReportViewProps = {
   analytics: Analytics;
   clusters: StoryCluster[];
   countryCodes: Record<string, string>;
+  aiBrief?: { executive_summary?: string; content_finding?: string; audience_finding?: string; regional_finding?: string; risk_finding?: string; opportunity?: string; recommended_actions?: string[]; caveats?: string; generated_at?: string; model?: string } | null;
 };
 
 const emptyComments: CommentData = {
@@ -126,7 +127,7 @@ function ReportKpi({ label, value, note, accent = false }: { label: string; valu
   return <article className={accent ? "report-kpi accent" : "report-kpi"}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>;
 }
 
-export default function ReportView({ brand, workspaceName, mentions, analytics, clusters, countryCodes }: ReportViewProps) {
+export default function ReportView({ brand, workspaceName, mentions, analytics, clusters, countryCodes, aiBrief }: ReportViewProps) {
   const [range, setRange] = useState("30");
   const [platformFilter, setPlatformFilter] = useState("全部平台");
   const [countryFilter, setCountryFilter] = useState("全部地区");
@@ -235,17 +236,25 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
     report.highRisk.length ? `发现 ${report.highRisk.length} 条风险分不低于 70 的内容，建议优先复核${report.highRisk[0].source}发布的相关信息。` : "本期未发现风险分不低于 70 的高风险内容。",
   ];
 
-  const executiveSummary = report.total
+  const deterministicExecutiveSummary = report.total
     ? `${period}${scopeLabel === "全平台 · 全地区" ? "" : `（${scopeLabel}）`}共归档 ${report.total} 条品牌相关内容${rangeDays ? `，较上一周期${volumeChange >= 0 ? "增加" : "减少"} ${Math.abs(volumeChange)}%` : ""}。报道主要集中在${topCountry?.country ?? "待确认地区"}，${topPlatform?.label ?? "当前渠道"}贡献最多。内容净情绪指数为 ${signed(netSentiment)}，受众互动加权后的净情绪指数为 ${signed(weightedCommentNet)}。${report.highRisk.length ? `目前有 ${report.highRisk.length} 条高风险内容需要复核。` : "目前未发现达到高风险阈值的内容。"}`
     : `${period}在当前筛选条件下尚未形成有效归档，暂不能生成可靠的趋势与市场判断。`;
-  const interpretation = commentTotal
+  const deterministicInterpretation = commentTotal
     ? `媒体内容与受众反馈${Math.abs(netSentiment - weightedCommentNet) >= 15 ? "存在明显差异" : "方向基本一致"}。${weightedCommentNet < netSentiment ? "高互动评论比媒体内容更偏负面，说明少数受众质疑获得了更强共鸣。" : "高互动评论并未放大负面情绪，当前讨论压力主要来自内容声量而非评论共鸣。"}${topTopic ? `受众最集中的讨论议题是“${topTopic.topic}”。` : ""}`
     : "当前公开评论正文样本不足，受众态度不能仅根据平台披露的评论总数推断。";
-  const actionSummary = report.highRisk.length
+  const deterministicActionSummary = report.highRisk.length
     ? `建议首先核验“${report.highRisk[0].title}”及其传播来源，同时关注${topCountry?.country ?? "主要市场"}是否出现连续转载或高互动负面评论。`
     : topAudienceRegion
       ? `建议继续跟踪${topAudienceRegion.region}的“${topAudienceRegion.topTopic || "主要讨论"}”反馈，并把高接受度观点转化为下一阶段的传播素材。`
       : `建议继续观察${topCountry?.country ?? "核心市场"}和${topPlatform?.label ?? "主要渠道"}的声量变化，在形成异常峰值时回到事件传播页核验来源。`;
+  const aiBriefInScope = range === "30" && platformFilter === "全部平台" && countryFilter === "全部地区" && Boolean(aiBrief?.executive_summary);
+  const executiveSummary = aiBriefInScope ? String(aiBrief?.executive_summary) : deterministicExecutiveSummary;
+  const interpretation = aiBriefInScope
+    ? [aiBrief?.content_finding, aiBrief?.audience_finding, aiBrief?.regional_finding].filter(Boolean).join(" ")
+    : deterministicInterpretation;
+  const actionSummary = aiBriefInScope && aiBrief?.recommended_actions?.length
+    ? aiBrief.recommended_actions.join("；")
+    : deterministicActionSummary;
 
   async function exportPdf() {
     const root = reportRef.current; if (!root || exporting) return;
@@ -284,7 +293,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
         <div className="report-executive-heading"><div><p className="eyebrow">EXECUTIVE SUMMARY</p><h2>本期综合判断</h2></div><div className={`report-status ${statusTone}`}><span>当前状态</span><strong>{riskStatus}</strong></div></div>
         <p className="report-lead">{executiveSummary}</p>
         <div className="report-judgement-grid"><article><span>数据解释</span><p>{interpretation}</p></article><article><span>建议动作</span><p>{actionSummary}</p></article></div>
-        <footer><span>{period} · {scopeLabel}</span><span>数据生成于 {generatedAt}</span></footer>
+        <footer><span>{period} · {scopeLabel}</span><span>{aiBriefInScope ? `LLM 辅助研判 · ${aiBrief?.model ?? "重点复核"}` : "规则与统计研判"} · 数据生成于 {generatedAt}</span></footer>
       </section>
 
       <section className="report-dashboard-kpis">

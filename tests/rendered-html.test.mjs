@@ -349,3 +349,27 @@ test("worker runs the hybrid monitor hourly", async () => {
   assert.match(worker, /runAllBrandSyncs\(\)/);
   assert.match(vite, /crons: \["17 \* \* \* \*"\]/);
 });
+
+test("hybrid analysis uses rules for all data and LLMs only for priority review and reports", async () => {
+  const [analysis, credentials, repository, schema, sync, page, report] = await Promise.all([
+    source("db/llm-analysis.ts"), source("db/credentials.ts"), source("db/repository.ts"), source("db/schema.ts"),
+    source("db/news-sync.ts"), source("app/page.tsx"), source("app/report-view.tsx"),
+  ]);
+  assert.match(analysis, /ANALYSIS_MODEL = "gpt-5\.6-luna"/);
+  assert.match(analysis, /REPORT_MODEL = "gpt-5\.6-sol"/);
+  assert.match(analysis, /risk >= 55 OR impact >= 80 OR engagement >= 50/);
+  assert.match(analysis, /NOT EXISTS \(SELECT 1 FROM comment_annotations/);
+  assert.match(analysis, /if \(queued >= 8\) break/);
+  assert.match(analysis, /source_hash/);
+  assert.match(analysis, /status = 'completed'/);
+  assert.match(analysis, /runReportAgent/);
+  assert.match(credentials, /OpenAI LLM/);
+  assert.match(repository, /CREATE TABLE IF NOT EXISTS llm_analysis_jobs/);
+  assert.match(repository, /混合智能分析/);
+  assert.match(schema, /llmAnalysisJobs/);
+  assert.match(sync, /runHybridAnalysisCycle/);
+  assert.match(page, /规则全量分析/);
+  assert.match(page, /人工标注优先/);
+  assert.match(page, /前往 OpenAI 创建 API Key/);
+  assert.match(report, /LLM 辅助研判/);
+});

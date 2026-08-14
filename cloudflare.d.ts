@@ -39,5 +39,6 @@ declare module "cloudflare:workers" {
     TRANSLATION_CONTACT_EMAIL?: string;
     LIBRETRANSLATE_URL?: string;
     LIBRETRANSLATE_API_KEY?: string;
+    OPENAI_API_KEY?: string;
   };
 }

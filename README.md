@@ -67,8 +67,11 @@ node --test tests/rendered-html.test.mjs
 | `LIBRETRANSLATE_URL` | 自建/第三方 LibreTranslate 地址 | 可选 |
 | `LIBRETRANSLATE_API_KEY` | LibreTranslate 密钥 | 可选 |
 | `TRANSLATION_CONTACT_EMAIL` | MyMemory 联系邮箱（最后一级兜底） | 可选 |
+| `OPENAI_API_KEY` | 混合舆情分析中的重点语义复核与报告 Agent | 可选 |
 
 用户也可以在网站的“数据连接器”页面录入自己的 API Key；密钥会加密后存入 D1，不会进入 GitHub。
+
+舆情分析采用混合架构：本地规则与人工校准模型覆盖全部新闻、帖子和评论；只有高风险、高互动、跨语言、混合情绪或复杂表达会进入 LLM 复核队列。评论一旦有人工作出标注，人工结果始终优先，后续 LLM 不会覆盖。复核结果按内容哈希缓存，未发生变化的内容不会重复计费；报告 Agent 再把最近 30 天的结构化数据和复核结果汇总为管理摘要、风险、机会与行动建议。
 
 英文翻译使用独立后台队列。若配置了服务，系统按 LibreTranslate 自托管、Azure Translator F0、DeepL API Free、MyMemory 的顺序自动回退；没有配置时仅使用匿名 MyMemory，并主动限制每轮请求量以避免连续触发公共额度限制。配置任一专用翻译服务后，先前因免费额度暂停的任务会自动恢复，不需要重新导入新闻或评论。
 

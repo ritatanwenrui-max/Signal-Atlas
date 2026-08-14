@@ -18,6 +18,7 @@ interface Env {
   TRANSLATION_CONTACT_EMAIL?: string;
   LIBRETRANSLATE_URL?: string;
   LIBRETRANSLATE_API_KEY?: string;
+  OPENAI_API_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

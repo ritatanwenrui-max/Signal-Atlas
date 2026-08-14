@@ -349,6 +349,25 @@ const tables = [
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (mention_id, parent_comment_id)
   )`,
+  `CREATE TABLE IF NOT EXISTS llm_analysis_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    source_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    model TEXT NOT NULL,
+    trigger_reason TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '',
+    confidence INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT NOT NULL DEFAULT '',
+    UNIQUE (brand_id, kind, target_id)
+  )`,
 ] as const;
 
 const indexes = [
@@ -389,6 +408,7 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_sentiment_calibration_brand_weight ON sentiment_calibration_rules(brand_id, weight)",
   "CREATE INDEX IF NOT EXISTS idx_social_comment_targets_brand_status ON social_comment_targets(brand_id, status, updated_at)",
   "CREATE INDEX IF NOT EXISTS idx_social_comment_replies_brand_status ON social_comment_reply_queue(brand_id, status, updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_llm_analysis_jobs_brand_status ON llm_analysis_jobs(brand_id, kind, status, updated_at)",
 ] as const;
 
 export async function ensureDatabase() {
@@ -485,7 +505,7 @@ export async function loadDashboardData(userId = "") {
   const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
   const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
       social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
       social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
@@ -525,6 +545,14 @@ export async function loadDashboardData(userId = "") {
         UNION ALL SELECT datetime(updated_at, '+30 minutes') FROM social_comment_reply_queue WHERE brand_id = ? AND status = 'retrying'
       )) AS next_retry_at`)
       .bind(brandId, brandId, brandId, brandId, brandId, brandId, brandId).first<{ count: number; active_count: number; next_retry_at: string }>(),
+    db.prepare(`SELECT
+      SUM(CASE WHEN kind IN ('mention','comment') AND status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN kind IN ('mention','comment') AND status IN ('queued','running') THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN kind IN ('mention','comment') AND status = 'error' THEN 1 ELSE 0 END) AS errors
+      FROM llm_analysis_jobs WHERE brand_id = ?`).bind(brandId).first<{ completed: number; pending: number; errors: number }>(),
+    db.prepare(`SELECT result_json, model, completed_at FROM llm_analysis_jobs
+      WHERE brand_id = ? AND kind = 'report' AND status = 'completed' ORDER BY completed_at DESC LIMIT 1`)
+      .bind(brandId).first<{ result_json: string; model: string; completed_at: string }>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -542,6 +570,9 @@ export async function loadDashboardData(userId = "") {
   const deepLConfigured = Boolean(env.DEEPL_API_KEY || storedCredentials.has("DeepL API Free"));
   const libreTranslateConfigured = Boolean(env.LIBRETRANSLATE_URL || storedCredentials.has("LibreTranslate"));
   const myMemoryIdentified = Boolean(env.TRANSLATION_CONTACT_EMAIL || storedCredentials.has("MyMemory"));
+  const llmConfigured = Boolean(env.OPENAI_API_KEY || storedCredentials.has("OpenAI LLM"));
+  const llmHealth = healthByName.get("OpenAI LLM");
+  const llmLimited = Boolean(llmHealth?.retry_after && new Date(llmHealth.retry_after).getTime() > Date.now());
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
   const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
@@ -640,6 +671,10 @@ export async function loadDashboardData(userId = "") {
       .bind(workspaceId).all<Record<string, unknown>>(),
   ]) : [{ results: [] }, { results: [] }];
   const role = String(workspace?.role ?? "owner");
+  let aiBrief: Record<string, unknown> | null = null;
+  if (llmBriefRow?.result_json) {
+    try { aiBrief = JSON.parse(llmBriefRow.result_json) as Record<string, unknown>; } catch { aiBrief = null; }
+  }
   return {
     mentions: mentionRows,
     traffic: traffic.results,
@@ -650,6 +685,7 @@ export async function loadDashboardData(userId = "") {
     providerHealth: providerHealth.results.map((item) => ({ ...item, provider: item.provider.replace(/^\d+:/, "") })),
     mediaSources: sourceRows,
     propagationEdges: visiblePropagationEdges,
+    aiBrief,
     connectorCredentials: credentialRows.results,
     workspace: workspace ? {
       id: workspaceId,
@@ -676,6 +712,13 @@ export async function loadDashboardData(userId = "") {
     connectors: [
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
+      { id: "llm-openai", provider: "OpenAI LLM", configurable: true, configured: llmConfigured,
+        lastFour: storedCredentials.get("OpenAI LLM")?.last_four ?? (env.OPENAI_API_KEY ? "环境密钥" : ""), name: "混合智能分析",
+        status: !llmConfigured ? "credentials" : llmLimited ? "limited" : "online",
+        pending: Number(llmStats?.pending ?? 0), retryAt: llmHealth?.retry_after ?? "", lastError: llmHealth?.last_error ?? "",
+        detail: !llmConfigured ? "规则模型已全量运行；配置 API Key 后启用重点语义复核与报告 Agent"
+          : llmLimited ? `LLM 暂缓重试：${llmHealth?.last_error || "服务暂不可用"}`
+          : `规则全量分析 · ${Number(llmStats?.completed ?? 0)} 条重点内容已复核 · 人工标注优先 · 自动生成报告结论` },
       { id: "translator-azure", provider: "Azure Translator", configurable: true, configured: azureTranslatorConfigured,
         lastFour: storedCredentials.get("Azure Translator")?.last_four ?? (env.AZURE_TRANSLATOR_KEY ? "环境密钥" : ""), name: "Azure Translator F0",
         status: azureTranslatorConfigured ? "online" : "credentials", detail: azureTranslatorConfigured ? "后台自动翻译主力 · 免费层每月 200 万字符" : "可配置 F0 免费层，适合大量后台自动翻译" },

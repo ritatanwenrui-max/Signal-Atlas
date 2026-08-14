@@ -3,6 +3,7 @@ import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
 import { verifyMonidApiKey } from "../../../db/monid";
 import { runTranslationCycle } from "../../../db/translation";
+import { verifyOpenAIApiKey } from "../../../db/llm-analysis";
 import { analyzeCommentText } from "../../../db/text-analysis";
 import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
@@ -112,6 +113,14 @@ export async function POST(request: Request) {
         await verifyMonidApiKey(credential.trim());
       } catch (error) {
         const message = error instanceof Error ? error.message : "Monid API Key 验证失败";
+        return Response.json({ error: message }, { status: 400 });
+      }
+    }
+    if (provider === "OpenAI LLM") {
+      try {
+        await verifyOpenAIApiKey(credential.trim());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "OpenAI API Key 验证失败";
         return Response.json({ error: message }, { status: 400 });
       }
     }

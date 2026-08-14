@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 const supportedProviders = new Set([
   "NewsAPI.ai", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
-  "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory",
+  "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory", "OpenAI LLM",
 ]);
 
 function bytesToBase64(bytes: Uint8Array) {
@@ -50,7 +50,8 @@ export async function loadConnectorCredential(db: D1Database, provider: string, 
     : provider === "DeepL API Free" ? env.DEEPL_API_KEY
     : provider === "LibreTranslate" && env.LIBRETRANSLATE_URL
       ? JSON.stringify({ url: env.LIBRETRANSLATE_URL, key: env.LIBRETRANSLATE_API_KEY || "" })
-    : provider === "MyMemory" ? env.TRANSLATION_CONTACT_EMAIL : undefined;
+    : provider === "MyMemory" ? env.TRANSLATION_CONTACT_EMAIL
+    : provider === "OpenAI LLM" ? env.OPENAI_API_KEY : undefined;
   if (!userId) return environmentValue;
   const row = await db.prepare("SELECT encrypted_value, iv FROM connector_credentials WHERE user_id = ? AND provider = ?").bind(userId, provider)
     .first<{ encrypted_value: string; iv: string }>();

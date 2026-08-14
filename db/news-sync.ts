@@ -7,6 +7,7 @@ import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
+import { runHybridAnalysisCycle } from "./llm-analysis";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -397,14 +398,18 @@ export async function runNewsSync(force = false, userId = "") {
     await rebuildPropagationEdges(db, brandId, terms);
     const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
     const translationBefore = await runTranslationCycle(db, brandId, credentialOwnerId);
+    const hybridAnalysis = await runHybridAnalysisCycle(db, brandId, credentialOwnerId).catch((error) => ({
+      configured: true, queued: 0, analyzed: 0, skipped: 0, errors: 1, reportGenerated: false,
+      error: error instanceof Error ? error.message : "混合智能分析暂未完成",
+    }));
     const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 1").bind(brandId).first<SyncRun>();
     const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
-    if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0, translation: translationBefore };
-    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore };
-    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore };
+    if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0, translation: translationBefore, hybridAnalysis };
+    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
+    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
 
     const query = gdeltQuery(terms);
     const startedAt = new Date().toISOString();
@@ -524,6 +529,7 @@ export async function runNewsSync(force = false, userId = "") {
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
       return { skipped: false, found: candidates.length, inserted, query, socialPending, commentRefresh,
+        hybridAnalysis,
         translation: {
           queued: translationBefore.queued + translationAfter.queued,
           translated: translationBefore.translated + translationAfter.translated,
