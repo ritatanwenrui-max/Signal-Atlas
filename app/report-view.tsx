@@ -19,11 +19,14 @@ type Analytics = {
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 type CommentRow = { id: number; content: string; sentiment: string; emotion: string; topic: string; likes: number; platform: string; author_username: string; post_title: string };
 type CommentData = {
-  summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; coverage: number };
+  summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; coverage: number;
+    weighted_positive?: number; weighted_neutral?: number; weighted_negative?: number; weighted_mixed?: number; weighted_total?: number; weighted_net?: number; reported?: number; collected?: number };
   emotions: Array<{ label: string; count: number }>;
   topics: Array<{ topic: string; count: number; negative: number }>;
   words: Array<{ word: string; count: number }>;
-  topPosts: Array<{ mention_id: number; title: string; source: string; comments: number; negative: number; likes: number }>;
+  topPosts: Array<{ mention_id: number; title: string; url?: string; source: string; comments: number; negative: number; likes: number }>;
+  regions?: Array<{ region: string; confidence: string; basis: string; total: number; weight: number; positive: number; negative: number; weightedPositive: number; weightedNegative: number; net: number; acceptance: string; topTopic: string }>;
+  insights?: Array<{ title: string; finding: string; evidence: string; action: string; tone: "positive" | "watch" | "risk" | "neutral" }>;
   riskComments: CommentRow[];
 };
 
@@ -54,6 +57,11 @@ function fullDate(value: string) {
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 function pct(value: number, total: number) { return total ? Math.round(value / total * 100) : 0; }
+function signed(value: number) { return `${value > 0 ? "+" : ""}${value}`; }
+function changeRate(current: number, previous: number) {
+  if (!previous) return current ? 100 : 0;
+  return Math.round((current - previous) / previous * 100);
+}
 function safeFileName(value: string) { return value.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-").slice(0, 60) || "brand"; }
 function keywordEntries(value: string) {
   try {
@@ -120,10 +128,12 @@ function ReportKpi({ label, value, note, accent = false }: { label: string; valu
 
 export default function ReportView({ brand, workspaceName, mentions, analytics, clusters, countryCodes }: ReportViewProps) {
   const [range, setRange] = useState("30");
+  const [platformFilter, setPlatformFilter] = useState("全部平台");
+  const [countryFilter, setCountryFilter] = useState("全部地区");
   const [title, setTitle] = useState("品牌舆情数据分析报告");
-  const [includeEvents, setIncludeEvents] = useState(true);
-  const [includeComments, setIncludeComments] = useState(true);
-  const [includeAppendix, setIncludeAppendix] = useState(true);
+  const includeEvents = true;
+  const includeComments = true;
+  const includeAppendix = true;
   const [comments, setComments] = useState<CommentData>(emptyComments);
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -133,7 +143,21 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const generatedAt = useMemo(() => fullDate(new Date(reportEpoch).toISOString()), [reportEpoch]);
   const rangeDays = range === "all" ? 0 : Number(range);
   const cutoff = rangeDays ? reportEpoch - rangeDays * 86400_000 : 0;
-  const scopedMentions = useMemo(() => mentions.filter((item) => !cutoff || new Date(item.published_at).getTime() >= cutoff), [cutoff, mentions]);
+  const scopedMentions = useMemo(() => mentions.filter((item) => (!cutoff || new Date(item.published_at).getTime() >= cutoff)
+    && (platformFilter === "全部平台" || item.platform === platformFilter)
+    && (countryFilter === "全部地区" || item.source_country === countryFilter)), [countryFilter, cutoff, mentions, platformFilter]);
+  const previousMentions = useMemo(() => {
+    if (!rangeDays) return [];
+    const previousCutoff = reportEpoch - rangeDays * 2 * 86400_000;
+    return mentions.filter((item) => {
+      const time = new Date(item.published_at).getTime();
+      return time >= previousCutoff && time < cutoff
+        && (platformFilter === "全部平台" || item.platform === platformFilter)
+        && (countryFilter === "全部地区" || item.source_country === countryFilter);
+    });
+  }, [countryFilter, cutoff, mentions, platformFilter, rangeDays, reportEpoch]);
+  const platformOptions = useMemo(() => [...new Set(mentions.map((item) => item.platform).filter(Boolean))].sort(), [mentions]);
+  const countryOptions = useMemo(() => [...new Set(mentions.map((item) => item.source_country).filter(Boolean))].sort(), [mentions]);
   const period = range === "all" ? "全部历史" : `过去 ${range} 天`;
 
   useEffect(() => {
@@ -192,8 +216,17 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const netSentiment = pct(report.sentiment.positive - report.sentiment.negative, Math.max(1, report.total));
   const commentTotal = comments.summary.total;
   const commentNet = pct(comments.summary.positive - comments.summary.negative, Math.max(1, commentTotal));
+  const weightedCommentNet = Number.isFinite(comments.summary.weighted_net) ? Math.round(Number(comments.summary.weighted_net)) : commentNet;
   const reportWords = report.words.length ? report.words : analytics.words.slice(0, 24);
   const reportPages = 5 + Number(includeEvents) + Number(includeComments) + Number(includeAppendix);
+  const volumeChange = rangeDays ? changeRate(report.total, previousMentions.length) : 0;
+  const totalEngagement = scopedMentions.reduce((sum, item) => sum + Number(item.engagement || 0), 0) + comments.summary.likes + comments.summary.replies;
+  const riskStatus = report.highRisk.length >= 3 || netSentiment <= -20 ? "需要关注" : report.highRisk.length || netSentiment < 0 ? "持续观察" : "整体平稳";
+  const statusTone = riskStatus === "需要关注" ? "risk" : riskStatus === "持续观察" ? "watch" : "stable";
+  const topTopic = comments.topics[0];
+  const topEmotion = report.emotions[0];
+  const topAudienceRegion = comments.regions?.[0];
+  const scopeLabel = [platformFilter !== "全部平台" ? platformFilter : "", countryFilter !== "全部地区" ? countryFilter : ""].filter(Boolean).join(" · ") || "全平台 · 全地区";
 
   const insights = [
     report.total ? `${period}共归档 ${report.total} 条品牌相关内容，覆盖 ${report.countries.length} 个国家或地区、${report.platforms.length} 类渠道。` : `${period}尚未归档到符合条件的品牌相关内容。`,
@@ -201,6 +234,18 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
     topEvent ? `传播规模最大的事件包含 ${topEvent.items.length} 个节点，从${topEvent.originCountry}的${topEvent.originSource}开始，覆盖 ${topEvent.countries.length} 个地区。` : "本期尚未形成可比较的传播事件。",
     report.highRisk.length ? `发现 ${report.highRisk.length} 条风险分不低于 70 的内容，建议优先复核${report.highRisk[0].source}发布的相关信息。` : "本期未发现风险分不低于 70 的高风险内容。",
   ];
+
+  const executiveSummary = report.total
+    ? `${period}${scopeLabel === "全平台 · 全地区" ? "" : `（${scopeLabel}）`}共归档 ${report.total} 条品牌相关内容${rangeDays ? `，较上一周期${volumeChange >= 0 ? "增加" : "减少"} ${Math.abs(volumeChange)}%` : ""}。报道主要集中在${topCountry?.country ?? "待确认地区"}，${topPlatform?.label ?? "当前渠道"}贡献最多。内容净情绪指数为 ${signed(netSentiment)}，受众互动加权后的净情绪指数为 ${signed(weightedCommentNet)}。${report.highRisk.length ? `目前有 ${report.highRisk.length} 条高风险内容需要复核。` : "目前未发现达到高风险阈值的内容。"}`
+    : `${period}在当前筛选条件下尚未形成有效归档，暂不能生成可靠的趋势与市场判断。`;
+  const interpretation = commentTotal
+    ? `媒体内容与受众反馈${Math.abs(netSentiment - weightedCommentNet) >= 15 ? "存在明显差异" : "方向基本一致"}。${weightedCommentNet < netSentiment ? "高互动评论比媒体内容更偏负面，说明少数受众质疑获得了更强共鸣。" : "高互动评论并未放大负面情绪，当前讨论压力主要来自内容声量而非评论共鸣。"}${topTopic ? `受众最集中的讨论议题是“${topTopic.topic}”。` : ""}`
+    : "当前公开评论正文样本不足，受众态度不能仅根据平台披露的评论总数推断。";
+  const actionSummary = report.highRisk.length
+    ? `建议首先核验“${report.highRisk[0].title}”及其传播来源，同时关注${topCountry?.country ?? "主要市场"}是否出现连续转载或高互动负面评论。`
+    : topAudienceRegion
+      ? `建议继续跟踪${topAudienceRegion.region}的“${topAudienceRegion.topTopic || "主要讨论"}”反馈，并把高接受度观点转化为下一阶段的传播素材。`
+      : `建议继续观察${topCountry?.country ?? "核心市场"}和${topPlatform?.label ?? "主要渠道"}的声量变化，在形成异常峰值时回到事件传播页核验来源。`;
 
   async function exportPdf() {
     const root = reportRef.current; if (!root || exporting) return;
@@ -222,19 +267,86 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   }
 
   return <div className="report-center">
-    <section className="surface report-builder">
-      <div><p className="eyebrow">AUTOMATED REPORTING</p><h2>自动舆情分析报告</h2><p>系统按当前共享工作区的真实档案自动生成管理摘要、渠道、地区、情绪、事件传播、受众舆情与证据附录。</p></div>
-      <div className="report-controls">
+    <section className="surface report-dashboard-toolbar">
+      <div className="report-dashboard-title"><p className="eyebrow">INTELLIGENCE REPORT</p><h2>全站自动舆情分析报告</h2><p>汇总新闻、社媒、事件传播和评论数据，先呈现全局变化，再给出可直接用于周报或月报的判断。</p></div>
+      <div className="report-dashboard-controls">
         <label><span>报告名称</span><input value={title} onChange={(event) => setTitle(event.target.value.slice(0, 50))} /></label>
-        <label><span>统计周期</span><select value={range} onChange={(event) => setRange(event.target.value)}><option value="7">过去 7 天</option><option value="30">过去 30 天</option><option value="all">全部历史</option></select></label>
-        <div className="report-options"><label><input type="checkbox" checked={includeEvents} onChange={(event) => setIncludeEvents(event.target.checked)} /> 事件与传播</label><label><input type="checkbox" checked={includeComments} onChange={(event) => setIncludeComments(event.target.checked)} /> 受众舆情</label><label><input type="checkbox" checked={includeAppendix} onChange={(event) => setIncludeAppendix(event.target.checked)} /> 证据附录</label></div>
-        <button className="primary-button" disabled={exporting || commentsLoading} onClick={() => void exportPdf()}>{exporting ? "正在生成 PDF…" : commentsLoading ? "正在汇总评论…" : `导出 PDF · ${reportPages} 页`}</button>
+        <label><span>统计周期</span><select value={range} onChange={(event) => setRange(event.target.value)}><option value="7">周报 · 过去 7 天</option><option value="30">月报 · 过去 30 天</option><option value="90">季度观察 · 过去 90 天</option><option value="all">全部历史</option></select></label>
+        <label><span>平台</span><select value={platformFilter} onChange={(event) => setPlatformFilter(event.target.value)}><option>全部平台</option>{platformOptions.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label><span>地区</span><select value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)}><option>全部地区</option>{countryOptions.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <button className="primary-button" disabled={exporting || commentsLoading} onClick={() => void exportPdf()}>{exporting ? "正在生成 PDF…" : commentsLoading ? "正在汇总评论…" : "导出 PDF 报告"}</button>
       </div>
       {exportError && <p className="report-export-error">{exportError}</p>}
     </section>
 
-    <div className="report-preview-heading"><div><p className="eyebrow">LIVE PREVIEW</p><h3>报告实时预览</h3></div><span>横向 A4 · {reportPages} 页 · 数据生成于 {generatedAt}</span></div>
-    <div className="report-preview-scroll"><div className="report-document" ref={reportRef}>
+    <div className="report-dashboard">
+      <section className={`surface report-executive ${statusTone}`}>
+        <div className="report-executive-heading"><div><p className="eyebrow">EXECUTIVE SUMMARY</p><h2>本期综合判断</h2></div><div className={`report-status ${statusTone}`}><span>当前状态</span><strong>{riskStatus}</strong></div></div>
+        <p className="report-lead">{executiveSummary}</p>
+        <div className="report-judgement-grid"><article><span>数据解释</span><p>{interpretation}</p></article><article><span>建议动作</span><p>{actionSummary}</p></article></div>
+        <footer><span>{period} · {scopeLabel}</span><span>数据生成于 {generatedAt}</span></footer>
+      </section>
+
+      <section className="report-dashboard-kpis">
+        <article><span>归档内容</span><strong>{report.total.toLocaleString()}</strong><small>{rangeDays ? `${signed(volumeChange)}% 较上一周期` : "全部历史数据"}</small></article>
+        <article><span>已分析评论</span><strong>{commentTotal.toLocaleString()}</strong><small>采集覆盖 {comments.summary.coverage}%</small></article>
+        <article><span>总互动</span><strong>{totalEngagement.toLocaleString()}</strong><small>内容互动、评论获赞与回复</small></article>
+        <article className={netSentiment < 0 ? "negative" : "positive"}><span>内容净情绪</span><strong>{signed(netSentiment)}</strong><small>正面占比减负面占比</small></article>
+        <article className={weightedCommentNet < 0 ? "negative" : "positive"}><span>受众加权情绪</span><strong>{signed(weightedCommentNet)}</strong><small>高赞评论获得更高权重</small></article>
+        <article><span>地区 / 事件</span><strong>{report.countries.length} / {report.clusters.length}</strong><small>{report.highRisk.length} 条高风险内容</small></article>
+      </section>
+
+      <section className="surface report-dashboard-section">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">VOLUME & CHANNELS</p><h3>舆情趋势与渠道结构</h3></div><a href="/archive">查看新闻档案 →</a></div>
+        <p className="report-inline-conclusion">{report.timeline.length ? `本期声量最高的日期是 ${report.timeline.reduce((best, item) => item.total > best.total ? item : best, report.timeline[0]).date}；${topPlatform?.label ?? "主要渠道"}贡献 ${pct(topPlatform?.value ?? 0, report.total)}% 的内容。` : "当前筛选条件下尚无可绘制的趋势数据。"}</p>
+        <div className="report-dashboard-two-column trend">
+          <div><h4>每日内容量与负面内容</h4><div className="insight-trend-chart">{report.timeline.slice(-18).map((day) => <article key={day.date}><div><i style={{ height: `${Math.max(5, day.total / maxDay * 100)}%` }}><b style={{ height: `${pct(day.negative, day.total)}%` }} /></i></div><span>{day.date.slice(5)}</span><small>{day.total}</small></article>)}{!report.timeline.length && <p>暂无趋势数据</p>}</div><div className="insight-chart-legend"><span><i />全部内容</span><span><i className="negative" />其中负面</span></div></div>
+          <div className="dashboard-bars"><h4>平台构成</h4><BarRows items={report.platforms.slice(0, 7)} max={maxPlatform} /></div>
+        </div>
+      </section>
+
+      <section className="surface report-dashboard-section">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">EVENT PROPAGATION</p><h3>重点事件与传播</h3></div><a href="/propagation">查看传播链路 →</a></div>
+        <p className="report-inline-conclusion">{topEvent ? `本期最大事件包含 ${topEvent.items.length} 个传播节点，最早来源为${topEvent.originCountry}的${topEvent.originSource}，随后覆盖 ${topEvent.countries.length} 个地区。` : "本期尚未形成满足聚类条件的传播事件。"}</p>
+        {topEvent ? <div className="dashboard-event-route">{topEvent.items.slice(0, 6).map((item, index) => <div key={item.id}><article style={{ "--channel": platformColors[item.platform] ?? "#aab0a4" } as CSSProperties}><span>{item.platform}</span><strong>{item.source}</strong><small>{item.source_country} · {fullDate(item.published_at)}</small></article>{index < Math.min(5, topEvent.items.length - 1) && <b>→</b>}</div>)}</div> : <div className="report-dashboard-empty">等待形成传播事件</div>}
+        <div className="dashboard-event-table"><header><span>事件</span><span>首发来源</span><span>地区</span><span>节点</span><span>风险</span></header>{report.clusters.slice(0, 5).map((cluster) => <article key={cluster.key}><strong>{cluster.title}</strong><span>{cluster.originSource}</span><span>{cluster.countries.length}</span><b>{cluster.items.length}</b><em>{cluster.risk}</em></article>)}</div>
+      </section>
+
+      <div className="report-dashboard-two-column intelligence">
+        <section className="surface report-dashboard-section">
+          <div className="report-dashboard-section-head"><div><p className="eyebrow">CONTENT INTELLIGENCE</p><h3>媒体与原帖如何描述品牌</h3></div><a href="/analytics">查看内容舆情 →</a></div>
+          <p className="report-inline-conclusion">内容净情绪为 {signed(netSentiment)}。{topEmotion ? `最常见的具体表达是“${topEmotion.label}”，出现 ${topEmotion.value} 次。` : "具体情绪样本仍不足。"}</p>
+          <div className="dashboard-sentiment-block"><div className="dashboard-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{signed(netSentiment)}</strong><span>净情绪</span></div></div><div>{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{pct(Number(value), report.total)}%</strong></article>)}</div></div>
+          <div className="dashboard-topic-cloud">{reportWords.slice(0, 16).map((item, index) => <span key={item.word} className={index < 4 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 13}px` }}>{item.word}</span>)}{!reportWords.length && <small>暂无有效议题词</small>}</div>
+        </section>
+        <section className="surface report-dashboard-section">
+          <div className="report-dashboard-section-head"><div><p className="eyebrow">AUDIENCE INTELLIGENCE</p><h3>受众如何讨论品牌</h3></div><a href="/comments">查看受众舆情 →</a></div>
+          <p className="report-inline-conclusion">{interpretation}</p>
+          <div className="dashboard-audience-kpis"><article><span>加权净情绪</span><strong>{signed(weightedCommentNet)}</strong></article><article><span>主要议题</span><strong>{topTopic?.topic ?? "等待样本"}</strong></article><article><span>主要地区</span><strong>{topAudienceRegion?.region ?? "等待推断"}</strong></article></div>
+          <div className="dashboard-comment-evidence"><h4>高互动风险评论</h4>{comments.riskComments.slice(0, 3).map((item) => <article key={item.id}><p>{item.content}</p><span>{item.platform} · {item.likes} 赞 · {item.emotion || item.sentiment}</span></article>)}{!comments.riskComments.length && <small>当前没有需要优先复核的评论。</small>}</div>
+        </section>
+      </div>
+
+      <section className="surface report-dashboard-section">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">GEOGRAPHIC INTELLIGENCE</p><h3>地区声量与市场差异</h3></div><a href="/overview">返回情报总览 →</a></div>
+        <p className="report-inline-conclusion">{topCountry ? `${topCountry.country}是本期声量最高的地区，占全部内容的 ${pct(topCountry.count, report.total)}%。${topAudienceRegion ? `${topAudienceRegion.region}的受众接受度为“${topAudienceRegion.acceptance}”，主要关注“${topAudienceRegion.topTopic || "待归纳"}”。` : "评论地区样本不足，暂不能比较不同文化地区的接受度。"}` : "当前缺少可确认的媒体发布地区。"}</p>
+        <div className="dashboard-geo-grid"><div><ReportMap countries={report.countries} countryCodes={countryCodes} /><div className="report-map-legend"><span>内容较少</span><i /><i /><i /><i /><i /><span>内容最多</span></div></div><div className="dashboard-region-table"><header><span>地区</span><span>内容</span><span>风险</span><span>内容净情绪</span></header>{report.countries.slice(0, 9).map((item) => <article key={item.country}><strong>{item.country}</strong><span>{item.count}</span><span>{item.risk}</span><b>{signed(pct(item.positive - item.negative, item.count))}</b></article>)}</div></div>
+      </section>
+
+      <div className="report-dashboard-two-column conclusions">
+        <section className="surface report-dashboard-section report-risk-opportunity"><div className="report-dashboard-section-head"><div><p className="eyebrow">RISK & OPPORTUNITY</p><h3>风险与机会</h3></div></div><div><article className="risk"><span>需要处理</span><strong>{report.highRisk.length ? `${report.highRisk.length} 条高风险内容` : "暂无高风险信号"}</strong><p>{report.highRisk[0]?.title ?? "继续观察异常声量与高赞负面评论。"}</p></article><article className="opportunity"><span>可以利用</span><strong>{topAudienceRegion?.region ?? topCountry?.country ?? "核心市场待形成"}</strong><p>{topAudienceRegion ? `${topAudienceRegion.acceptance}；主要话题为“${topAudienceRegion.topTopic || "待归纳"}”。` : `${topPlatform?.label ?? "主要渠道"}是当前最集中的传播入口。`}</p></article></div></section>
+        <section className="surface report-dashboard-section report-actions"><div className="report-dashboard-section-head"><div><p className="eyebrow">RECOMMENDED ACTIONS</p><h3>下一步建议</h3></div></div><ol><li><b>立即处理</b><span>{report.highRisk.length ? `复核 ${report.highRisk[0].source} 的高风险内容，并确认是否需要统一回应。` : "当前没有必须立即回应的高风险事项。"}</span></li><li><b>持续观察</b><span>监测{topCountry?.country ?? "主要地区"}与{topPlatform?.label ?? "主要平台"}是否出现新的声量峰值。</span></li><li><b>主动利用</b><span>{topTopic ? `围绕“${topTopic.topic}”整理受众真实问题和正面反馈。` : "待评论样本增加后提炼可用于传播的受众观点。"}</span></li></ol></section>
+      </div>
+
+      <section className="surface report-dashboard-section report-ready-copy">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">WEEKLY / MONTHLY BRIEF</p><h3>可直接参考的周报／月报文字</h3></div><button type="button" onClick={() => void navigator.clipboard?.writeText(`${executiveSummary}\n\n${interpretation}\n\n${actionSummary}`)}>复制文字</button></div>
+        <p>{executiveSummary}</p><p>{interpretation}</p><p>{actionSummary}</p>
+      </section>
+
+      <section className="surface report-data-quality"><div><p className="eyebrow">DATA QUALITY</p><h3>数据完整度与判断边界</h3></div><p>当前评论采集覆盖率为 <strong>{comments.summary.coverage}%</strong>。报告仅分析已经归档的内容和已经取得正文的公开评论；地区表示媒体发布地或带置信度的语言文化区推断，不等同于评论者真实国籍。传播路径属于时间、文本和来源证据共同形成的可解释推断。</p><span>{comments.summary.collected ?? commentTotal} / {comments.summary.reported ?? commentTotal} 条评论已归档</span></section>
+    </div>
+
+    <div className="report-print-source" aria-hidden="true"><div className="report-document" ref={reportRef}>
       <section className="report-sheet report-cover">
         <div className="report-cover-mark"><span /><span /><span /></div><div className="report-cover-copy"><p>SIGNAL ATLAS / MEDIA INTELLIGENCE</p><h1>{title || "品牌舆情数据分析报告"}</h1><h2>{brand.name}</h2><div className="report-cover-period"><span>{period}</span><b>{scopedMentions.length ? `${shortDate(scopedMentions.at(-1)?.published_at ?? "")} — ${shortDate(scopedMentions[0]?.published_at ?? "")}` : "等待数据"}</b></div><div className="report-cover-scope">{Object.keys(platformColors).map((item) => <span key={item}><i style={{ background: platformColors[item] }} />{item}</span>)}</div></div>
         <div className="report-cover-meta"><div><span>WORKSPACE</span><strong>{workspaceName}</strong></div><div><span>GENERATED</span><strong>{generatedAt}</strong></div><div><span>DATA POLICY</span><strong>仅使用已归档与已实际采集数据</strong></div></div>
