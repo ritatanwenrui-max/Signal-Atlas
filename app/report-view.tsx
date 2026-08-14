@@ -17,16 +17,17 @@ type Analytics = {
   crossBorderEdges: number;
 };
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
-type CommentRow = { id: number; content: string; sentiment: string; emotion: string; topic: string; likes: number; platform: string; author_username: string; post_title: string };
+type CommentRow = { id: number; content: string; sentiment: string; emotion: string; topic: string; likes: number; replies?: number; platform: string; author_username: string; post_title: string; audience_region?: string; region_confidence?: string };
 type CommentData = {
   summary: { total: number; authors: number; likes: number; replies: number; positive: number; neutral: number; negative: number; mixed: number; coverage: number;
     weighted_positive?: number; weighted_neutral?: number; weighted_negative?: number; weighted_mixed?: number; weighted_total?: number; weighted_net?: number; reported?: number; collected?: number };
   emotions: Array<{ label: string; count: number }>;
-  topics: Array<{ topic: string; count: number; negative: number }>;
+  topics: Array<{ topic: string; count: number; positive?: number; neutral?: number; negative: number; mixed?: number; likes?: number; replies?: number }>;
   words: Array<{ word: string; count: number }>;
   topPosts: Array<{ mention_id: number; title: string; url?: string; source: string; comments: number; negative: number; likes: number }>;
   regions?: Array<{ region: string; confidence: string; basis: string; total: number; weight: number; positive: number; negative: number; weightedPositive: number; weightedNegative: number; net: number; acceptance: string; topTopic: string }>;
   insights?: Array<{ title: string; finding: string; evidence: string; action: string; tone: "positive" | "watch" | "risk" | "neutral" }>;
+  evidenceComments?: CommentRow[];
   riskComments: CommentRow[];
 };
 
@@ -37,7 +38,7 @@ type ReportViewProps = {
   analytics: Analytics;
   clusters: StoryCluster[];
   countryCodes: Record<string, string>;
-  aiBrief?: { executive_summary?: string; content_finding?: string; audience_finding?: string; regional_finding?: string; risk_finding?: string; opportunity?: string; recommended_actions?: string[]; caveats?: string; generated_at?: string; model?: string } | null;
+  aiBrief?: { executive_summary?: string; content_finding?: string; audience_finding?: string; regional_finding?: string; risk_finding?: string; opportunity?: string; recommended_actions?: string[]; caveats?: string; generated_at?: string; model?: string; version?: string } | null;
 };
 
 const emptyComments: CommentData = {
@@ -214,40 +215,48 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const maxEmotion = Math.max(1, ...report.emotions.map((item) => item.value));
   const maxDay = Math.max(1, ...report.timeline.map((item) => item.total));
   const topCountry = report.countries[0]; const topPlatform = report.platforms[0]; const topEvent = report.clusters[0];
-  const netSentiment = pct(report.sentiment.positive - report.sentiment.negative, Math.max(1, report.total));
   const commentTotal = comments.summary.total;
-  const commentNet = pct(comments.summary.positive - comments.summary.negative, Math.max(1, commentTotal));
-  const weightedCommentNet = Number.isFinite(comments.summary.weighted_net) ? Math.round(Number(comments.summary.weighted_net)) : commentNet;
+  const contentNegativePct = pct(report.sentiment.negative, report.total);
+  const audiencePositivePct = pct(comments.summary.positive, commentTotal);
+  const audienceNegativePct = pct(comments.summary.negative, commentTotal);
+  const audienceMixedPct = pct(comments.summary.mixed, commentTotal);
+  const audienceNeutralPct = pct(comments.summary.neutral, commentTotal);
   const reportWords = report.words.length ? report.words : analytics.words.slice(0, 24);
   const reportPages = 5 + Number(includeEvents) + Number(includeComments) + Number(includeAppendix);
   const volumeChange = rangeDays ? changeRate(report.total, previousMentions.length) : 0;
   const totalEngagement = scopedMentions.reduce((sum, item) => sum + Number(item.engagement || 0), 0) + comments.summary.likes + comments.summary.replies;
-  const riskStatus = report.highRisk.length >= 3 || netSentiment <= -20 ? "需要关注" : report.highRisk.length || netSentiment < 0 ? "持续观察" : "整体平稳";
+  const riskStatus = report.highRisk.length >= 3 || (commentTotal >= 5 && audienceNegativePct >= 35) ? "需要关注" : report.highRisk.length || (commentTotal >= 5 && audienceNegativePct >= 20) ? "持续观察" : "整体平稳";
   const statusTone = riskStatus === "需要关注" ? "risk" : riskStatus === "持续观察" ? "watch" : "stable";
   const topTopic = comments.topics[0];
   const topEmotion = report.emotions[0];
   const topAudienceRegion = comments.regions?.[0];
+  const audienceInsights = comments.insights ?? [];
+  const evidenceComments = comments.evidenceComments ?? comments.riskComments;
+  const topTopicShare = topTopic ? pct(topTopic.count, commentTotal) : 0;
   const scopeLabel = [platformFilter !== "全部平台" ? platformFilter : "", countryFilter !== "全部地区" ? countryFilter : ""].filter(Boolean).join(" · ") || "全平台 · 全地区";
 
   const insights = [
     report.total ? `${period}共归档 ${report.total} 条品牌相关内容，覆盖 ${report.countries.length} 个国家或地区、${report.platforms.length} 类渠道。` : `${period}尚未归档到符合条件的品牌相关内容。`,
     topCountry ? `${topCountry.country}是报道最集中的市场，共 ${topCountry.count} 条，占本期 ${pct(topCountry.count, report.total)}%。` : "地区样本不足，暂不能判断核心传播市场。",
     topEvent ? `传播规模最大的事件包含 ${topEvent.items.length} 个节点，从${topEvent.originCountry}的${topEvent.originSource}开始，覆盖 ${topEvent.countries.length} 个地区。` : "本期尚未形成可比较的传播事件。",
+    commentTotal ? `已分析 ${commentTotal} 条公开评论；${topTopic ? `“${topTopic.topic}”占 ${topTopicShare}%，是受众最集中的讨论。` : `正面 ${audiencePositivePct}%，负面 ${audienceNegativePct}%。`}` : "当前公开评论正文样本不足，不能判断受众态度。",
     report.highRisk.length ? `发现 ${report.highRisk.length} 条风险分不低于 70 的内容，建议优先复核${report.highRisk[0].source}发布的相关信息。` : "本期未发现风险分不低于 70 的高风险内容。",
   ];
 
   const deterministicExecutiveSummary = report.total
-    ? `${period}${scopeLabel === "全平台 · 全地区" ? "" : `（${scopeLabel}）`}共归档 ${report.total} 条品牌相关内容${rangeDays ? `，较上一周期${volumeChange >= 0 ? "增加" : "减少"} ${Math.abs(volumeChange)}%` : ""}。报道主要集中在${topCountry?.country ?? "待确认地区"}，${topPlatform?.label ?? "当前渠道"}贡献最多。内容净情绪指数为 ${signed(netSentiment)}，受众互动加权后的净情绪指数为 ${signed(weightedCommentNet)}。${report.highRisk.length ? `目前有 ${report.highRisk.length} 条高风险内容需要复核。` : "目前未发现达到高风险阈值的内容。"}`
+    ? `${period}${scopeLabel === "全平台 · 全地区" ? "" : `（${scopeLabel}）`}共归档 ${report.total} 条品牌相关内容${rangeDays ? `，较上一周期${volumeChange >= 0 ? "增加" : "减少"} ${Math.abs(volumeChange)}%` : ""}，其中 ${report.sentiment.negative} 条被识别为负面。${commentTotal ? `已取得并分析 ${commentTotal} 条公开评论：${comments.summary.positive} 条正面、${comments.summary.negative} 条负面、${comments.summary.mixed} 条态度混合。${topTopic ? `受众最集中讨论“${topTopic.topic}”，占评论样本的 ${topTopicShare}%。` : ""}` : "目前没有足够的公开评论正文，不能据此判断受众态度。"}${report.highRisk.length ? `另有 ${report.highRisk.length} 条高风险内容需要复核。` : ""}`
     : `${period}在当前筛选条件下尚未形成有效归档，暂不能生成可靠的趋势与市场判断。`;
   const deterministicInterpretation = commentTotal
-    ? `媒体内容与受众反馈${Math.abs(netSentiment - weightedCommentNet) >= 15 ? "存在明显差异" : "方向基本一致"}。${weightedCommentNet < netSentiment ? "高互动评论比媒体内容更偏负面，说明少数受众质疑获得了更强共鸣。" : "高互动评论并未放大负面情绪，当前讨论压力主要来自内容声量而非评论共鸣。"}${topTopic ? `受众最集中的讨论议题是“${topTopic.topic}”。` : ""}`
+    ? audienceInsights[0]?.finding
+      ? `${audienceInsights[0].finding}。${audienceInsights[0].evidence}`
+      : `${audiencePositivePct}% 的评论为正面、${audienceNegativePct}% 为负面、${audienceMixedPct}% 同时包含认可与顾虑。${topTopic ? `“${topTopic.topic}”出现 ${topTopic.count} 次，其中 ${topTopic.negative} 条为负面。` : ""}`
     : "当前公开评论正文样本不足，受众态度不能仅根据平台披露的评论总数推断。";
   const deterministicActionSummary = report.highRisk.length
     ? `建议首先核验“${report.highRisk[0].title}”及其传播来源，同时关注${topCountry?.country ?? "主要市场"}是否出现连续转载或高互动负面评论。`
     : topAudienceRegion
       ? `建议继续跟踪${topAudienceRegion.region}的“${topAudienceRegion.topTopic || "主要讨论"}”反馈，并把高接受度观点转化为下一阶段的传播素材。`
       : `建议继续观察${topCountry?.country ?? "核心市场"}和${topPlatform?.label ?? "主要渠道"}的声量变化，在形成异常峰值时回到事件传播页核验来源。`;
-  const aiBriefInScope = range === "30" && platformFilter === "全部平台" && countryFilter === "全部地区" && Boolean(aiBrief?.executive_summary);
+  const aiBriefInScope = range === "30" && platformFilter === "全部平台" && countryFilter === "全部地区" && aiBrief?.version === "audience-evidence-v2" && Boolean(aiBrief?.executive_summary);
   const executiveSummary = aiBriefInScope ? String(aiBrief?.executive_summary) : deterministicExecutiveSummary;
   const interpretation = aiBriefInScope
     ? [aiBrief?.content_finding, aiBrief?.audience_finding, aiBrief?.regional_finding].filter(Boolean).join(" ")
@@ -300,8 +309,8 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
         <article><span>归档内容</span><strong>{report.total.toLocaleString()}</strong><small>{rangeDays ? `${signed(volumeChange)}% 较上一周期` : "全部历史数据"}</small></article>
         <article><span>已分析评论</span><strong>{commentTotal.toLocaleString()}</strong><small>采集覆盖 {comments.summary.coverage}%</small></article>
         <article><span>总互动</span><strong>{totalEngagement.toLocaleString()}</strong><small>内容互动、评论获赞与回复</small></article>
-        <article className={netSentiment < 0 ? "negative" : "positive"}><span>内容净情绪</span><strong>{signed(netSentiment)}</strong><small>正面占比减负面占比</small></article>
-        <article className={weightedCommentNet < 0 ? "negative" : "positive"}><span>受众加权情绪</span><strong>{signed(weightedCommentNet)}</strong><small>高赞评论获得更高权重</small></article>
+        <article className={contentNegativePct >= 25 ? "negative" : ""}><span>负面内容</span><strong>{report.total ? `${contentNegativePct}%` : "—"}</strong><small>{report.sentiment.negative} / {report.total} 条内容</small></article>
+        <article className={audienceNegativePct >= 25 ? "negative" : ""}><span>负面评论</span><strong>{commentTotal ? `${audienceNegativePct}%` : "—"}</strong><small>{comments.summary.negative} / {commentTotal} 条已采集评论</small></article>
         <article><span>地区 / 事件</span><strong>{report.countries.length} / {report.clusters.length}</strong><small>{report.highRisk.length} 条高风险内容</small></article>
       </section>
 
@@ -321,29 +330,35 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
         <div className="dashboard-event-table"><header><span>事件</span><span>首发来源</span><span>地区</span><span>节点</span><span>风险</span></header>{report.clusters.slice(0, 5).map((cluster) => <article key={cluster.key}><strong>{cluster.title}</strong><span>{cluster.originSource}</span><span>{cluster.countries.length}</span><b>{cluster.items.length}</b><em>{cluster.risk}</em></article>)}</div>
       </section>
 
-      <div className="report-dashboard-two-column intelligence">
-        <section className="surface report-dashboard-section">
-          <div className="report-dashboard-section-head"><div><p className="eyebrow">CONTENT INTELLIGENCE</p><h3>媒体与原帖如何描述品牌</h3></div><a href="/analytics">查看内容舆情 →</a></div>
-          <p className="report-inline-conclusion">内容净情绪为 {signed(netSentiment)}。{topEmotion ? `最常见的具体表达是“${topEmotion.label}”，出现 ${topEmotion.value} 次。` : "具体情绪样本仍不足。"}</p>
-          <div className="dashboard-sentiment-block"><div className="dashboard-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{signed(netSentiment)}</strong><span>净情绪</span></div></div><div>{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{pct(Number(value), report.total)}%</strong></article>)}</div></div>
-          <div className="dashboard-topic-cloud">{reportWords.slice(0, 16).map((item, index) => <span key={item.word} className={index < 4 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 13}px` }}>{item.word}</span>)}{!reportWords.length && <small>暂无有效议题词</small>}</div>
-        </section>
-        <section className="surface report-dashboard-section">
-          <div className="report-dashboard-section-head"><div><p className="eyebrow">AUDIENCE INTELLIGENCE</p><h3>受众如何讨论品牌</h3></div><a href="/comments">查看受众舆情 →</a></div>
-          <p className="report-inline-conclusion">{interpretation}</p>
-          <div className="dashboard-audience-kpis"><article><span>加权净情绪</span><strong>{signed(weightedCommentNet)}</strong></article><article><span>主要议题</span><strong>{topTopic?.topic ?? "等待样本"}</strong></article><article><span>主要地区</span><strong>{topAudienceRegion?.region ?? "等待推断"}</strong></article></div>
-          <div className="dashboard-comment-evidence"><h4>高互动风险评论</h4>{comments.riskComments.slice(0, 3).map((item) => <article key={item.id}><p>{item.content}</p><span>{item.platform} · {item.likes} 赞 · {item.emotion || item.sentiment}</span></article>)}{!comments.riskComments.length && <small>当前没有需要优先复核的评论。</small>}</div>
-        </section>
-      </div>
+      <section className="surface report-dashboard-section report-audience-focus">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">AUDIENCE INTELLIGENCE</p><h3>受众在关注什么，以及哪些观点正在获得响应</h3></div><a href="/comments">查看全部评论与人工标注 →</a></div>
+        <p className="report-inline-conclusion">{interpretation}</p>
+        {commentTotal ? <>
+          <div className="report-audience-proof-grid">
+            {(audienceInsights.length ? audienceInsights : [{ title: "评论结构", finding: `${audiencePositivePct}% 正面、${audienceNegativePct}% 负面、${audienceMixedPct}% 态度混合`, evidence: `依据 ${commentTotal} 条已取得正文的公开评论。`, action: "继续扩大评论采集覆盖后再判断趋势。", tone: "neutral" as const }]).slice(0, 4).map((item) => <article key={item.title} className={item.tone}><span>{item.title}</span><h4>{item.finding}</h4><p><b>证据</b>{item.evidence}</p><small><b>建议</b>{item.action}</small></article>)}
+          </div>
+          <div className="report-audience-detail-grid">
+            <section><h4>评论态度构成</h4><div className="report-attitude-bars">{[["正面", comments.summary.positive, audiencePositivePct], ["中性", comments.summary.neutral, audienceNeutralPct], ["负面", comments.summary.negative, audienceNegativePct], ["混合", comments.summary.mixed, audienceMixedPct]].map(([label, count, share]) => <article key={String(label)}><span>{label}</span><i><b style={{ width: `${share}%`, background: sentimentColors[String(label)] }} /></i><strong>{count} 条 · {share}%</strong></article>)}</div></section>
+            <section><h4>最集中的讨论议题</h4><div className="report-topic-evidence">{comments.topics.slice(0, 5).map((item) => <article key={item.topic}><strong>{item.topic}</strong><span>{item.count} 条，占 {pct(item.count, commentTotal)}%</span><small>{item.negative} 条负面 · {item.likes ?? 0} 赞 · {item.replies ?? 0} 回复</small></article>)}{!comments.topics.length && <small>暂无可归纳议题</small>}</div></section>
+            <section className="dashboard-comment-evidence"><h4>高互动代表性原文</h4>{evidenceComments.slice(0, 3).map((item) => <article key={item.id}><p>“{item.content}”</p><span>{item.platform} · {item.likes} 赞{item.replies ? ` · ${item.replies} 回复` : ""} · {item.topic || item.emotion || item.sentiment}</span></article>)}{!evidenceComments.length && <small>当前没有可展示的代表性评论。</small>}</section>
+          </div>
+        </> : <div className="report-dashboard-empty">尚未取得可分析的公开评论正文；平台显示的评论总数不会被当作受众洞察。</div>}
+      </section>
+
+      <section className="surface report-dashboard-section">
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">CONTENT INTELLIGENCE</p><h3>媒体与原帖如何描述品牌</h3></div><a href="/analytics">查看内容舆情 →</a></div>
+        <p className="report-inline-conclusion">本期 {report.total} 条内容中，{report.sentiment.positive} 条正面、{report.sentiment.negative} 条负面、{report.sentiment.mixed} 条态度混合。{topEmotion ? `最常见的具体表达是“${topEmotion.label}”，出现 ${topEmotion.value} 次。` : "具体情绪样本仍不足。"}</p>
+        <div className="report-content-summary-grid"><div className="dashboard-sentiment-block"><div className="dashboard-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div>{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></div><div className="dashboard-topic-cloud">{reportWords.slice(0, 20).map((item, index) => <span key={item.word} className={index < 4 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 13}px` }}>{item.word}</span>)}{!reportWords.length && <small>暂无有效议题词</small>}</div></div>
+      </section>
 
       <section className="surface report-dashboard-section">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">GEOGRAPHIC INTELLIGENCE</p><h3>地区声量与市场差异</h3></div><a href="/overview">返回情报总览 →</a></div>
-        <p className="report-inline-conclusion">{topCountry ? `${topCountry.country}是本期声量最高的地区，占全部内容的 ${pct(topCountry.count, report.total)}%。${topAudienceRegion ? `${topAudienceRegion.region}的受众接受度为“${topAudienceRegion.acceptance}”，主要关注“${topAudienceRegion.topTopic || "待归纳"}”。` : "评论地区样本不足，暂不能比较不同文化地区的接受度。"}` : "当前缺少可确认的媒体发布地区。"}</p>
-        <div className="dashboard-geo-grid"><div><ReportMap countries={report.countries} countryCodes={countryCodes} /><div className="report-map-legend"><span>内容较少</span><i /><i /><i /><i /><i /><span>内容最多</span></div></div><div className="dashboard-region-table"><header><span>地区</span><span>内容</span><span>风险</span><span>内容净情绪</span></header>{report.countries.slice(0, 9).map((item) => <article key={item.country}><strong>{item.country}</strong><span>{item.count}</span><span>{item.risk}</span><b>{signed(pct(item.positive - item.negative, item.count))}</b></article>)}</div></div>
+        <p className="report-inline-conclusion">{topCountry ? `${topCountry.country}是本期报道最集中的地区，占全部内容的 ${pct(topCountry.count, report.total)}%。${topAudienceRegion ? `${topAudienceRegion.region}归档了 ${topAudienceRegion.total} 条评论，其中 ${topAudienceRegion.positive} 条正面、${topAudienceRegion.negative} 条负面，主要讨论“${topAudienceRegion.topTopic || "待归纳"}”。` : "评论地区样本不足，暂不能比较不同文化地区的反应。"}` : "当前缺少可确认的媒体发布地区。"}</p>
+        <div className="dashboard-geo-grid"><div><ReportMap countries={report.countries} countryCodes={countryCodes} /><div className="report-map-legend"><span>内容较少</span><i /><i /><i /><i /><i /><span>内容最多</span></div></div><div className="dashboard-region-table"><header><span>地区</span><span>内容</span><span>风险</span><span>正面 / 负面</span></header>{report.countries.slice(0, 9).map((item) => <article key={item.country}><strong>{item.country}</strong><span>{item.count}</span><span>{item.risk}</span><b>{item.positive} / {item.negative}</b></article>)}</div></div>
       </section>
 
       <div className="report-dashboard-two-column conclusions">
-        <section className="surface report-dashboard-section report-risk-opportunity"><div className="report-dashboard-section-head"><div><p className="eyebrow">RISK & OPPORTUNITY</p><h3>风险与机会</h3></div></div><div><article className="risk"><span>需要处理</span><strong>{report.highRisk.length ? `${report.highRisk.length} 条高风险内容` : "暂无高风险信号"}</strong><p>{report.highRisk[0]?.title ?? "继续观察异常声量与高赞负面评论。"}</p></article><article className="opportunity"><span>可以利用</span><strong>{topAudienceRegion?.region ?? topCountry?.country ?? "核心市场待形成"}</strong><p>{topAudienceRegion ? `${topAudienceRegion.acceptance}；主要话题为“${topAudienceRegion.topTopic || "待归纳"}”。` : `${topPlatform?.label ?? "主要渠道"}是当前最集中的传播入口。`}</p></article></div></section>
+        <section className="surface report-dashboard-section report-risk-opportunity"><div className="report-dashboard-section-head"><div><p className="eyebrow">RISK & OPPORTUNITY</p><h3>风险与机会</h3></div></div><div><article className="risk"><span>需要处理</span><strong>{report.highRisk.length ? `${report.highRisk.length} 条高风险内容` : audienceInsights.find((item) => item.tone === "risk")?.finding ?? "暂无集中风险信号"}</strong><p>{report.highRisk[0]?.title ?? audienceInsights.find((item) => item.tone === "risk")?.evidence ?? "继续观察异常声量与高赞负面评论。"}</p></article><article className="opportunity"><span>可以利用</span><strong>{topTopic?.topic ?? topAudienceRegion?.region ?? topCountry?.country ?? "核心议题待形成"}</strong><p>{audienceInsights.find((item) => item.tone === "positive")?.evidence ?? (topTopic ? `${topTopic.count} 条评论围绕这一议题，其中 ${topTopic.positive ?? 0} 条为正面。` : `${topPlatform?.label ?? "主要渠道"}是当前最集中的传播入口。`)}</p></article></div></section>
         <section className="surface report-dashboard-section report-actions"><div className="report-dashboard-section-head"><div><p className="eyebrow">RECOMMENDED ACTIONS</p><h3>下一步建议</h3></div></div><ol><li><b>立即处理</b><span>{report.highRisk.length ? `复核 ${report.highRisk[0].source} 的高风险内容，并确认是否需要统一回应。` : "当前没有必须立即回应的高风险事项。"}</span></li><li><b>持续观察</b><span>监测{topCountry?.country ?? "主要地区"}与{topPlatform?.label ?? "主要平台"}是否出现新的声量峰值。</span></li><li><b>主动利用</b><span>{topTopic ? `围绕“${topTopic.topic}”整理受众真实问题和正面反馈。` : "待评论样本增加后提炼可用于传播的受众观点。"}</span></li></ol></section>
       </div>
 
@@ -364,7 +379,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       <section className="report-sheet">
         <ReportHeader section="01 / 管理摘要" brand={brand.name} period={period} />
         <div className="report-page-body"><div className="report-title-row"><div><p>EXECUTIVE SUMMARY</p><h2>本期舆情概览</h2></div><span>先结论，后证据</span></div>
-          <div className="report-kpi-grid"><ReportKpi label="归档内容" value={report.total.toLocaleString()} note={`${report.platforms.length} 类渠道`} /><ReportKpi label="国家 / 地区" value={String(report.countries.length)} note={topCountry ? `${topCountry.country}最多` : "等待样本"} /><ReportKpi label="传播事件" value={String(report.clusters.length)} note={topEvent ? `最大 ${topEvent.items.length} 个节点` : "尚未形成"} /><ReportKpi label="净情绪指数" value={`${netSentiment > 0 ? "+" : ""}${netSentiment}`} note="正面占比减负面占比" accent={netSentiment < -15} /><ReportKpi label="高风险内容" value={String(report.highRisk.length)} note="风险分 ≥ 70" accent={report.highRisk.length > 0} /></div>
+          <div className="report-kpi-grid"><ReportKpi label="归档内容" value={report.total.toLocaleString()} note={`${report.platforms.length} 类渠道`} /><ReportKpi label="国家 / 地区" value={String(report.countries.length)} note={topCountry ? `${topCountry.country}最多` : "等待样本"} /><ReportKpi label="已分析评论" value={commentTotal.toLocaleString()} note={`${comments.summary.authors} 位公开参与者`} /><ReportKpi label="负面评论" value={commentTotal ? `${audienceNegativePct}%` : "—"} note={`${comments.summary.negative} / ${commentTotal} 条`} accent={audienceNegativePct >= 25} /><ReportKpi label="高风险内容" value={String(report.highRisk.length)} note="风险分 ≥ 70" accent={report.highRisk.length > 0} /></div>
           <div className="report-summary-layout"><section><h3>自动研判</h3><ol>{insights.map((item, index) => <li key={item}><b>{String(index + 1).padStart(2, "0")}</b><span>{item}</span></li>)}</ol></section><aside><h3>风险雷达</h3><div className="report-risk-score"><strong>{report.highRisk[0]?.risk ?? 0}</strong><span>本期最高风险分</span></div><div className="report-risk-list">{report.highRisk.slice(0, 3).map((item) => <article key={item.id}><span>{item.source_country} · {item.source}</span><strong>{item.title}</strong><small>{item.emotion || item.sentiment} · {shortDate(item.published_at)}</small></article>)}{!report.highRisk.length && <p>未发现需要立即复核的高风险内容。</p>}</div></aside></div>
         </div><ReportFooter page={2} generatedAt={generatedAt} />
       </section>
@@ -388,7 +403,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       <section className="report-sheet">
         <ReportHeader section="04 / 情绪与议题" brand={brand.name} period={period} />
         <div className="report-page-body"><div className="report-title-row"><div><p>SENTIMENT & THEMES</p><h2>报道情绪、具体意图与高频议题</h2></div><span>机器研判需结合原文复核</span></div>
-          <div className="report-sentiment-grid"><section><h3>情绪结构</h3><div className="report-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{netSentiment > 0 ? `+${netSentiment}` : netSentiment}</strong><span>净情绪指数</span></div></div><div className="report-sentiment-legend">{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></section><section><h3>具体情绪与行动意图</h3><BarRows items={report.emotions.slice(0, 9)} max={maxEmotion} tone="emotion" /></section><section><h3>高频议题</h3><div className="report-word-cloud">{reportWords.map((item, index) => <span key={item.word} className={index < 5 ? "hot" : ""} style={{ fontSize: `${13 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 20}px` }}>{item.word}<sup>{item.count}</sup></span>)}{!reportWords.length && <p>本期暂无可统计的有效议题词</p>}</div></section></div>
+          <div className="report-sentiment-grid"><section><h3>情绪结构</h3><div className="report-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div className="report-sentiment-legend">{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></section><section><h3>具体情绪与行动意图</h3><BarRows items={report.emotions.slice(0, 9)} max={maxEmotion} tone="emotion" /></section><section><h3>高频议题</h3><div className="report-word-cloud">{reportWords.map((item, index) => <span key={item.word} className={index < 5 ? "hot" : ""} style={{ fontSize: `${13 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 20}px` }}>{item.word}<sup>{item.count}</sup></span>)}{!reportWords.length && <p>本期暂无可统计的有效议题词</p>}</div></section></div>
           <div className="report-method-note"><strong>判读口径</strong><span>极性用于快速筛查；“担忧、质疑、期待、好奇、购买意向、嘲讽”等具体情绪和行动意图更适合支持公关决策。词频已过滤中英文常见虚词与品牌名。</span></div>
         </div><ReportFooter page={5} generatedAt={generatedAt} />
       </section>
@@ -404,8 +419,8 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       {includeComments && <section className="report-sheet">
         <ReportHeader section="06 / 受众舆情" brand={brand.name} period={period} />
         <div className="report-page-body"><div className="report-title-row"><div><p>COMMENT INTELLIGENCE</p><h2>受众反馈、核心议题与风险评论</h2></div><span>仅统计实际取得的公开评论文本</span></div>
-          <div className="report-kpi-grid comments"><ReportKpi label="已分析评论" value={commentTotal.toLocaleString()} note={`${comments.summary.authors} 位公开参与者`} /><ReportKpi label="净情绪指数" value={`${commentNet > 0 ? "+" : ""}${commentNet}`} note="正面占比减负面占比" accent={commentNet < -15} /><ReportKpi label="负面评论" value={`${pct(comments.summary.negative, commentTotal)}%`} note={`${comments.summary.negative} 条`} accent={comments.summary.negative > commentTotal * .2} /><ReportKpi label="评论互动" value={(comments.summary.likes + comments.summary.replies).toLocaleString()} note="获赞与回复合计" /><ReportKpi label="采集覆盖" value={`${comments.summary.coverage}%`} note="已归档 / 平台披露" /></div>
-          {commentTotal ? <div className="report-comments-layout"><section><h3>核心讨论议题</h3><BarRows items={comments.topics.slice(0, 8).map((item) => ({ label: item.topic, value: item.count, note: `${item.negative ? pct(item.negative, item.count) : 0}% 负面` }))} max={Math.max(1, ...comments.topics.map((item) => item.count))} /></section><section><h3>评论高频词</h3><div className="report-word-cloud compact">{comments.words.slice(0, 25).map((item, index) => <span key={item.word} className={index < 5 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, comments.words[0]?.count ?? 1) * 18}px` }}>{item.word}<sup>{item.count}</sup></span>)}</div></section><section className="report-risk-comments"><h3>优先复核评论</h3>{comments.riskComments.slice(0, 4).map((item) => <article key={item.id}><header><span>{item.sentiment} · {item.emotion}</span><b>{item.platform} · {item.likes} 赞</b></header><p>{item.content}</p><small>{item.author_username ? `@${item.author_username}` : "公开账号"} · {item.post_title}</small></article>)}</section></div> : <div className="report-empty"><strong>本期没有可用于分析的公开评论文本</strong><span>平台显示的评论总数不会被冒充为已分析样本；连接器取得正文后，报告会自动补充情绪、议题、词频和风险评论。</span></div>}
+          <div className="report-kpi-grid comments"><ReportKpi label="已分析评论" value={commentTotal.toLocaleString()} note={`${comments.summary.authors} 位公开参与者`} /><ReportKpi label="正面评论" value={commentTotal ? `${audiencePositivePct}%` : "—"} note={`${comments.summary.positive} 条`} /><ReportKpi label="负面评论" value={commentTotal ? `${audienceNegativePct}%` : "—"} note={`${comments.summary.negative} 条`} accent={comments.summary.negative > commentTotal * .2} /><ReportKpi label="评论互动" value={(comments.summary.likes + comments.summary.replies).toLocaleString()} note="获赞与回复合计" /><ReportKpi label="采集覆盖" value={`${comments.summary.coverage}%`} note="已归档 / 平台披露" /></div>
+          {commentTotal ? <><p className="report-pdf-audience-lead">{interpretation}</p><div className="report-comments-layout audience-evidence"><section><h3>关键受众洞察</h3><div className="report-pdf-insights">{audienceInsights.slice(0, 3).map((item) => <article key={item.title}><strong>{item.finding}</strong><p>{item.evidence}</p><small>{item.action}</small></article>)}{!audienceInsights.length && <p>现有样本中，正面评论 {comments.summary.positive} 条，负面评论 {comments.summary.negative} 条，态度混合 {comments.summary.mixed} 条。</p>}</div></section><section><h3>核心讨论议题</h3><BarRows items={comments.topics.slice(0, 7).map((item) => ({ label: item.topic, value: item.count, note: `${item.negative} 条负面 · ${item.likes ?? 0} 赞` }))} max={Math.max(1, ...comments.topics.map((item) => item.count))} /></section><section className="report-risk-comments"><h3>高互动代表性原文</h3>{evidenceComments.slice(0, 4).map((item) => <article key={item.id}><header><span>{item.sentiment} · {item.topic}</span><b>{item.platform} · {item.likes} 赞{item.replies ? ` · ${item.replies} 回复` : ""}</b></header><p>{item.content}</p><small>{item.audience_region ?? "地区待确认"} · {item.post_title}</small></article>)}</section></div></> : <div className="report-empty"><strong>本期没有可用于分析的公开评论文本</strong><span>平台显示的评论总数不会被冒充为已分析样本；连接器取得正文后，报告会自动补充情绪、议题、词频和风险评论。</span></div>}
         </div><ReportFooter page={includeEvents ? 7 : 6} generatedAt={generatedAt} />
       </section>}
 

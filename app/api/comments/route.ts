@@ -276,7 +276,7 @@ export async function GET(request: Request) {
 
   const sentimentWeights = new Map<string, { count: number; weight: number }>();
   const emotionWeights = new Map<string, { count: number; weight: number }>();
-  const topicWeights = new Map<string, { topic: string; count: number; negative: number; weight: number; negativeWeight: number }>();
+  const topicWeights = new Map<string, { topic: string; count: number; positive: number; neutral: number; negative: number; mixed: number; likes: number; replies: number; weight: number; negativeWeight: number }>();
   const timelineWeights = new Map<string, { date: string; total: number; positive: number; negative: number; weight: number; negativeWeight: number }>();
   for (const row of weightedRows) {
     const weight = Number(row.resonance_weight ?? 1);
@@ -287,9 +287,14 @@ export async function GET(request: Request) {
     sentimentEntry.count += 1; sentimentEntry.weight += weight; sentimentWeights.set(tone, sentimentEntry);
     const emotionEntry = emotionWeights.get(emotion) ?? { count: 0, weight: 0 };
     emotionEntry.count += 1; emotionEntry.weight += weight; emotionWeights.set(emotion, emotionEntry);
-    const topicEntry = topicWeights.get(topic) ?? { topic, count: 0, negative: 0, weight: 0, negativeWeight: 0 };
+    const topicEntry = topicWeights.get(topic) ?? { topic, count: 0, positive: 0, neutral: 0, negative: 0, mixed: 0, likes: 0, replies: 0, weight: 0, negativeWeight: 0 };
     topicEntry.count += 1; topicEntry.weight += weight;
-    if (tone === "负面") { topicEntry.negative += 1; topicEntry.negativeWeight += weight; }
+    topicEntry.likes += Math.max(0, Number(row.likes ?? 0));
+    topicEntry.replies += Math.max(0, Number(row.replies ?? 0));
+    if (tone === "正面") topicEntry.positive += 1;
+    else if (tone === "负面") { topicEntry.negative += 1; topicEntry.negativeWeight += weight; }
+    else if (tone === "混合") topicEntry.mixed += 1;
+    else topicEntry.neutral += 1;
     topicWeights.set(topic, topicEntry);
     const date = String(row.published_at ?? "").slice(0, 10);
     if (date) {
@@ -303,7 +308,6 @@ export async function GET(request: Request) {
 
   const weightedSentiment = Object.fromEntries(["正面", "中性", "负面", "混合"].map((tone) => [tone, rounded(sentimentWeights.get(tone)?.weight ?? 0)]));
   const weightedTotal = Object.values(weightedSentiment).reduce((sum, value) => sum + Number(value), 0);
-  const rawNet = weightedRows.length ? Math.round(((sentimentWeights.get("正面")?.count ?? 0) - (sentimentWeights.get("负面")?.count ?? 0)) / weightedRows.length * 100) : 0;
   const weightedNet = weightedTotal ? Math.round((Number(weightedSentiment["正面"]) - Number(weightedSentiment["负面"])) / weightedTotal * 100) : 0;
 
   const weightedRegionalRows = withWeights(regionalRows.results);
@@ -335,22 +339,38 @@ export async function GET(request: Request) {
   const insights: Array<{ title: string; finding: string; evidence: string; action: string; tone: "positive" | "watch" | "risk" | "neutral" }> = [];
   const leadingTopic = rankedTopics[0];
   if (leadingTopic) {
-    const representative = weightedRows.filter((row) => String(row.topic) === leadingTopic.topic).sort((a, b) => Number(b.resonance_weight) - Number(a.resonance_weight))[0];
-    const negativeShare = leadingTopic.weight ? Math.round(leadingTopic.negativeWeight / leadingTopic.weight * 100) : 0;
-    insights.push({ title: "主要讨论", finding: `${leadingTopic.topic}是当前共鸣最高的议题`, evidence: `${leadingTopic.count} 条评论，共鸣分 ${leadingTopic.weight.toFixed(1)}，其中 ${negativeShare}% 为负面。${representative?.content ? `代表性表达：“${String(representative.content).slice(0, 72)}${String(representative.content).length > 72 ? "…" : ""}”` : ""}`, action: negativeShare >= 30 ? "建议核对高互动负面评论，明确用户质疑的具体产品信息。" : "建议把受众认可的具体表述纳入后续内容沟通。", tone: negativeShare >= 30 ? "risk" : "neutral" });
+    const representative = weightedRows.filter((row) => String(row.topic) === leadingTopic.topic)
+      .sort((a, b) => (Number(b.likes ?? 0) + Number(b.replies ?? 0)) - (Number(a.likes ?? 0) + Number(a.replies ?? 0)))[0];
+    const topicShare = Math.round(leadingTopic.count / Math.max(1, weightedRows.length) * 100);
+    const negativeShare = Math.round(leadingTopic.negative / Math.max(1, leadingTopic.count) * 100);
+    insights.push({ title: "受众最关心什么", finding: `“${leadingTopic.topic}”是当前最集中的讨论`, evidence: `${leadingTopic.count} 条评论，占已分析评论的 ${topicShare}%；其中 ${leadingTopic.negative} 条为负面，共获得 ${leadingTopic.likes} 个赞和 ${leadingTopic.replies} 条回复。${representative?.content ? `代表性表达：“${String(representative.content).slice(0, 92)}${String(representative.content).length > 92 ? "…" : ""}”` : ""}`, action: negativeShare >= 30 ? "先核对这些评论指向的具体产品疑问，再准备事实说明或常见问题回应。" : "把受众反复使用的具体表达整理为后续内容选题，避免只使用品牌内部语言。", tone: negativeShare >= 30 ? "risk" : "neutral" });
   }
   if (weightedRows.length) {
-    const difference = weightedNet - rawNet;
-    insights.push({ title: "互动共鸣", finding: Math.abs(difference) < 5 ? "高互动观点与整体评论方向基本一致" : difference > 0 ? "获得更多点赞的观点比整体评论更正向" : "获得更多点赞的观点比整体评论更负向", evidence: `数量净情绪为 ${rawNet > 0 ? "+" : ""}${rawNet}，点赞加权后为 ${weightedNet > 0 ? "+" : ""}${weightedNet}，相差 ${Math.abs(difference)} 点。`, action: difference < -8 ? "建议优先阅读高共鸣负面评论，而不是只看负面评论数量。" : "继续同时观察数量口径与共鸣口径，避免单一指标误导。", tone: difference < -8 ? "risk" : difference > 8 ? "positive" : "neutral" });
+    const mostLiked = [...weightedRows].sort((a, b) => Number(b.likes ?? 0) - Number(a.likes ?? 0)).slice(0, Math.min(10, weightedRows.length));
+    const topNegative = mostLiked.filter((row) => String(row.sentiment) === "负面");
+    const topPositive = mostLiked.filter((row) => String(row.sentiment) === "正面");
+    const negativeLikes = weightedRows.filter((row) => String(row.sentiment) === "负面").reduce((sum, row) => sum + Number(row.likes ?? 0), 0);
+    const positiveLikes = weightedRows.filter((row) => String(row.sentiment) === "正面").reduce((sum, row) => sum + Number(row.likes ?? 0), 0);
+    const direction = topNegative.length > topPositive.length ? "高互动评论更集中在质疑和担忧" : topPositive.length > topNegative.length ? "高互动评论更集中在认可和期待" : "高互动评论中的正负观点相对接近";
+    insights.push({ title: "哪些观点获得响应", finding: direction, evidence: `获赞最多的 ${mostLiked.length} 条评论中，${topNegative.length} 条为负面、${topPositive.length} 条为正面。全部负面评论共获 ${negativeLikes} 赞，正面评论共获 ${positiveLikes} 赞。`, action: topNegative.length > topPositive.length ? "优先阅读获赞较多的负面原文，判断它们是否围绕同一事实形成共识。" : "提炼高赞正面评论认可的具体产品点，同时继续观察是否出现新的集中质疑。", tone: topNegative.length > topPositive.length ? "risk" : topPositive.length > topNegative.length ? "positive" : "neutral" });
   }
   const comparableRegions = regions.filter((item) => item.total >= 3);
   if (comparableRegions.length >= 2) {
     const best = [...comparableRegions].sort((a, b) => b.net - a.net)[0];
     const weakest = [...comparableRegions].sort((a, b) => a.net - b.net)[0];
-    insights.push({ title: "地区差异", finding: `${best.region}与${weakest.region}的接受情况存在差异`, evidence: `${best.region}共鸣净情绪为 ${best.net > 0 ? "+" : ""}${best.net}，${weakest.region}为 ${weakest.net > 0 ? "+" : ""}${weakest.net}；两地主要议题分别是“${best.topTopic}”和“${weakest.topTopic}”。`, action: "建议分别查看两地代表性评论，再决定是否需要调整本地化表达。", tone: best.net - weakest.net >= 20 ? "watch" : "neutral" });
+    insights.push({ title: "不同地区的关注点", finding: `${best.region}与${weakest.region}呈现出不同的评论结构`, evidence: `${best.region}有 ${best.total} 条评论，其中 ${best.positive} 条正面、${best.negative} 条负面，主要讨论“${best.topTopic}”；${weakest.region}有 ${weakest.total} 条评论，其中 ${weakest.positive} 条正面、${weakest.negative} 条负面，主要讨论“${weakest.topTopic}”。`, action: "分别打开两地代表性原文，确认差异来自文化语境、传播素材还是产品信息，再决定是否本地化回应。", tone: best.net - weakest.net >= 20 ? "watch" : "neutral" });
   }
   const riskTopic = [...rankedTopics].filter((item) => item.negativeWeight > 0).sort((a, b) => b.negativeWeight - a.negativeWeight)[0];
-  if (riskTopic) insights.push({ title: "风险关注", finding: `负面共鸣主要集中在“${riskTopic.topic}”`, evidence: `该议题的负面共鸣分为 ${riskTopic.negativeWeight.toFixed(1)}，涉及 ${riskTopic.negative} 条负面评论。`, action: "建议先核对原文是否集中指向同一事实，再决定回应、解释或持续观察。", tone: riskTopic.negativeWeight >= 5 ? "risk" : "watch" });
+  if (riskTopic) insights.push({ title: "最需要核对的质疑", finding: `负面反馈主要集中在“${riskTopic.topic}”`, evidence: `该议题包含 ${riskTopic.negative} 条负面评论，共获得 ${riskTopic.likes} 个赞和 ${riskTopic.replies} 条回复；占该议题全部 ${riskTopic.count} 条评论的 ${Math.round(riskTopic.negative / Math.max(1, riskTopic.count) * 100)}%。`, action: "先核对这些原文是否指向同一个可验证事实，再决定公开回应、补充说明或持续观察。", tone: riskTopic.negative >= 3 || riskTopic.likes >= 10 ? "risk" : "watch" });
+
+  const evidenceComments = [...weightedRows]
+    .filter((row) => String(row.content ?? "").trim())
+    .sort((a, b) => (Number(b.likes ?? 0) + Number(b.replies ?? 0) * 2) - (Number(a.likes ?? 0) + Number(a.replies ?? 0) * 2))
+    .slice(0, 8).map((row) => ({
+      id: Number(row.id), content: String(row.content ?? ""), sentiment: String(row.sentiment ?? "中性"), emotion: String(row.emotion ?? "中性陈述"),
+      topic: String(row.topic ?? "其他讨论"), likes: Number(row.likes ?? 0), replies: Number(row.replies ?? 0), platform: String(row.platform ?? ""),
+      post_title: String(row.post_title ?? ""), audience_region: String(row.audience_region ?? "地区未知"), region_confidence: String(row.region_confidence ?? "未知"),
+    }));
 
   const total = Number(summary?.total ?? 0);
   const reported = Number(targetTotals?.reported ?? 0);
@@ -384,6 +404,7 @@ export async function GET(request: Request) {
     targets: targets.results,
     regions,
     insights,
+    evidenceComments,
     riskComments: weightedRiskComments,
     comments: weightedComments,
     calibration,

@@ -37,6 +37,7 @@ export type LlmReportBrief = {
   caveats: string;
   generated_at?: string;
   model?: string;
+  version?: string;
 };
 
 class OpenAIRequestError extends Error {
@@ -265,9 +266,9 @@ async function failJob(db: D1Database, brandId: number, candidate: Candidate, er
 }
 
 async function reportContext(db: D1Database, brandId: number) {
-  const [content, countries, platforms, topics, comments, reviews] = await Promise.all([
+  const [content, countries, platforms, topics, comments, commentTopics, commentEvidence, commentRegions, topPosts, collection, reviews] = await Promise.all([
     db.prepare(`SELECT COUNT(*) total, SUM(sentiment = '正面') positive, SUM(sentiment = '负面') negative,
-      SUM(sentiment = '混合') mixed, MAX(risk) max_risk, SUM(engagement) engagement
+      SUM(sentiment = '中性') neutral, SUM(sentiment = '混合') mixed, MAX(risk) max_risk, SUM(engagement) engagement
       FROM mentions WHERE brand_id = ? AND published_at >= datetime('now', '-30 days')`).bind(brandId).first<Record<string, unknown>>(),
     db.prepare(`SELECT source_country label, COUNT(*) count FROM mentions WHERE brand_id = ? AND published_at >= datetime('now', '-30 days')
       GROUP BY source_country ORDER BY count DESC LIMIT 6`).bind(brandId).all<Record<string, unknown>>(),
@@ -276,19 +277,56 @@ async function reportContext(db: D1Database, brandId: number) {
     db.prepare(`SELECT topics label, COUNT(*) count FROM mentions WHERE brand_id = ? AND published_at >= datetime('now', '-30 days')
       AND topics != '' GROUP BY topics ORDER BY count DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
     db.prepare(`SELECT COUNT(*) total, SUM(sentiment = '正面') positive, SUM(sentiment = '负面') negative,
-      SUM(sentiment = '混合') mixed, SUM(likes) likes, SUM(replies) replies
+      SUM(sentiment = '中性') neutral, SUM(sentiment = '混合') mixed, SUM(likes) likes, SUM(replies) replies,
+      COUNT(DISTINCT COALESCE(NULLIF(author_id, ''), NULLIF(author_username, ''))) authors
       FROM mention_comments WHERE brand_id = ? AND (published_at = '' OR published_at >= datetime('now', '-30 days'))`).bind(brandId).first<Record<string, unknown>>(),
+    db.prepare(`SELECT topic, COUNT(*) count,
+      SUM(sentiment = '正面') positive, SUM(sentiment = '中性') neutral, SUM(sentiment = '负面') negative, SUM(sentiment = '混合') mixed,
+      SUM(likes) likes, SUM(replies) replies
+      FROM mention_comments WHERE brand_id = ? AND (published_at = '' OR published_at >= datetime('now', '-30 days'))
+      GROUP BY topic ORDER BY count DESC, likes DESC LIMIT 10`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT c.content, c.sentiment, c.emotion, c.topic, c.likes, c.replies, c.platform, c.language,
+      m.title post_title, m.source post_source, m.source_country,
+      CASE WHEN COALESCE(m.source_country, '') NOT IN ('', '地区待确认', '地区未披露', '全球') THEN m.source_country
+        WHEN c.language = '泰语' THEN '泰语文化区' WHEN c.language = '日语' THEN '日语文化区'
+        WHEN c.language = '韩语' THEN '韩语文化区' WHEN c.language = '中文' THEN '华语地区'
+        WHEN c.language = '英文' THEN '英语地区' ELSE '地区未知' END audience_region
+      FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      ORDER BY (c.likes + c.replies * 2) DESC, c.id DESC LIMIT 15`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT CASE WHEN COALESCE(m.source_country, '') NOT IN ('', '地区待确认', '地区未披露', '全球') THEN m.source_country
+        WHEN c.language = '泰语' THEN '泰语文化区' WHEN c.language = '日语' THEN '日语文化区'
+        WHEN c.language = '韩语' THEN '韩语文化区' WHEN c.language = '中文' THEN '华语地区'
+        WHEN c.language = '英文' THEN '英语地区' ELSE '地区未知' END region,
+      COUNT(*) total, SUM(c.sentiment = '正面') positive, SUM(c.sentiment = '中性') neutral,
+      SUM(c.sentiment = '负面') negative, SUM(c.sentiment = '混合') mixed, SUM(c.likes) likes, SUM(c.replies) replies
+      FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      GROUP BY region ORDER BY total DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT m.title, m.source, m.platform, COUNT(c.id) comments, SUM(c.likes) likes,
+      SUM(c.sentiment = '负面') negative, SUM(c.sentiment = '正面') positive
+      FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
+      WHERE c.brand_id = ? AND (c.published_at = '' OR c.published_at >= datetime('now', '-30 days'))
+      GROUP BY m.id, m.title, m.source, m.platform ORDER BY comments DESC, likes DESC LIMIT 8`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COALESCE(SUM(reported_count), 0) reported, COALESCE(SUM(collected_count), 0) collected,
+      SUM(status IN ('review','blocked','error','unavailable')) problem_targets
+      FROM social_comment_targets WHERE brand_id = ?`).bind(brandId).first<Record<string, unknown>>(),
     db.prepare(`SELECT kind, trigger_reason, confidence, result_json FROM llm_analysis_jobs WHERE brand_id = ?
       AND kind IN ('mention','comment') AND status = 'completed' ORDER BY completed_at DESC LIMIT 12`).bind(brandId).all<Record<string, unknown>>(),
   ]);
-  return { period: "过去30天", content, countries: countries.results, platforms: platforms.results, topics: topics.results,
-    comments, reviewed_items: reviews.results.map((item) => { try { return { ...item, result: JSON.parse(String(item.result_json)) }; } catch { return item; } }) };
+  const reported = Number(collection?.reported ?? 0); const collected = Number(collection?.collected ?? 0);
+  return { report_version: "audience-evidence-v2", period: "过去30天", content, countries: countries.results, platforms: platforms.results, content_topics: topics.results,
+    audience: { summary: comments, topics: commentTopics.results, high_interaction_comments: commentEvidence.results,
+      regions: commentRegions.results, top_posts: topPosts.results,
+      collection: { reported, collected, coverage_percent: reported ? Math.min(100, Math.round(collected / reported * 100)) : Number(comments?.total ?? 0) ? 100 : 0,
+        problem_targets: Number(collection?.problem_targets ?? 0) } },
+    reviewed_items: reviews.results.map((item) => { try { return { ...item, result: JSON.parse(String(item.result_json)) }; } catch { return item; } }) };
 }
 
 async function runReportAgent(db: D1Database, brandId: number, brand: Record<string, unknown>, apiKey: string) {
   const context = await reportContext(db, brandId);
   if (Number(context.content?.total ?? 0) + Number(context.comments?.total ?? 0) === 0) return { generated: false, reason: "no_data" };
-  const sourceHash = stableHash(JSON.stringify(context));
+  const sourceHash = stableHash(`audience-evidence-v2|${JSON.stringify(context)}`);
   const existing = await db.prepare(`SELECT source_hash, status FROM llm_analysis_jobs WHERE brand_id = ? AND kind = 'report' AND target_id = ?`)
     .bind(brandId, brandId).first<{ source_hash: string; status: string }>();
   if (existing?.source_hash === sourceHash && existing.status === "completed") return { generated: false, reason: "unchanged" };
@@ -301,9 +339,9 @@ async function runReportAgent(db: D1Database, brandId: number, brand: Record<str
     .bind(brandId, brandId, sourceHash, REPORT_MODEL, now, now).run();
   try {
     const result = await openAIResponse(apiKey, REPORT_MODEL,
-      `你是企业品牌舆情分析负责人。把结构化数据转化为克制、可核验、可直接用于周报或月报的中文结论。品牌为“${String(brand.name ?? "品牌")}”。区分媒体内容与受众评论，不把媒体发布地区当成评论者真实国籍，不把时间与文本相似度推断的传播链路写成已证实事实。没有数据支持时必须明确说明。`,
+      `你是企业品牌舆情分析负责人。把结构化数据转化为可直接用于周报或月报的中文判断，品牌为“${String(brand.name ?? "品牌")}”。受众舆情是报告重点：不要复述全部数字，而要识别受众最关心的问题、支持或反对的具体理由、高互动观点与普通评论是否不同、地区间是否存在有证据的差异，以及这些发现意味着什么。每条重要判断必须在同一句或下一句写出可核验依据，例如评论条数、样本占比、获赞数、回复数或代表性原文。不要创造或使用“净情绪指数、共鸣分、接受度指数、风险指数”等读者不熟悉的综合分数。严格区分观察事实、分析推断和建议动作；不要把媒体发布地区当成评论者真实国籍，也不要把推断传播链路写成已证实事实。样本少、采集覆盖低或地区置信度不足时必须明确说明，禁止为了显得有洞察而夸大结论。`,
       JSON.stringify(context), "brand_intelligence_report", reportSchema) as unknown as LlmReportBrief;
-    const stored = { ...result, generated_at: now, model: REPORT_MODEL };
+    const stored = { ...result, generated_at: now, model: REPORT_MODEL, version: "audience-evidence-v2" };
     await db.prepare(`UPDATE llm_analysis_jobs SET status = 'completed', result_json = ?, confidence = 100,
       completed_at = ?, updated_at = ? WHERE brand_id = ? AND kind = 'report' AND target_id = ? AND source_hash = ?`)
       .bind(JSON.stringify(stored), now, now, brandId, brandId, sourceHash).run();
