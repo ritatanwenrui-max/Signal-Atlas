@@ -147,8 +147,7 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(monid, /replyAdapter === "reddit"/);
   assert.match(monid, /redditCommentPage/);
   assert.match(page, /<option>Reddit<\/option>/);
-  assert.match(page, /Reddit 公开讨论已纳入媒体档案/);
-  assert.match(page, /查看 Reddit/);
+  assert.doesNotMatch(page, /reddit-archive-status/);
   assert.match(page, /关键词发现 · 详情补全 · 评论跟踪/);
   assert.match(comments, /platform: "Reddit"/);
   assert.match(repository, /"Reddit"\] as const/);
