@@ -10,14 +10,14 @@ type MonidRun = {
   providerResponse?: { httpStatus?: number; error?: { message?: string } };
   cost?: { value?: number; currency?: string } | number | null;
 };
-type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
+type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "reddit_details" | "post_comments" | "comment_replies";
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
 type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1" | "reddit"; replyAdapter?: "v2" | "v1" | "reddit" };
 type SocialComment = {
   id: string; parentId: string; text: string; authorId: string; authorUsername: string; authorName: string;
   verified: boolean; likes: number; replies: number; publishedAt: string; commentUrl: string;
 };
-type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit" };
+type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit"; top_level_complete: number; reddit_details_complete: number };
 type ReplyTarget = { mention_id: number; platform: string; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit" };
 
 const API_BASE = "https://api.monid.ai";
@@ -28,7 +28,8 @@ const COMMENTS_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_post_comments";
 const COMMENTS_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
 const REPLIES_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_comment_replies";
 const REPLIES_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
-const REDDIT_SEARCH_ENDPOINT = "/api/v1/reddit/app/fetch_dynamic_search";
+const REDDIT_SEARCH_ENDPOINT = "/trudax/reddit-scraper-lite";
+const REDDIT_DETAILS_ENDPOINT = "/api/v1/reddit/app/fetch_post_details";
 const REDDIT_COMMENTS_ENDPOINT = "/api/v1/reddit/app/fetch_post_comments";
 const REDDIT_REPLIES_ENDPOINT = "/api/v1/reddit/app/fetch_comment_replies";
 const SOCIAL_SEARCHES = {
@@ -36,7 +37,7 @@ const SOCIAL_SEARCHES = {
   YouTube: { stage: "search_youtube" as const, provider: "tikhub", endpoint: "/api/v1/youtube/web_v2/get_general_search_v2" },
   TikTok: { stage: "search_tiktok" as const, provider: "tikhub", endpoint: "/api/v1/tiktok/web/fetch_general_search" },
   Facebook: { stage: "search_facebook" as const, provider: "blockrun.ai", endpoint: "/api/v1/exa/search" },
-  Reddit: { stage: "search_reddit" as const, provider: "tikhub", endpoint: REDDIT_SEARCH_ENDPOINT },
+  Reddit: { stage: "search_reddit" as const, provider: "apify", endpoint: REDDIT_SEARCH_ENDPOINT },
 };
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
@@ -243,9 +244,9 @@ function parseSocialPosts(output: unknown, terms: string[], platform: "X" | "You
       ? ["title", "headline", "description", "snippet.title"]
       : platform === "TikTok" ? ["aweme_info.desc", "desc", "caption", "text", "title"]
       : platform === "X" ? ["legacy.full_text", "full_text", "note_tweet.note_tweet_results.result.text", "text", "title"]
-      : platform === "Reddit" ? ["title", "post.title", "data.title", "headline"]
+      : platform === "Reddit" ? ["title", "post.title", "data.title", "headline", "postTitle"]
       : ["text", "title", "content", "description"]);
-    const redditBody = platform === "Reddit" ? firstText(row, ["selftext", "self_text", "body", "post.selftext", "data.selftext", "content.markdown"]) : "";
+    const redditBody = platform === "Reddit" ? firstText(row, ["selftext", "self_text", "body", "text", "post.selftext", "data.selftext", "content.markdown"]) : "";
     const text = [headline, redditBody].filter(Boolean).join("\n");
     if (!text) continue;
     const normalizedText = normalized(text);
@@ -259,34 +260,65 @@ function parseSocialPosts(output: unknown, terms: string[], platform: "X" | "You
     const authorUsername = firstText(row, platform === "YouTube" ? ["author.name", "channel.title", "channel_name", "ownerText"]
       : platform === "TikTok" ? ["aweme_info.author.unique_id", "author.unique_id", "author.username", "username"]
       : platform === "X" ? ["core.user_results.result.legacy.screen_name", "user.legacy.screen_name", "screen_name", "username"]
-      : platform === "Reddit" ? ["authorInfo.name", "author.name", "author", "author_name", "data.author"]
+      : platform === "Reddit" ? ["username", "authorInfo.name", "author.name", "author", "author_name", "data.author"]
       : ["author", "authorName", "source"]);
     const authorName = firstText(row, ["author.name", "author.nickname", "core.user_results.result.legacy.name", "user.name", "channel_name", "source"]);
     const authorId = firstText(row, ["author.id", "author.uid", "authorInfo.id", "channel_id", "core.user_results.result.rest_id", "user.id", "ownerId"]);
     const url = platformPostUrl(platform, row, postId, authorUsername);
     if (!url || seen.has(url)) continue;
     seen.add(url);
-    const likes = optionalNumber(row, ["legacy.favorite_count", "statistics.digg_count", "aweme_info.statistics.digg_count", "like_count", "likes", "reactions", "score", "upvotes", "ups", "vote_count"]);
-    const comments = optionalNumber(row, ["legacy.reply_count", "statistics.comment_count", "aweme_info.statistics.comment_count", "comment_count", "comments", "numComments", "num_comments"]);
+    const likes = optionalNumber(row, ["legacy.favorite_count", "statistics.digg_count", "aweme_info.statistics.digg_count", "like_count", "likes", "reactions", "score", "upVotes", "upvotes", "ups", "vote_count"]);
+    const comments = optionalNumber(row, ["legacy.reply_count", "statistics.comment_count", "aweme_info.statistics.comment_count", "comment_count", "commentsCount", "numberOfComments", "comments", "numComments", "num_comments"]);
     const shares = optionalNumber(row, ["legacy.retweet_count", "statistics.share_count", "aweme_info.statistics.share_count", "share_count", "shares"]);
     const views = optionalNumber(row, ["views", "view_count", "statistics.play_count", "aweme_info.statistics.play_count", "legacy.ext_views.count"]);
     const followers = optionalNumber(row, ["author.follower_count", "author.followerCount", "core.user_results.result.legacy.followers_count", "channel.subscriber_count"]);
-    const published = pathValue(row, "aweme_info.create_time") ?? pathValue(row, "create_time") ?? pathValue(row, "created_utc") ?? pathValue(row, "createdUtc") ?? pathValue(row, "published_time") ?? pathValue(row, "publishedAt") ?? pathValue(row, "legacy.created_at") ?? pathValue(row, "date");
+    const published = pathValue(row, "aweme_info.create_time") ?? pathValue(row, "create_time") ?? pathValue(row, "created_utc") ?? pathValue(row, "createdUtc") ?? pathValue(row, "createdAt") ?? pathValue(row, "published_time") ?? pathValue(row, "publishedAt") ?? pathValue(row, "legacy.created_at") ?? pathValue(row, "date");
     const titleText = headline || text;
     const title = `${titleText.replace(/\s+/g, " ").trim().slice(0, 150)}${titleText.length > 150 ? "…" : ""}`;
-    const subreddit = platform === "Reddit" ? firstText(row, ["subreddit_name_prefixed", "subredditNamePrefixed", "subreddit.display_name_prefixed", "subreddit.display_name", "subreddit", "community.name", "data.subreddit_name_prefixed", "data.subreddit"]) : "";
+    const subreddit = platform === "Reddit" ? firstText(row, ["communityName", "parsedCommunityName", "subreddit_name_prefixed", "subredditNamePrefixed", "subreddit.display_name_prefixed", "subreddit.display_name", "subreddit", "community.name", "data.subreddit_name_prefixed", "data.subreddit"]) : "";
     const source = subreddit ? (subreddit.startsWith("r/") ? subreddit : `r/${subreddit}`) : authorUsername ? `@${authorUsername}` : authorName || platform;
     candidates.push({
       title, url, source, platform,
       sourceCountry: "地区待确认", language: "语言待确认", publishedAt: isoDate(published),
       engagement: Math.max(0, likes) + Math.max(0, comments) + Math.max(0, shares), discussionText: text,
       commentsAnalyzed: 0, parentUrl: "", relation: `普通文字关键词：${matchedTerms.join("、")}`,
-      author: authorUsername ? `@${authorUsername}` : authorName, provider: platform === "Facebook" ? "Monid · Exa" : "Monid · TikHub",
+      author: authorUsername ? (platform === "Reddit" ? `u/${authorUsername.replace(/^u\//, "")}` : `@${authorUsername}`) : authorName,
+      provider: platform === "Facebook" ? "Monid · Exa" : platform === "Reddit" ? "Monid · Apify + TikHub" : "Monid · TikHub",
       discoveredVia: "monid_public_search",
       socialMetrics: { postId: postId || (platform === "Facebook" ? url : ""), authorId, authorUsername, authorName, followerCount: followers, likes, comments, shares, views, plays: views, matchedTerms },
     });
   }
   return candidates.slice(0, 100);
+}
+
+function redditPostDetails(output: unknown, requestedId: string) {
+  const normalizedId = requestedId.replace(/^t3_/, "");
+  const rows = walkObjects(output);
+  const ranked = rows.map((row) => {
+    const rowId = firstText(row, ["name", "post_id", "postId", "thingId", "id", "data.name", "data.id"]).replace(/^t3_/, "");
+    const title = firstText(row, ["title", "post.title", "data.title", "headline", "postTitle"]);
+    const comments = optionalNumber(row, ["comment_count", "commentsCount", "numberOfComments", "numComments", "num_comments"]);
+    const likes = optionalNumber(row, ["upVotes", "upvotes", "ups", "score", "vote_count"]);
+    const score = (rowId && rowId === normalizedId ? 8 : 0) + (title ? 4 : 0) + (comments >= 0 ? 2 : 0) + (likes >= 0 ? 2 : 0);
+    return { row, rowId, title, comments, likes, score };
+  }).filter((item) => item.score >= 4).sort((a, b) => b.score - a.score);
+  const best = ranked[0];
+  if (!best) return null;
+  const body = firstText(best.row, ["selftext", "self_text", "body", "text", "content.markdown", "post.selftext", "data.selftext"]);
+  const username = firstText(best.row, ["username", "authorInfo.name", "author.name", "author", "author_name", "data.author"]).replace(/^u\//, "");
+  const authorId = firstText(best.row, ["authorInfo.id", "author.id", "author_id", "authorId", "data.author_id"]);
+  const subreddit = firstText(best.row, ["communityName", "parsedCommunityName", "subreddit_name_prefixed", "subredditNamePrefixed", "subreddit.display_name", "subreddit", "community.name", "data.subreddit"])
+    .replace(/^r\//, "");
+  return {
+    postId: `t3_${best.rowId || normalizedId}`,
+    title: best.title,
+    body,
+    username,
+    authorId,
+    subreddit,
+    likes: Math.max(0, best.likes),
+    comments: Math.max(0, best.comments),
+  };
 }
 
 function costValue(value: MonidRun["cost"]) {
@@ -683,6 +715,37 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
   ]);
 }
 
+async function processRedditDetails(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
+  const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
+  const details = redditPostDetails(output, descriptor.mediaId);
+  if (!details) throw new Error("Reddit 帖子详情接口未返回可识别的帖子数据");
+  const now = new Date().toISOString();
+  const title = details.title.replace(/\s+/g, " ").trim().slice(0, 300);
+  const excerpt = details.body.trim().slice(0, 2000);
+  const engagement = details.likes + details.comments;
+  await db.batch([
+    db.prepare(`UPDATE social_post_metrics SET post_id = ?, likes = MAX(likes, ?), comments = MAX(comments, ?),
+      author_id = CASE WHEN ? != '' THEN ? ELSE author_id END,
+      author_username = CASE WHEN ? != '' THEN ? ELSE author_username END,
+      metrics_updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+      .bind(details.postId, details.likes, details.comments, details.authorId, details.authorId,
+        details.username, details.username, now, brandId, descriptor.mentionId),
+    db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?),
+      top_level_complete = CASE WHEN ? > reported_count THEN 0 ELSE top_level_complete END,
+      status = CASE WHEN ? > reported_count OR top_level_complete = 0 THEN 'queued' ELSE 'collecting' END,
+      last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+      .bind(details.postId, details.comments, details.comments, details.comments, now, brandId, descriptor.mentionId),
+    db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' THEN ? ELSE title END,
+      excerpt = CASE WHEN ? != '' THEN ? ELSE excerpt END,
+      source = CASE WHEN ? != '' THEN 'r/' || ? ELSE source END,
+      author = CASE WHEN ? != '' THEN 'u/' || ? ELSE author END,
+      engagement = MAX(engagement, ?), provider = 'Monid · Apify + TikHub'
+      WHERE brand_id = ? AND id = ?`)
+      .bind(title, title, excerpt, excerpt, details.subreddit, details.subreddit,
+        details.username, details.username, engagement, brandId, descriptor.mentionId),
+  ]);
+}
+
 async function startProfileEnrichment(db: D1Database, brandId: number, apiKey: string, usernames: string[]) {
   const unique = [...new Set(usernames.map((item) => item.trim()).filter(Boolean))].slice(0, 25);
   if (!unique.length) return;
@@ -713,13 +776,13 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   if (run.status === "BLOCKED") {
     await updateJob(db, job, run, "Monid 工作区预算或单次任务上限阻止了执行");
     await markCommentJobError(db, brandId, job, "Monid 工作区预算或单次任务上限阻止了执行", "blocked");
-    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "reddit_details" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error("Monid 工作区预算或单次任务上限已触发，请在 Monid 后台调整后重试");
   }
   if (run.status !== "COMPLETED") {
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
     await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}，将在稍后重试`, "retrying");
-    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "reddit_details" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new Error(`Monid 社交平台任务未完成：${run.status}`);
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
@@ -727,7 +790,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     const message = run.providerResponse?.error?.message ?? `社交媒体数据端点 HTTP ${providerStatus}`;
     await updateJob(db, job, run, message);
     await markCommentJobError(db, brandId, job, message, providerStatus === 401 || providerStatus === 403 ? "blocked" : providerStatus >= 500 ? "retrying" : "unavailable");
-    if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
+    if (job.stage === "resolve_post" || job.stage === "reddit_details" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
   }
   if (job.stage === "profiles") {
@@ -738,6 +801,18 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   if (job.stage === "resolve_post") {
     await processResolvedPost(db, brandId, job, run.output);
     await updateJob(db, job, run);
+    return [];
+  }
+  if (job.stage === "reddit_details") {
+    try {
+      await processRedditDetails(db, brandId, job, run.output);
+      await updateJob(db, job, run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Reddit 帖子详情无法解析";
+      await updateJob(db, job, run, message);
+      await db.prepare("UPDATE monid_jobs SET status = 'FAILED' WHERE id = ?").bind(job.id).run();
+      await markCommentJobError(db, brandId, job, `${message}；将在稍后重试`, "retrying");
+    }
     return [];
   }
   if (job.stage === "post_comments" || job.stage === "comment_replies") {
@@ -764,10 +839,10 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
 }
 
 async function markCommentJobError(db: D1Database, brandId: number, job: MonidJob, message: string, status: "retrying" | "blocked" | "unavailable" | "error" = "error") {
-  if (job.stage !== "resolve_post" && job.stage !== "post_comments" && job.stage !== "comment_replies") return;
+  if (job.stage !== "resolve_post" && job.stage !== "reddit_details" && job.stage !== "post_comments" && job.stage !== "comment_replies") return;
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const now = new Date().toISOString();
-  if (job.stage === "resolve_post" || job.stage === "post_comments") {
+  if (job.stage === "resolve_post" || job.stage === "reddit_details" || job.stage === "post_comments") {
     if (job.stage === "post_comments" && descriptor.platform === "Instagram" && descriptor.commentAdapter === "v2" && status !== "blocked") {
       await db.prepare(`UPDATE social_comment_targets SET adapter = 'v1', cursor = '', top_level_complete = 0,
         status = CASE WHEN v2_failures + v1_failures + 1 >= ? THEN 'review' ELSE 'queued' END,
@@ -872,20 +947,30 @@ async function registerHistoricalCommentTargets(db: D1Database, brandId: number)
   for (const post of posts.results) {
     await queueSocialCommentTarget(db, brandId, post.mention_id, post.platform, post.post_id, post.url, Number(post.comments));
   }
+  await db.prepare(`UPDATE social_comment_targets SET status = 'queued', updated_at = datetime('now', '-31 minutes')
+    WHERE brand_id = ? AND platform = 'Reddit' AND status IN ('complete','collecting','unavailable','empty','not_returned')
+      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = social_comment_targets.mention_id
+        AND job.stage = 'reddit_details' AND job.status = 'COMPLETED')`).bind(brandId).run();
 }
 
 async function startCommentJobs(db: D1Database, brandId: number, apiKey: string) {
   const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
-    AND stage IN ('resolve_post','post_comments','comment_replies') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
+    AND stage IN ('resolve_post','reddit_details','post_comments','comment_replies') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
   let available = Math.max(0, COMMENT_JOBS_PER_CYCLE - Number(active?.count ?? 0));
   if (!available) return 0;
   let startedCount = 0;
 
-  const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched, target.adapter
+  const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched,
+      target.adapter, target.top_level_complete,
+      EXISTS (SELECT 1 FROM monid_jobs detail_job WHERE detail_job.mention_id = target.mention_id
+        AND detail_job.stage = 'reddit_details' AND detail_job.status = 'COMPLETED') AS reddit_details_complete
     FROM social_comment_targets target
-    WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying') AND target.top_level_complete = 0
+    WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying')
+      AND (target.top_level_complete = 0 OR (target.platform = 'Reddit' AND NOT EXISTS
+        (SELECT 1 FROM monid_jobs detail_job WHERE detail_job.mention_id = target.mention_id
+          AND detail_job.stage = 'reddit_details' AND detail_job.status = 'COMPLETED')))
       AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
-      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage IN ('resolve_post','post_comments') AND job.status IN (${PENDING_SQL}))
+      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id AND job.stage IN ('resolve_post','reddit_details','post_comments') AND job.status IN (${PENDING_SQL}))
     ORDER BY CASE
       WHEN target.platform = 'Instagram' AND target.reported_count > target.collected_count AND target.reported_count > 0 THEN 0
       WHEN target.platform = 'Instagram' AND (target.media_id GLOB '[0-9]*' OR target.post_url LIKE '%instagram.com/%') THEN 1
@@ -896,10 +981,16 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url,
       cursor: target.cursor, page: target.pages_fetched + 1, commentAdapter };
     let run: MonidRun;
-    let stage: "resolve_post" | "post_comments" = "post_comments";
+    let stage: "resolve_post" | "reddit_details" | "post_comments" = "post_comments";
     if (target.platform === "Instagram" && commentAdapter === "v1" && !/^\d{10,}$/.test(target.media_id)) {
       stage = "resolve_post";
       run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+    } else if (target.platform === "Reddit" && !target.reddit_details_complete) {
+      stage = "reddit_details";
+      run = await startQueryRun(apiKey, REDDIT_DETAILS_ENDPOINT, {
+        post_id: target.media_id.startsWith("t3_") ? target.media_id : `t3_${target.media_id}`,
+        need_format: true,
+      });
     } else if (target.platform === "Reddit") {
       const queryParams: JsonObject = { post_id: target.media_id.startsWith("t3_") ? target.media_id : `t3_${target.media_id}`, sort_type: "CONFIDENCE", need_format: true };
       if (target.cursor) queryParams.after = target.cursor;
@@ -999,9 +1090,25 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
       .filter(([, config]) => !pendingSearchStages.has(config.stage)).map(async ([platform, config]) => {
       const input = platform === "Facebook"
         ? { body: { query: `${terms.join(" OR ")} Facebook public post`, includeDomains: ["facebook.com"], numResults: 25 } }
+        : platform === "Reddit" ? { body: {
+          searches: terms.slice(0, 5),
+          ignoreStartUrls: true,
+          searchPosts: true,
+          searchComments: false,
+          searchCommunities: false,
+          searchUsers: false,
+          searchMedia: false,
+          skipComments: true,
+          includeMediaLinks: true,
+          includeNSFW: false,
+          sort: "new",
+          time: "month",
+          maxItems: 50,
+          maxPostCount: 50,
+          maxComments: 0,
+        } }
         : { queryParams: platform === "X" ? { keyword: terms.join(" OR "), search_type: "Latest" }
           : platform === "YouTube" ? { keyword, type: "video", upload_date: "this_month", sort_by: "upload_date" }
-          : platform === "Reddit" ? { query: terms.join(" OR "), search_type: "post", sort: "NEW", time_range: "month", safe_search: "unset", allow_nsfw: "0", need_format: true }
           : { keyword, offset: 0 } };
       const started = await startProviderRun(apiKey, config.provider, config.endpoint, input);
       return { platform, config, started };

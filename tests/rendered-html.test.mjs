@@ -127,20 +127,29 @@ test("archive location inference is reviewable and Russia maps to the flat SVG",
   assert.match(map, /id="ru"/);
 });
 
-test("Monid Reddit connector discovers keyword posts and paginates comments and replies", async () => {
+test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated comments", async () => {
   const [monid, page, comments, repository, newsSync] = await Promise.all([
     source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"),
   ]);
-  assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_dynamic_search/);
+  assert.match(monid, /\/trudax\/reddit-scraper-lite/);
+  assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_post_details/);
   assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_post_comments/);
   assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_comment_replies/);
-  assert.match(monid, /search_type: "post"/);
-  assert.match(monid, /time_range: "month"/);
+  assert.match(monid, /searches: terms\.slice\(0, 5\)/);
+  assert.match(monid, /searchPosts: true/);
+  assert.match(monid, /time: "month"/);
+  assert.match(monid, /includeMediaLinks: true/);
+  assert.match(monid, /stage = "reddit_details"/);
+  assert.match(monid, /processRedditDetails/);
+  assert.match(monid, /UPDATE monid_jobs SET status = 'FAILED'/);
   assert.match(monid, /post_id: target\.media_id/);
   assert.match(monid, /queryParams\.after = target\.cursor/);
   assert.match(monid, /replyAdapter === "reddit"/);
   assert.match(monid, /redditCommentPage/);
   assert.match(page, /<option>Reddit<\/option>/);
+  assert.match(page, /Reddit 公开讨论已纳入媒体档案/);
+  assert.match(page, /查看 Reddit/);
+  assert.match(page, /关键词发现 · 详情补全 · 评论跟踪/);
   assert.match(comments, /platform: "Reddit"/);
   assert.match(repository, /"Reddit"\] as const/);
   assert.match(newsSync, /"Facebook", "Reddit"/);
