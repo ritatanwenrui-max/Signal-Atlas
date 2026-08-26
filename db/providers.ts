@@ -4,7 +4,7 @@ export type MonitoringCandidate = {
   title: string;
   url: string;
   source: string;
-  platform: "网页新闻" | "Instagram" | "Facebook" | "TikTok" | "X" | "YouTube";
+  platform: "网页新闻" | "Instagram" | "Facebook" | "TikTok" | "X" | "YouTube" | "Reddit";
   sourceCountry: string;
   language: string;
   publishedAt: string;
@@ -77,17 +77,21 @@ const countryNames: Record<string, string> = {
   Taiwan: "台湾", "Hong Kong": "香港", Thailand: "泰国", "United States": "美国", China: "中国大陆",
   Japan: "日本", Singapore: "新加坡", Malaysia: "马来西亚", "South Korea": "韩国", "United Kingdom": "英国",
   Australia: "澳大利亚", Canada: "加拿大", Germany: "德国", France: "法国", Italy: "意大利", Spain: "西班牙",
+  Russia: "俄罗斯", "Russian Federation": "俄罗斯",
   India: "印度", Indonesia: "印度尼西亚", Philippines: "菲律宾", Vietnam: "越南", Cambodia: "柬埔寨",
 };
 
 const languageNames: Record<string, string> = {
   English: "英文", Chinese: "中文", Thai: "泰语", Japanese: "日语", Korean: "韩语", Spanish: "西班牙语",
-  French: "法语", German: "德语", Vietnamese: "越南语", en: "英文", zh: "中文", th: "泰语", ja: "日语", ko: "韩语",
+  French: "法语", German: "德语", Russian: "俄语", Italian: "意大利语", Portuguese: "葡萄牙语", Dutch: "荷兰语",
+  Polish: "波兰语", Turkish: "土耳其语", Indonesian: "印度尼西亚语", Vietnamese: "越南语",
+  en: "英文", zh: "中文", th: "泰语", ja: "日语", ko: "韩语", fr: "法语", de: "德语", ru: "俄语",
+  it: "意大利语", es: "西班牙语", pt: "葡萄牙语", nl: "荷兰语", pl: "波兰语", tr: "土耳其语", id: "印度尼西亚语", vi: "越南语",
 };
 
 const countryCodes: Record<string, string> = {
   US: "美国", GB: "英国", TW: "台湾", HK: "香港", TH: "泰国", CN: "中国大陆", JP: "日本", KR: "韩国",
-  SG: "新加坡", MY: "马来西亚", AU: "澳大利亚", CA: "加拿大", DE: "德国", FR: "法国", IN: "印度",
+  SG: "新加坡", MY: "马来西亚", AU: "澳大利亚", CA: "加拿大", DE: "德国", FR: "法国", IN: "印度", RU: "俄罗斯",
 };
 
 const relationNames = { retweeted: "直接转发", quoted: "引用传播", replied_to: "回复讨论" } as const;
@@ -97,7 +101,7 @@ const domainCountryRules: Array<[RegExp, string]> = [
   [/\.tw$/i, "台湾"], [/\.hk$/i, "香港"], [/\.th$/i, "泰国"], [/\.jp$/i, "日本"], [/\.kr$/i, "韩国"],
   [/\.sg$/i, "新加坡"], [/\.my$/i, "马来西亚"], [/\.vn$/i, "越南"], [/\.ph$/i, "菲律宾"], [/\.id$/i, "印度尼西亚"],
   [/\.cn$/i, "中国大陆"], [/\.uk$/i, "英国"], [/\.au$/i, "澳大利亚"], [/\.ca$/i, "加拿大"], [/\.de$/i, "德国"],
-  [/\.fr$/i, "法国"], [/\.it$/i, "意大利"], [/\.es$/i, "西班牙"], [/\.in$/i, "印度"],
+  [/\.fr$/i, "法国"], [/\.it$/i, "意大利"], [/\.es$/i, "西班牙"], [/\.in$/i, "印度"], [/\.ru$/i, "俄罗斯"],
   [/^(tw\.|tw-)|\.com\.tw$|ettoday\.net$|ebc\.net\.tw$|taiwanhot\.net$/i, "台湾"],
   [/^(hk\.)|scmp\.com$|thestandard\.com\.hk$/i, "香港"], [/bangkokpost\.com$|nationthailand\.com$/i, "泰国"],
   [/straitstimes\.com$|channelnewsasia\.com$/i, "新加坡"], [/malaymail\.com$|thestar\.com\.my$/i, "马来西亚"],
@@ -110,35 +114,73 @@ const sourceCountryCues: Array<[RegExp, string]> = [
   [/(日本|japan|東京|tokyo)/i, "日本"], [/(韓國|韩国|south korea|seoul|서울)/i, "韩国"], [/(新加坡|singapore)/i, "新加坡"],
   [/(馬來西亞|马来西亚|malaysia)/i, "马来西亚"], [/(美國|美国|united states|\busa\b)/i, "美国"], [/(英國|英国|united kingdom|\buk\b)/i, "英国"],
   [/(中國|中国|mainland china|beijing|网易|網易|netease)/i, "中国大陆"], [/(澳大利亞|澳大利亚|australia)/i, "澳大利亚"], [/(加拿大|canada)/i, "加拿大"],
+  [/(俄罗斯|俄羅斯|russia|russian federation|moscow|москва|россия)/i, "俄罗斯"],
 ];
 
+const languageCountryFallback: Record<string, { country: string; confidence: number }> = {
+  泰语: { country: "泰国", confidence: 76 }, 日语: { country: "日本", confidence: 76 }, 韩语: { country: "韩国", confidence: 76 },
+  德语: { country: "德国", confidence: 72 }, 法语: { country: "法国", confidence: 62 }, 俄语: { country: "俄罗斯", confidence: 72 },
+  意大利语: { country: "意大利", confidence: 70 }, 西班牙语: { country: "西班牙", confidence: 58 }, 葡萄牙语: { country: "葡萄牙", confidence: 58 },
+  荷兰语: { country: "荷兰", confidence: 68 }, 波兰语: { country: "波兰", confidence: 70 }, 土耳其语: { country: "土耳其", confidence: 70 },
+  越南语: { country: "越南", confidence: 70 }, 印度尼西亚语: { country: "印度尼西亚", confidence: 68 },
+};
+
+const latinLanguageCues: Array<[string, string[]]> = [
+  ["德语", ["der", "die", "das", "und", "für", "mit", "nicht", "eine", "einer", "auf", "ist", "von", "zu"]],
+  ["法语", ["le", "la", "les", "des", "une", "pour", "avec", "dans", "sur", "est", "pas", "qui", "que", "du"]],
+  ["西班牙语", ["el", "la", "los", "las", "una", "para", "con", "del", "por", "que", "como", "más", "es"]],
+  ["意大利语", ["il", "lo", "gli", "una", "per", "con", "della", "che", "come", "non", "sono"]],
+  ["葡萄牙语", ["uma", "para", "com", "dos", "das", "que", "como", "não", "mais", "pelo"]],
+  ["荷兰语", ["het", "een", "van", "voor", "met", "niet", "dat", "zijn", "als", "ook"]],
+  ["波兰语", ["jest", "nie", "dla", "oraz", "przez", "który", "jak", "się", "jego", "tego"]],
+  ["土耳其语", ["bir", "için", "ile", "olan", "olarak", "daha", "bu", "ve", "değil", "sonra"]],
+  ["越南语", ["của", "và", "cho", "với", "trong", "không", "một", "được", "những", "này"]],
+  ["印度尼西亚语", ["yang", "dan", "untuk", "dengan", "dari", "tidak", "ini", "pada", "adalah", "lebih"]],
+];
+
+function declaredLanguageName(value: string) {
+  const trimmed = value.trim();
+  const base = trimmed.toLowerCase().replaceAll("_", "-").split("-")[0];
+  return languageNames[trimmed] ?? languageNames[base] ?? trimmed;
+}
+
 export function inferLanguage(text: string, declared = "") {
-  const normalized = languageNames[declared] ?? declared;
+  const normalized = declaredLanguageName(declared);
   if (normalized && !["自动识别", "语言待确认", "未知", "und", "unknown"].includes(normalized.toLowerCase())) return { language: normalized, confidence: 98, method: "来源元数据" };
   if (/\p{Script=Thai}/u.test(text)) return { language: "泰语", confidence: 99, method: "文字脚本识别" };
   if (/\p{Script=Hiragana}|\p{Script=Katakana}/u.test(text)) return { language: "日语", confidence: 99, method: "文字脚本识别" };
   if (/\p{Script=Hangul}/u.test(text)) return { language: "韩语", confidence: 99, method: "文字脚本识别" };
+  if (/[іїєґ]/iu.test(text)) return { language: "乌克兰语", confidence: 94, method: "文字脚本与特征字识别" };
+  if (/\p{Script=Cyrillic}/u.test(text)) return { language: "俄语", confidence: 82, method: "文字脚本识别" };
   if (/\p{Script=Han}/u.test(text)) {
     const traditional = (text.match(/[臺灣體機器這個為與會來開發聞報導產業國際]/g) ?? []).length;
     const simplified = (text.match(/[台湾体机器这个为与会来开发闻报道产业国际]/g) ?? []).length;
     return { language: traditional > simplified ? "繁体中文" : "简体中文", confidence: 84, method: "汉字字形识别" };
   }
+  const words = text.toLocaleLowerCase().match(/[a-zà-öø-ÿąćęłńóśźżğışçđ]+/gu) ?? [];
+  if (words.length >= 4) {
+    const bag = new Set(words);
+    const scored = latinLanguageCues.map(([language, cues]) => ({ language, score: cues.filter((cue) => bag.has(cue)).length }))
+      .sort((a, b) => b.score - a.score);
+    if (scored[0]?.score >= 2 && scored[0].score > (scored[1]?.score ?? 0)) {
+      return { language: scored[0].language, confidence: Math.min(92, 62 + scored[0].score * 6), method: "常用词组合识别" };
+    }
+  }
   if (/[A-Za-z]{12,}/.test(text)) return { language: "英文", confidence: 78, method: "文字脚本识别" };
   return { language: "语言待确认", confidence: 25, method: "信息不足" };
 }
 
-export function inferSourceCountry(url: string, source: string, text: string, declared = "") {
+export function inferSourceCountry(url: string, source: string, text: string, declared = "", declaredLanguage = "") {
   const normalized = countryNames[declared] ?? countryCodes[declared] ?? declared;
-  if (normalized && !["地区未披露", "地区待确认", "未知", "unknown"].includes(normalized.toLowerCase())) return { country: normalized, confidence: 98, method: "来源元数据" };
+  if (normalized && !["地区未披露", "地区待确认", "未知", "unknown", "全球"].includes(normalized.toLowerCase())) return { country: normalized, confidence: 98, method: "来源元数据" };
   let host = "";
   try { host = new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { /* keep empty */ }
   for (const [pattern, country] of domainCountryRules) if (pattern.test(host)) return { country, confidence: 95, method: "媒体域名 / 国家顶级域" };
   const context = `${source} ${text}`;
   for (const [pattern, country] of sourceCountryCues) if (pattern.test(context)) return { country, confidence: 82, method: "媒体名称与地域线索" };
-  const language = inferLanguage(context).language;
-  if (language === "泰语") return { country: "泰国", confidence: 76, method: "主要语言推断" };
-  if (language === "日语") return { country: "日本", confidence: 76, method: "主要语言推断" };
-  if (language === "韩语") return { country: "韩国", confidence: 76, method: "主要语言推断" };
+  const language = inferLanguage(context, declaredLanguage).language;
+  const fallback = languageCountryFallback[language];
+  if (fallback) return { country: fallback.country, confidence: fallback.confidence, method: "语言主要使用国推断（可人工校正）" };
   if (language === "繁体中文") return { country: "华语地区", confidence: 45, method: "语言区域推断（待复核）" };
   return { country: "地区待确认", confidence: 20, method: "缺少可验证地域信号" };
 }

@@ -461,6 +461,10 @@ export async function ensureDatabase() {
     db.prepare(`UPDATE media_sources SET country = '中国大陆'
       WHERE (lower(domain) = '163.com' OR lower(domain) LIKE '%.163.com' OR name LIKE '%网易%' OR name LIKE '%網易%')
         AND country IN ('地区未披露', '地区待确认', '华语地区')`),
+    db.prepare(`UPDATE mentions SET source_country = '俄罗斯',
+      content_country = CASE WHEN lower(content_country) IN ('russia', 'russian federation', 'ru') THEN '俄罗斯' ELSE content_country END
+      WHERE lower(source_country) IN ('russia', 'russian federation', 'ru')`),
+    db.prepare(`UPDATE media_sources SET country = '俄罗斯' WHERE lower(country) IN ('russia', 'russian federation', 'ru')`),
   ]);
 }
 
@@ -735,10 +739,10 @@ export async function loadDashboardData(userId = "") {
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
         pending: monidPending, retryAt: monidRetryAt, lastError: monidHealth?.last_error ?? "",
-        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook 搜索与公开评论采集"
+        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook、Reddit 搜索与公开评论采集"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
           : monidPending ? `${monidPending} 个多平台采集步骤处理中${monidRetryAt && !monidActive ? ` · ${new Date(monidRetryAt).toLocaleString("zh-CN")} 继续重试` : ""}` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
-      ...(["Instagram", "X", "YouTube", "TikTok", "Facebook"] as const).map((platform) => ({
+      ...(["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"] as const).map((platform) => ({
         id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
         status: (!monidConfigured ? "credentials" : monidLimited ? "limited" : "online") as "credentials" | "limited" | "online",
         detail: !monidConfigured ? "共享上方 Monid API Key" : `${platform} 公开内容搜索 · 互动指标 · 可取得的评论区文本`,

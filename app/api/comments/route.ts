@@ -76,7 +76,12 @@ function socialPostDescriptor(value: string) {
     return { platform: "TikTok", postId };
   }
   if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch") return { platform: "Facebook", postId: value };
-  throw new Error("目前支持 Instagram、X、YouTube、TikTok 和 Facebook 的公开帖子链接");
+  if (host === "reddit.com" || host.endsWith(".reddit.com") || host === "redd.it") {
+    const rawId = host === "redd.it" ? url.pathname.split("/").filter(Boolean)[0] : url.pathname.match(/\/comments\/([a-z0-9]+)/i)?.[1];
+    if (!rawId) throw new Error("未能从 Reddit 链接中识别帖子 ID");
+    return { platform: "Reddit", postId: rawId.startsWith("t3_") ? rawId : `t3_${rawId}` };
+  }
+  throw new Error("目前支持 Instagram、X、YouTube、TikTok、Facebook 和 Reddit 的公开帖子链接");
 }
 
 export async function POST(request: Request) {
@@ -135,7 +140,7 @@ export async function GET(request: Request) {
   const pageSize = 40;
   const range = ["1", "7", "30", "0"].includes(url.searchParams.get("range") ?? "") ? url.searchParams.get("range")! : "30";
   const sentiment = ["正面", "中性", "负面", "混合", "无实意"].includes(url.searchParams.get("sentiment") ?? "") ? url.searchParams.get("sentiment")! : "";
-  const platform = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
+  const platform = ["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube", "Reddit"].includes(url.searchParams.get("platform") ?? "") ? url.searchParams.get("platform")! : "";
   const region = (url.searchParams.get("region") ?? "").trim().slice(0, 80);
   const sort = ["newest", "liked", "risk"].includes(url.searchParams.get("sort") ?? "") ? url.searchParams.get("sort")! : "newest";
   const annotation = ["unlabeled", "labeled", "disagreed"].includes(url.searchParams.get("annotation") ?? "") ? url.searchParams.get("annotation")! : "";

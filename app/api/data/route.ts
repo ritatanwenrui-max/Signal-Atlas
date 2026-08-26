@@ -5,6 +5,7 @@ import { verifyMonidApiKey } from "../../../db/monid";
 import { runTranslationCycle } from "../../../db/translation";
 import { verifyOpenAIApiKey } from "../../../db/llm-analysis";
 import { analyzeCommentText } from "../../../db/text-analysis";
+import { inferLanguage, inferSourceCountry } from "../../../db/providers";
 import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
@@ -151,15 +152,22 @@ export async function POST(request: Request) {
       if (!title || !source) return Response.json({ error: "标题和来源为必填项" }, { status: 400 });
       const risk = Number(payload.risk ?? 30);
       const impact = Number(payload.impact ?? 60);
-      const country = String(payload.sourceCountry ?? "地区待确认");
+      const url = String(payload.url ?? "#");
       const excerpt = String(payload.excerpt ?? payload.summary ?? "").trim();
       const analysis = analyzeCommentText(`${title} ${excerpt}`);
+      const declaredLanguage = String(payload.language ?? "").trim();
+      const inferredLanguage = inferLanguage(`${title} ${excerpt}`, declaredLanguage);
+      const declaredCountry = String(payload.sourceCountry ?? "").trim();
+      const inferredCountry = inferSourceCountry(url, source, `${title} ${excerpt}`, declaredCountry, inferredLanguage.language);
+      const country = inferredCountry.country;
+      const locationMethod = declaredCountry ? "人工录入" : inferredCountry.method;
+      const locationConfidence = declaredCountry ? 100 : inferredCountry.confidence;
       const result = await db.prepare(`INSERT INTO mentions
-        (brand_id, title, url, source, platform, source_country, content_country, language, sentiment, emotion, risk, impact,
+        (brand_id, title, url, source, platform, source_country, content_country, language, location_confidence, location_method, sentiment, emotion, risk, impact,
          summary, excerpt, author, provider, discovered_via, cluster_key, parent_url, relation, engagement, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Manual', 'manual', ?, ?, ?, ?, ?)`)
-        .bind(brandId, title, String(payload.url ?? "#"), source, String(payload.platform ?? "网页新闻"), country,
-          String(payload.contentCountry ?? country), String(payload.language ?? analysis.language), analysis.sentiment, analysis.emotion, risk,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Manual', 'manual', ?, ?, ?, ?, ?)`)
+        .bind(brandId, title, url, source, String(payload.platform ?? "网页新闻"), country,
+          String(payload.contentCountry ?? country), inferredLanguage.language, locationConfidence, locationMethod, analysis.sentiment, analysis.emotion, risk,
           impact, excerpt || "人工补充内容，已进入统一分析流程。", excerpt, String(payload.author ?? ""), String(payload.clusterKey ?? `manual-${Date.now()}`),
           String(payload.parentUrl ?? ""), String(payload.relation ?? ""), Math.max(0, Number(payload.engagement ?? 0)),
           String(payload.publishedAt ?? new Date().toISOString())).run();
@@ -175,6 +183,22 @@ export async function POST(request: Request) {
       }
       if (risk >= 70 || impact >= 90) await db.prepare("INSERT INTO alerts (brand_id, mention_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(brandId, result.meta.last_row_id, title, risk >= 80 ? "Critical" : "High", country, risk >= 70 ? `风险分 ${risk}，需要人工复核` : `影响力 ${impact}，传播潜力较高`).run();
+    } else if (action === "updateMentionLocation") {
+      const mentionId = Number(payload.id ?? 0);
+      if (!Number.isInteger(mentionId) || mentionId <= 0) return Response.json({ error: "档案编号无效" }, { status: 400 });
+      const mention = await db.prepare(`SELECT id, title, excerpt, url, source, source_country, content_country, language
+        FROM mentions WHERE id = ? AND brand_id = ?`).bind(mentionId, brandId)
+        .first<{ id: number; title: string; excerpt: string; url: string; source: string; source_country: string; content_country: string; language: string }>();
+      if (!mention) return Response.json({ error: "档案不存在或已被删除" }, { status: 404 });
+      const languageInput = String(payload.language ?? "").trim();
+      const language = languageInput || inferLanguage(`${mention.title} ${mention.excerpt}`, mention.language).language;
+      const countryInput = String(payload.sourceCountry ?? "").trim();
+      if (!countryInput) return Response.json({ error: "请填写来源国家或地区" }, { status: 400 });
+      const country = inferSourceCountry(mention.url, mention.source, `${mention.title} ${mention.excerpt}`, countryInput, language).country;
+      await db.prepare(`UPDATE mentions SET
+        content_country = CASE WHEN content_country IN ('', '地区未披露', '地区待确认', '华语地区') OR content_country = source_country THEN ? ELSE content_country END,
+        source_country = ?, language = ?, location_confidence = 100, location_method = '人工校正'
+        WHERE id = ? AND brand_id = ?`).bind(country, country, language, mentionId, brandId).run();
     } else if (action === "createTraffic") {
       const visitors = Math.max(0, Number(payload.visitors ?? 0));
       const baseline = Math.max(1, Number(payload.baseline ?? 1));

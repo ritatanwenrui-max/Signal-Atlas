@@ -9,7 +9,7 @@ Signal Atlas 是一个面向品牌团队的全球新闻与社交媒体舆情监�
 当前版本包括：
 
 - 全球网页新闻发现、免费媒体源持续追踪和手动补录
-- Instagram、X、YouTube、TikTok、Facebook 等社媒连接器
+- Instagram、X、YouTube、TikTok、Facebook、Reddit 等社媒连接器
 - Monid/TikHub 帖子、评论和评论回复采集
 - 品牌消歧、排除词过滤、国家/地区识别和多语言英文翻译
 - 新闻事件聚类、传播链路、世界地图、情绪/词频/评论分析

@@ -46,7 +46,7 @@ const emptyComments: CommentData = {
   emotions: [], topics: [], words: [], topPosts: [], riskComments: [],
 };
 const platformColors: Record<string, string> = {
-  "网页新闻": "#1f291c", Instagram: "#d76ea9", Facebook: "#6e93df", TikTok: "#42c8bd", X: "#8c96a0", YouTube: "#e8665c",
+  "网页新闻": "#1f291c", Instagram: "#d76ea9", Facebook: "#6e93df", TikTok: "#42c8bd", X: "#8c96a0", YouTube: "#e8665c", Reddit: "#e67a45",
 };
 const sentimentColors: Record<string, string> = { 正面: "#6f963e", 中性: "#aeb4aa", 负面: "#d65a4a", 混合: "#d2a33f" };
 

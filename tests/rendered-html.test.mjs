@@ -11,7 +11,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /新闻档案/);
   assert.match(page, /有史以来全部记录/);
   assert.match(page, /导出 CSV/);
-  assert.match(page, /const platformCatalog = \["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube"\]/);
+  assert.match(page, /const platformCatalog = \["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube", "Reddit"\]/);
   assert.match(page, /platformCounts\[item\] \?\? 0/);
   assert.match(page, /配置监测品牌/);
   assert.match(page, /监测概览/);
@@ -51,7 +51,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /Instagram 公共搜索（Monid）|Monid \/ Instagram/);
   assert.match(page, /monid_live_/);
   assert.match(page, /social_follower_count/);
-  assert.match(page, /Monid.*五个平台|Monid.*Instagram/);
+  assert.match(page, /Monid.*六个平台|Monid.*Instagram/);
   assert.match(page, /60 \* 60 \* 1000/);
   assert.match(page, /<strong>Somnia Lab<\/strong><small>GLOBAL MEDIA INTELLIGENCE<\/small>/);
   assert.doesNotMatch(page, /硅姬|矽姬/);
@@ -109,6 +109,43 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(repository, /每 6 小时发现/);
 });
 
+test("archive location inference is reviewable and Russia maps to the flat SVG", async () => {
+  const [page, providers, sync, route, repository, map] = await Promise.all([
+    source("app/page.tsx"), source("db/providers.ts"), source("db/news-sync.ts"), source("app/api/data/route.ts"), source("db/repository.ts"), source("public/world-map-flat.svg"),
+  ]);
+  assert.match(providers, /德语: \{ country: "德国"/);
+  assert.match(providers, /法语: \{ country: "法国"/);
+  assert.match(providers, /俄语: \{ country: "俄罗斯"/);
+  assert.match(providers, /语言主要使用国推断（可人工校正）/);
+  assert.match(sync, /inferredLanguage\.language/);
+  assert.match(route, /action === "updateMentionLocation"/);
+  assert.match(route, /location_method = '人工校正'/);
+  assert.match(page, /校正来源地区与语言/);
+  assert.match(page, /人工保存后优先级最高/);
+  assert.match(page, /俄罗斯: "RU"/);
+  assert.match(repository, /source_country = '俄罗斯'/);
+  assert.match(map, /id="ru"/);
+});
+
+test("Monid Reddit connector discovers keyword posts and paginates comments and replies", async () => {
+  const [monid, page, comments, repository, newsSync] = await Promise.all([
+    source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"),
+  ]);
+  assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_dynamic_search/);
+  assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_post_comments/);
+  assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_comment_replies/);
+  assert.match(monid, /search_type: "post"/);
+  assert.match(monid, /time_range: "month"/);
+  assert.match(monid, /post_id: target\.media_id/);
+  assert.match(monid, /queryParams\.after = target\.cursor/);
+  assert.match(monid, /replyAdapter === "reddit"/);
+  assert.match(monid, /redditCommentPage/);
+  assert.match(page, /<option>Reddit<\/option>/);
+  assert.match(comments, /platform: "Reddit"/);
+  assert.match(repository, /"Reddit"\] as const/);
+  assert.match(newsSync, /"Facebook", "Reddit"/);
+});
+
 test("connector credentials are workspace-shared and encrypted server-side", async () => {
   const [credentials, route, schema, repository] = await Promise.all([
     source("db/credentials.ts"), source("app/api/data/route.ts"), source("db/schema.ts"), source("db/repository.ts"),
@@ -144,7 +181,7 @@ test("invited users automatically enter the same workspace with role-based acces
   assert.match(dataRoute, /removeWorkspaceMember/);
 });
 
-test("Monid searches five social platforms and archives public comments and replies", async () => {
+test("Monid searches six social platforms and archives public comments and replies", async () => {
   const [monid, sync, schema, repository, commentsRoute, page] = await Promise.all([
     source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/api/comments/route.ts"), source("app/page.tsx"),
   ]);

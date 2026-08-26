@@ -232,7 +232,7 @@ async function upsertSocialMetrics(db: D1Database, brandId: number, mentionId: n
       JSON.stringify(metrics.matchedTerms), updatedAt).run();
   await db.prepare("UPDATE mentions SET engagement = ?, author = CASE WHEN ? != '' THEN ? ELSE author END WHERE id = ? AND brand_id = ?")
     .bind(candidate.engagement, metrics.authorUsername, metrics.authorUsername ? `@${metrics.authorUsername}` : metrics.authorName, mentionId, brandId).run();
-  if (["Instagram", "X", "YouTube", "TikTok", "Facebook"].includes(candidate.platform))
+  if (["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"].includes(candidate.platform))
     await queueSocialCommentTarget(db, brandId, mentionId, candidate.platform, metrics.postId, candidate.url, metrics.comments);
 }
 
@@ -280,7 +280,7 @@ async function enrichHistoricalMentions(db: D1Database, brandId: number) {
   for (const row of rows.results) {
     const text = `${row.title} ${row.excerpt ?? ""}`;
     const language = inferLanguage(text, ["", "自动识别", "语言待确认"].includes(row.language ?? "") ? "" : row.language);
-    const location = inferSourceCountry(row.url, row.source, text, ["", "地区未披露", "地区待确认"].includes(row.source_country) ? "" : row.source_country);
+    const location = inferSourceCountry(row.url, row.source, text, ["", "地区未披露", "地区待确认"].includes(row.source_country) ? "" : row.source_country, language.language);
     updates.push(db.prepare(`UPDATE mentions SET source_country = ?, content_country = ?, language = ?,
       location_confidence = ?, location_method = ? WHERE id = ? AND brand_id = ?`)
       .bind(location.country, location.country, language.language, location.confidence, location.method, row.id, brandId));
@@ -483,7 +483,7 @@ export async function runNewsSync(force = false, userId = "") {
         }
         const excerpt = compactText(candidate.discussionText).slice(0, 2000);
         const inferredLanguage = inferLanguage(`${candidate.title} ${excerpt}`, candidate.language);
-        const inferredLocation = inferSourceCountry(candidate.url, candidate.source, `${candidate.title} ${excerpt}`, candidate.sourceCountry);
+        const inferredLocation = inferSourceCountry(candidate.url, candidate.source, `${candidate.title} ${excerpt}`, candidate.sourceCountry, inferredLanguage.language);
         const normalizedCandidate = { ...candidate, language: inferredLanguage.language, sourceCountry: inferredLocation.country };
         const cluster = findCluster(normalizedCandidate, terms, known);
         const analysis = analyzeText(`${candidate.title} ${excerpt}`, terms);

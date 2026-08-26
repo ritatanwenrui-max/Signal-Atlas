@@ -10,15 +10,15 @@ type MonidRun = {
   providerResponse?: { httpStatus?: number; error?: { message?: string } };
   cost?: { value?: number; currency?: string } | number | null;
 };
-type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
+type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "post_comments" | "comment_replies";
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
-type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1"; replyAdapter?: "v2" | "v1" };
+type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1" | "reddit"; replyAdapter?: "v2" | "v1" | "reddit" };
 type SocialComment = {
   id: string; parentId: string; text: string; authorId: string; authorUsername: string; authorName: string;
   verified: boolean; likes: number; replies: number; publishedAt: string; commentUrl: string;
 };
-type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" };
-type ReplyTarget = { mention_id: number; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" };
+type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit" };
+type ReplyTarget = { mention_id: number; platform: string; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit" };
 
 const API_BASE = "https://api.monid.ai";
 const SEARCH_ENDPOINT = "/apify/instagram-hashtag-scraper";
@@ -28,11 +28,15 @@ const COMMENTS_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_post_comments";
 const COMMENTS_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
 const REPLIES_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_comment_replies";
 const REPLIES_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_comment_replies";
+const REDDIT_SEARCH_ENDPOINT = "/api/v1/reddit/app/fetch_dynamic_search";
+const REDDIT_COMMENTS_ENDPOINT = "/api/v1/reddit/app/fetch_post_comments";
+const REDDIT_REPLIES_ENDPOINT = "/api/v1/reddit/app/fetch_comment_replies";
 const SOCIAL_SEARCHES = {
   X: { stage: "search_x" as const, provider: "tikhub", endpoint: "/api/v1/twitter/web/fetch_search_timeline" },
   YouTube: { stage: "search_youtube" as const, provider: "tikhub", endpoint: "/api/v1/youtube/web_v2/get_general_search_v2" },
   TikTok: { stage: "search_tiktok" as const, provider: "tikhub", endpoint: "/api/v1/tiktok/web/fetch_general_search" },
   Facebook: { stage: "search_facebook" as const, provider: "blockrun.ai", endpoint: "/api/v1/exa/search" },
+  Reddit: { stage: "search_reddit" as const, provider: "tikhub", endpoint: REDDIT_SEARCH_ENDPOINT },
 };
 const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT"]);
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
@@ -223,46 +227,57 @@ function walkObjects(value: unknown, output: JsonObject[] = [], depth = 0) {
 function platformPostUrl(platform: string, row: JsonObject, postId: string, username: string) {
   const direct = firstText(row, ["url", "web_url", "postUrl", "permalink", "link", "video_url", "navigation_url"]);
   if (direct && /^https?:\/\//.test(direct)) return direct;
+  if (platform === "Reddit" && direct.startsWith("/")) return `https://www.reddit.com${direct}`;
   if (platform === "X" && postId) return `https://x.com/${username || "i"}/status/${postId}`;
   if (platform === "YouTube" && postId) return `https://www.youtube.com/watch?v=${postId}`;
   if (platform === "TikTok" && postId) return `https://www.tiktok.com/@${username || "user"}/video/${postId}`;
+  if (platform === "Reddit" && postId) return `https://www.reddit.com/comments/${postId.replace(/^t3_/, "")}`;
   return "";
 }
 
-function parseSocialPosts(output: unknown, terms: string[], platform: "X" | "YouTube" | "TikTok" | "Facebook") {
+function parseSocialPosts(output: unknown, terms: string[], platform: "X" | "YouTube" | "TikTok" | "Facebook" | "Reddit") {
   const candidates: MonitoringCandidate[] = [];
   const seen = new Set<string>();
   for (const row of walkObjects(output)) {
-    const text = firstText(row, platform === "YouTube"
+    const headline = firstText(row, platform === "YouTube"
       ? ["title", "headline", "description", "snippet.title"]
       : platform === "TikTok" ? ["aweme_info.desc", "desc", "caption", "text", "title"]
       : platform === "X" ? ["legacy.full_text", "full_text", "note_tweet.note_tweet_results.result.text", "text", "title"]
+      : platform === "Reddit" ? ["title", "post.title", "data.title", "headline"]
       : ["text", "title", "content", "description"]);
+    const redditBody = platform === "Reddit" ? firstText(row, ["selftext", "self_text", "body", "post.selftext", "data.selftext", "content.markdown"]) : "";
+    const text = [headline, redditBody].filter(Boolean).join("\n");
     if (!text) continue;
     const normalizedText = normalized(text);
     const matchedTerms = terms.filter((term) => normalizedText.includes(normalized(term)));
     if (!matchedTerms.length) continue;
-    const postId = firstText(row, platform === "YouTube" ? ["video_id", "videoId", "id"]
+    let postId = firstText(row, platform === "YouTube" ? ["video_id", "videoId", "id"]
       : platform === "TikTok" ? ["aweme_info.aweme_id", "aweme_id", "id"]
-      : platform === "X" ? ["rest_id", "tweet_id", "id_str", "id"] : ["id", "postId"]);
+      : platform === "X" ? ["rest_id", "tweet_id", "id_str", "id"]
+      : platform === "Reddit" ? ["name", "post_id", "postId", "thingId", "id", "data.name", "data.id"] : ["id", "postId"]);
+    if (platform === "Reddit" && postId && !postId.startsWith("t3_")) postId = `t3_${postId}`;
     const authorUsername = firstText(row, platform === "YouTube" ? ["author.name", "channel.title", "channel_name", "ownerText"]
       : platform === "TikTok" ? ["aweme_info.author.unique_id", "author.unique_id", "author.username", "username"]
       : platform === "X" ? ["core.user_results.result.legacy.screen_name", "user.legacy.screen_name", "screen_name", "username"]
+      : platform === "Reddit" ? ["authorInfo.name", "author.name", "author", "author_name", "data.author"]
       : ["author", "authorName", "source"]);
     const authorName = firstText(row, ["author.name", "author.nickname", "core.user_results.result.legacy.name", "user.name", "channel_name", "source"]);
-    const authorId = firstText(row, ["author.id", "author.uid", "channel_id", "core.user_results.result.rest_id", "user.id", "ownerId"]);
+    const authorId = firstText(row, ["author.id", "author.uid", "authorInfo.id", "channel_id", "core.user_results.result.rest_id", "user.id", "ownerId"]);
     const url = platformPostUrl(platform, row, postId, authorUsername);
     if (!url || seen.has(url)) continue;
     seen.add(url);
-    const likes = optionalNumber(row, ["legacy.favorite_count", "statistics.digg_count", "aweme_info.statistics.digg_count", "like_count", "likes", "reactions"]);
-    const comments = optionalNumber(row, ["legacy.reply_count", "statistics.comment_count", "aweme_info.statistics.comment_count", "comment_count", "comments"]);
+    const likes = optionalNumber(row, ["legacy.favorite_count", "statistics.digg_count", "aweme_info.statistics.digg_count", "like_count", "likes", "reactions", "score", "upvotes", "ups", "vote_count"]);
+    const comments = optionalNumber(row, ["legacy.reply_count", "statistics.comment_count", "aweme_info.statistics.comment_count", "comment_count", "comments", "numComments", "num_comments"]);
     const shares = optionalNumber(row, ["legacy.retweet_count", "statistics.share_count", "aweme_info.statistics.share_count", "share_count", "shares"]);
     const views = optionalNumber(row, ["views", "view_count", "statistics.play_count", "aweme_info.statistics.play_count", "legacy.ext_views.count"]);
     const followers = optionalNumber(row, ["author.follower_count", "author.followerCount", "core.user_results.result.legacy.followers_count", "channel.subscriber_count"]);
-    const published = pathValue(row, "aweme_info.create_time") ?? pathValue(row, "create_time") ?? pathValue(row, "published_time") ?? pathValue(row, "publishedAt") ?? pathValue(row, "legacy.created_at") ?? pathValue(row, "date");
-    const title = `${text.replace(/\s+/g, " ").trim().slice(0, 150)}${text.length > 150 ? "…" : ""}`;
+    const published = pathValue(row, "aweme_info.create_time") ?? pathValue(row, "create_time") ?? pathValue(row, "created_utc") ?? pathValue(row, "createdUtc") ?? pathValue(row, "published_time") ?? pathValue(row, "publishedAt") ?? pathValue(row, "legacy.created_at") ?? pathValue(row, "date");
+    const titleText = headline || text;
+    const title = `${titleText.replace(/\s+/g, " ").trim().slice(0, 150)}${titleText.length > 150 ? "…" : ""}`;
+    const subreddit = platform === "Reddit" ? firstText(row, ["subreddit_name_prefixed", "subredditNamePrefixed", "subreddit.display_name_prefixed", "subreddit.display_name", "subreddit", "community.name", "data.subreddit_name_prefixed", "data.subreddit"]) : "";
+    const source = subreddit ? (subreddit.startsWith("r/") ? subreddit : `r/${subreddit}`) : authorUsername ? `@${authorUsername}` : authorName || platform;
     candidates.push({
-      title, url, source: authorUsername ? `@${authorUsername}` : authorName || platform, platform,
+      title, url, source, platform,
       sourceCountry: "地区待确认", language: "语言待确认", publishedAt: isoDate(published),
       engagement: Math.max(0, likes) + Math.max(0, comments) + Math.max(0, shares), discussionText: text,
       commentsAnalyzed: 0, parentUrl: "", relation: `普通文字关键词：${matchedTerms.join("、")}`,
@@ -315,23 +330,55 @@ function cursorText(value: unknown) {
   return value == null ? "" : String(value);
 }
 
-function commentFromRow(row: JsonObject, postUrl: string, parentId = ""): SocialComment | null {
-  const text = firstText(row, ["text", "content", "comment_text", "full_text", "legacy.full_text", "snippet.textDisplay", "snippet.textOriginal"]);
-  const id = firstText(row, ["pk", "id", "comment_id", "commentId", "rest_id", "id_str"]);
+function commentFromRow(row: JsonObject, postUrl: string, parentId = "", platform = "Instagram"): SocialComment | null {
+  const text = firstText(row, platform === "Reddit"
+    ? ["body", "content.markdown", "content", "comment.body", "data.body", "text"]
+    : ["text", "content", "comment_text", "full_text", "legacy.full_text", "snippet.textDisplay", "snippet.textOriginal"]);
+  let id = firstText(row, platform === "Reddit"
+    ? ["name", "comment_id", "commentId", "thingId", "id", "data.name", "data.id"]
+    : ["pk", "id", "comment_id", "commentId", "rest_id", "id_str"]);
   if (!text || !id) return null;
+  if (platform === "Reddit" && id.startsWith("t3_")) return null;
+  if (platform === "Reddit" && !id.startsWith("t1_")) id = `t1_${id}`;
+  const directUrl = firstText(row, ["comment_url", "url", "permalink", "data.permalink"]);
+  const commentUrl = platform === "Reddit" && directUrl.startsWith("/") ? `https://www.reddit.com${directUrl}` : directUrl || postUrl;
   return {
     id,
-    parentId: firstText(row, ["parent_comment_id"]) || parentId,
+    parentId: firstText(row, ["parent_comment_id", "parentId", "parent_id", "data.parent_id"]) || parentId,
     text,
-    authorId: firstText(row, ["user.pk", "user.id", "owner.id", "ownerId", "author.channel_id", "snippet.authorChannelId.value"]),
-    authorUsername: firstText(row, ["user.username", "owner.username", "ownerUsername", "username", "author.display_name", "snippet.authorDisplayName"]),
-    authorName: firstText(row, ["user.full_name", "user.fullName", "owner.full_name", "ownerFullName", "fullName", "author.display_name", "snippet.authorDisplayName"]),
+    authorId: firstText(row, ["user.pk", "user.id", "owner.id", "ownerId", "authorInfo.id", "author.channel_id", "snippet.authorChannelId.value"]),
+    authorUsername: firstText(row, ["user.username", "owner.username", "ownerUsername", "username", "authorInfo.name", "author", "author_name", "data.author", "author.display_name", "snippet.authorDisplayName"]),
+    authorName: firstText(row, ["user.full_name", "user.fullName", "owner.full_name", "ownerFullName", "fullName", "authorInfo.name", "author.display_name", "snippet.authorDisplayName"]),
     verified: firstBoolean(row, ["user.is_verified", "user.verified", "owner.is_verified", "isVerified"]),
-    likes: firstNumber(row, ["comment_like_count", "likesCount", "likeCount", "likes", "like_count", "snippet.likeCount", "legacy.favorite_count"]),
-    replies: firstNumber(row, ["child_comment_count", "replyCount", "replies", "reply_count", "legacy.reply_count"]),
-    publishedAt: isoDate(pathValue(row, "created_at_utc") ?? pathValue(row, "created_at") ?? pathValue(row, "timestamp")),
-    commentUrl: firstText(row, ["comment_url", "url", "permalink"]) || postUrl,
+    likes: firstNumber(row, ["comment_like_count", "likesCount", "likeCount", "likes", "like_count", "score", "upvotes", "ups", "snippet.likeCount", "legacy.favorite_count"]),
+    replies: firstNumber(row, ["child_comment_count", "childCount", "numReplies", "replyCount", "replies", "reply_count", "legacy.reply_count"]),
+    publishedAt: isoDate(pathValue(row, "created_at_utc") ?? pathValue(row, "created_at") ?? pathValue(row, "createdUtc") ?? pathValue(row, "created_utc") ?? pathValue(row, "timestamp")),
+    commentUrl,
   };
+}
+
+function redditCommentPage(output: unknown, postUrl: string, parentId = "") {
+  const comments: SocialComment[] = [];
+  const replyQueue: Array<{ parentId: string; count: number; cursor: string }> = [];
+  const seen = new Set<string>();
+  let nextCursor = "";
+  for (const row of walkObjects(output)) {
+    const node = pathValue(row, "node");
+    const candidate = node && typeof node === "object" ? node as JsonObject : row;
+    const comment = commentFromRow(candidate, postUrl, parentId, "Reddit");
+    if (comment && !seen.has(comment.id)) { seen.add(comment.id); comments.push(comment); }
+    const cursor = firstText(row, ["more.cursor", "pageInfo.endCursor", "pagination.after"]);
+    if (cursor) {
+      nextCursor = cursor;
+      if (comment) replyQueue.push({ parentId: comment.id, count: Math.max(comment.replies, 1), cursor });
+    }
+    const forest = pathValue(row, "commentForest.trees");
+    if (Array.isArray(forest) && forest.length) {
+      const last = forest.at(-1);
+      if (last && typeof last === "object") nextCursor = firstText(last as JsonObject, ["more.cursor"]) || nextCursor;
+    }
+  }
+  return { comments, replyQueue, nextCursor };
 }
 
 function resolvedInstagramPost(output: unknown) {
@@ -446,33 +493,35 @@ async function refreshSocialCommentAnalysis(db: D1Database, brandId: number, men
 async function processCommentPage(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
   const platform = descriptor.platform || "Instagram";
+  const redditPage = platform === "Reddit" ? redditCommentPage(output, descriptor.postUrl, descriptor.commentId ?? "") : null;
   const payload = nestedObjectWithArray(output, job.stage === "post_comments" ? ["comments", "replies", "items", "data"] : ["child_comments", "replies", "comments", "items", "data"]);
   const rawRows = payload ? (["comments", "replies", "child_comments", "items", "data"].map((key) => payload[key]).find(Array.isArray) as unknown[] | undefined) : undefined;
   const sourceRows = rawRows ?? walkObjects(output);
   const brandTerms = await brandTermsFor(db, brandId);
   const comments: SocialComment[] = [];
-  const replyQueue: Array<{ parentId: string; count: number }> = [];
-  for (const raw of sourceRows) {
+  const replyQueue: Array<{ parentId: string; count: number; cursor?: string }> = [...(redditPage?.replyQueue ?? [])];
+  for (const raw of platform === "Reddit" ? [] : sourceRows) {
     if (!raw || typeof raw !== "object") continue;
     const row = raw as JsonObject;
-    const comment = commentFromRow(row, descriptor.postUrl, descriptor.commentId ?? "");
+    const comment = commentFromRow(row, descriptor.postUrl, descriptor.commentId ?? "", platform);
     if (comment) comments.push(comment);
     if (job.stage === "post_comments" && comment) {
       const previews = pathValue(row, "preview_child_comments");
       if (Array.isArray(previews)) for (const preview of previews) {
         if (!preview || typeof preview !== "object") continue;
-        const child = commentFromRow(preview as JsonObject, descriptor.postUrl, comment.id);
+        const child = commentFromRow(preview as JsonObject, descriptor.postUrl, comment.id, platform);
         if (child) comments.push(child);
       }
       if (platform === "Instagram" && comment.replies > 0) replyQueue.push({ parentId: comment.id, count: comment.replies });
     }
   }
+  if (redditPage) comments.push(...redditPage.comments);
   if (!comments.length) {
     const now = new Date().toISOString();
     if (job.stage === "post_comments") {
       const target = await db.prepare("SELECT reported_count, pages_fetched FROM social_comment_targets WHERE brand_id = ? AND mention_id = ?")
         .bind(brandId, descriptor.mentionId).first<{ reported_count: number; pages_fetched: number }>();
-      const reported = Math.max(Number(target?.reported_count ?? 0), firstNumber(output, ["comment_count", "comments_count", "total"]));
+      const reported = Math.max(Number(target?.reported_count ?? 0), firstNumber(output, ["comment_count", "comments_count", "numComments", "num_comments", "total"]));
       const attempt = Number(target?.pages_fetched ?? 0) + 1;
       if (platform === "Instagram" && descriptor.commentAdapter === "v2") {
         await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), adapter = 'v1', cursor = '',
@@ -482,10 +531,11 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
       } else {
         const shouldRetry = reported > 0 && attempt < 3;
         const status = shouldRetry ? "retrying" : "not_returned";
+        const adapterLabel = platform === "Instagram" ? "V2 与 V1" : `${platform} 评论接口`;
         const message = shouldRetry
           ? `${platform} 显示有评论，本次指定帖子接口未返回文本；系统将自动重试（${attempt}/3）`
-          : reported > 0 ? `${platform} 显示有评论，但 V2 与 V1 连续 ${attempt} 次未取得文本；保留为待核验`
-          : `V2 与 V1 本次均未返回评论文本；保留为待核验，不判定为没有评论`;
+          : reported > 0 ? `${platform} 显示有评论，但 ${adapterLabel} 连续 ${attempt} 次未取得文本；保留为待核验`
+          : `${adapterLabel} 本次未返回评论文本；保留为待核验，不判定为没有评论`;
         await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), top_level_complete = 1,
           status = ?, v1_failures = v1_failures + CASE WHEN platform = 'Instagram' THEN 1 ELSE 0 END,
           pages_fetched = pages_fetched + 1, last_error = ?, updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
@@ -514,26 +564,54 @@ async function processCommentPage(db: D1Database, brandId: number, job: MonidJob
     for (let index = 0; index < replyQueue.length; index += 40) {
       const statements = replyQueue.slice(index, index + 40).map((reply) => db.prepare(`INSERT INTO social_comment_reply_queue
         (mention_id, brand_id, media_id, parent_comment_id, reported_count, adapter, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'v2', 'queued', ?)
-        ON CONFLICT(mention_id, parent_comment_id) DO UPDATE SET reported_count = MAX(social_comment_reply_queue.reported_count, excluded.reported_count), updated_at = excluded.updated_at`)
-        .bind(descriptor.mentionId, brandId, descriptor.mediaId, reply.parentId, reply.count, now));
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+        ON CONFLICT(mention_id, parent_comment_id) DO UPDATE SET reported_count = MAX(social_comment_reply_queue.reported_count, excluded.reported_count),
+          cursor = CASE WHEN excluded.cursor != '' THEN excluded.cursor ELSE social_comment_reply_queue.cursor END,
+          adapter = excluded.adapter, status = CASE WHEN excluded.cursor != '' AND excluded.cursor != social_comment_reply_queue.cursor THEN 'queued' ELSE social_comment_reply_queue.status END, updated_at = excluded.updated_at`)
+        .bind(descriptor.mentionId, brandId, descriptor.mediaId, reply.parentId, reply.count, platform === "Reddit" ? "reddit" : "v2", now));
+      for (const [offset, reply] of replyQueue.slice(index, index + 40).entries()) {
+        if (!reply.cursor) continue;
+        statements[offset] = db.prepare(`INSERT INTO social_comment_reply_queue
+          (mention_id, brand_id, media_id, parent_comment_id, reported_count, cursor, adapter, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'reddit', 'queued', ?)
+          ON CONFLICT(mention_id, parent_comment_id) DO UPDATE SET reported_count = MAX(social_comment_reply_queue.reported_count, excluded.reported_count),
+            cursor = excluded.cursor, adapter = 'reddit',
+            status = CASE WHEN excluded.cursor != social_comment_reply_queue.cursor THEN 'queued' ELSE social_comment_reply_queue.status END,
+            updated_at = excluded.updated_at`)
+          .bind(descriptor.mentionId, brandId, descriptor.mediaId, reply.parentId, reply.count, reply.cursor, now);
+      }
       if (statements.length) await db.batch(statements);
     }
-    const nextCursor = cursorText(payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
+    const nextCursor = cursorText(redditPage?.nextCursor ?? payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
       ?? payload?.next_min_id ?? payload?.continuation_token ?? payload?.cursor ?? pathValue(output, "data.cursor"));
-    const hasMore = platform === "Facebook" || platform === "X" ? false : firstBoolean(payload ?? output, ["has_more_headload_comments", "has_more", "more_available"])
+    const cursorAdvanced = platform !== "Reddit" || nextCursor !== (descriptor.cursor ?? "");
+    const hasMore = cursorAdvanced && (platform === "Facebook" || platform === "X" ? false : firstBoolean(payload ?? output, ["has_more_headload_comments", "has_more", "more_available"])
       || Boolean(payload?.pagination_token) || Boolean(pathValue(output, "pagination_token")) || Boolean(pathValue(output, "data.pagination_token"))
-      || Boolean(payload?.continuation_token) || Number(pathValue(output, "data.has_more") ?? 0) === 1;
-    const reported = firstNumber(payload ?? output, ["comment_count", "comments_count", "total"]);
+      || Boolean(payload?.continuation_token) || Boolean(redditPage?.nextCursor) || Number(pathValue(output, "data.has_more") ?? 0) === 1);
+    const reported = firstNumber(payload ?? output, ["comment_count", "comments_count", "numComments", "num_comments", "total"]);
     await db.prepare(`UPDATE social_comment_targets SET reported_count = MAX(reported_count, ?), cursor = ?,
       top_level_complete = ?, status = ?, pages_fetched = pages_fetched + 1, last_error = '', updated_at = ?
       WHERE brand_id = ? AND mention_id = ?`)
       .bind(reported, hasMore && nextCursor ? nextCursor : "", hasMore && nextCursor ? 0 : 1,
         hasMore && nextCursor ? "queued" : "collecting", now, brandId, descriptor.mentionId).run();
   } else {
-    const nextCursor = cursorText(payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
+    if (platform === "Reddit") {
+      const nestedReplies = replyQueue.filter((reply) => reply.cursor && reply.parentId !== descriptor.commentId);
+      for (let index = 0; index < nestedReplies.length; index += 40) {
+        const statements = nestedReplies.slice(index, index + 40).map((reply) => db.prepare(`INSERT INTO social_comment_reply_queue
+          (mention_id, brand_id, media_id, parent_comment_id, reported_count, cursor, adapter, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'reddit', 'queued', ?)
+          ON CONFLICT(mention_id, parent_comment_id) DO UPDATE SET reported_count = MAX(social_comment_reply_queue.reported_count, excluded.reported_count),
+            cursor = CASE WHEN excluded.cursor != social_comment_reply_queue.cursor THEN excluded.cursor ELSE social_comment_reply_queue.cursor END,
+            adapter = 'reddit', status = CASE WHEN excluded.cursor != social_comment_reply_queue.cursor THEN 'queued' ELSE social_comment_reply_queue.status END,
+            updated_at = excluded.updated_at`)
+          .bind(descriptor.mentionId, brandId, descriptor.mediaId, reply.parentId, reply.count, reply.cursor, now));
+        if (statements.length) await db.batch(statements);
+      }
+    }
+    const nextCursor = cursorText(redditPage?.nextCursor ?? payload?.pagination_token ?? pathValue(output, "pagination_token") ?? pathValue(output, "data.pagination_token")
       ?? payload?.next_min_child_cursor ?? pathValue(payload, "page_info.next_min_id"));
-    const hasMore = Boolean(nextCursor) || firstBoolean(payload ?? output, ["has_more_tail_child_comments", "page_info.has_more", "has_more"]);
+    const hasMore = Boolean(nextCursor && nextCursor !== (descriptor.cursor ?? "")) || firstBoolean(payload ?? output, ["has_more_tail_child_comments", "page_info.has_more", "has_more"]);
     const reported = firstNumber(payload ?? output, ["child_comment_count", "total"]);
     const collected = await db.prepare("SELECT COUNT(*) AS count FROM mention_comments WHERE mention_id = ? AND parent_comment_id = ?")
       .bind(descriptor.mentionId, descriptor.commentId ?? "").first<{ count: number }>();
@@ -642,7 +720,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     await updateJob(db, job, run, `Monid 任务状态：${run.status}`);
     await markCommentJobError(db, brandId, job, `Monid 任务状态：${run.status}，将在稍后重试`, "retrying");
     if (job.stage === "resolve_post" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
-    throw new Error(`Monid Instagram 任务未完成：${run.status}`);
+    throw new Error(`Monid 社交平台任务未完成：${run.status}`);
   }
   const providerStatus = Number(run.providerResponse?.httpStatus ?? 200);
   if (providerStatus >= 400) {
@@ -676,7 +754,8 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   const stored = JSON.parse(job.terms || "[]") as string[] | { terms?: string[]; platform?: string };
   const terms = Array.isArray(stored) ? stored : stored.terms ?? [];
   const platform = job.stage === "search_x" ? "X" : job.stage === "search_youtube" ? "YouTube"
-    : job.stage === "search_tiktok" ? "TikTok" : job.stage === "search_facebook" ? "Facebook" : "Instagram";
+    : job.stage === "search_tiktok" ? "TikTok" : job.stage === "search_facebook" ? "Facebook"
+    : job.stage === "search_reddit" ? "Reddit" : "Instagram";
   const candidates = platform === "Instagram" ? parseInstagramPosts(run.output, terms)
     : parseSocialPosts(run.output, terms, platform);
   await updateJob(db, job, run);
@@ -742,21 +821,22 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
 }
 
 export async function queueSocialCommentTarget(db: D1Database, brandId: number, mentionId: number, platform: string, rawMediaId: string, postUrlValue: string, reportedCount: number) {
-  const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? postUrlValue : rawMediaId || postUrlValue;
+  const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? postUrlValue
+    : platform === "Reddit" && rawMediaId ? (rawMediaId.startsWith("t3_") ? rawMediaId : `t3_${rawMediaId}`) : rawMediaId || postUrlValue;
   if (!mediaId) return;
   const count = Math.max(0, reportedCount);
   const now = new Date().toISOString();
   await db.prepare(`INSERT INTO social_comment_targets
     (mention_id, brand_id, platform, media_id, post_url, reported_count, adapter, status, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'v2', 'queued', ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
     ON CONFLICT(mention_id) DO UPDATE SET media_id = excluded.media_id, post_url = excluded.post_url,
       top_level_complete = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 0 ELSE social_comment_targets.top_level_complete END,
       status = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'queued' ELSE social_comment_targets.status END,
-      adapter = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'v2' ELSE social_comment_targets.adapter END,
+      adapter = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.adapter ELSE social_comment_targets.adapter END,
       cursor = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN '' ELSE social_comment_targets.cursor END,
       reported_count = MAX(social_comment_targets.reported_count, excluded.reported_count),
       updated_at = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.updated_at ELSE social_comment_targets.updated_at END`)
-    .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, now).run();
+    .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, platform === "Reddit" ? "reddit" : "v2", now).run();
 }
 
 export async function queueInstagramCommentTarget(db: D1Database, brandId: number, mentionId: number, rawMediaId: string, postUrlValue: string, reportedCount: number) {
@@ -787,7 +867,7 @@ async function registerHistoricalCommentTargets(db: D1Database, brandId: number)
     WHERE brand_id = ? AND status = 'complete' AND reported_count > collected_count AND v2_failures = 0`).bind(brandId).run();
   const posts = await db.prepare(`SELECT metrics.mention_id, metrics.platform, metrics.post_id, metrics.comments, mentions.url
     FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
-    WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook') AND metrics.post_id != ''`)
+    WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook','Reddit') AND metrics.post_id != ''`)
     .bind(brandId).all<{ mention_id: number; platform: string; post_id: string; comments: number; url: string }>();
   for (const post of posts.results) {
     await queueSocialCommentTarget(db, brandId, post.mention_id, post.platform, post.post_id, post.url, Number(post.comments));
@@ -812,7 +892,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
       WHEN target.platform = 'Instagram' THEN 2 ELSE 3 END,
       (target.v2_failures + target.v1_failures) ASC, target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
   for (const target of targets.results) {
-    const commentAdapter = target.adapter === "v1" ? "v1" : "v2";
+    const commentAdapter = target.platform === "Reddit" ? "reddit" : target.adapter === "v1" ? "v1" : "v2";
     const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id, postUrl: target.post_url,
       cursor: target.cursor, page: target.pages_fetched + 1, commentAdapter };
     let run: MonidRun;
@@ -820,6 +900,10 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     if (target.platform === "Instagram" && commentAdapter === "v1" && !/^\d{10,}$/.test(target.media_id)) {
       stage = "resolve_post";
       run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+    } else if (target.platform === "Reddit") {
+      const queryParams: JsonObject = { post_id: target.media_id.startsWith("t3_") ? target.media_id : `t3_${target.media_id}`, sort_type: "CONFIDENCE", need_format: true };
+      if (target.cursor) queryParams.after = target.cursor;
+      run = await startQueryRun(apiKey, REDDIT_COMMENTS_ENDPOINT, queryParams);
     } else if (target.platform === "YouTube") {
       const queryParams: JsonObject = { video_id: target.media_id, need_format: true, sort_by: "newest" };
       if (target.cursor) queryParams.continuation_token = target.cursor;
@@ -846,8 +930,8 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     if (!available) return startedCount;
   }
 
-  const replies = await db.prepare(`SELECT reply.mention_id, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched, reply.adapter
-    FROM social_comment_reply_queue reply
+  const replies = await db.prepare(`SELECT reply.mention_id, target.platform, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched, reply.adapter
+    FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
     WHERE reply.brand_id = ? AND reply.status IN ('queued','retrying')
       AND (reply.status != 'retrying' OR datetime(reply.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = reply.mention_id AND job.stage = 'comment_replies'
@@ -855,14 +939,15 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     ORDER BY reply.updated_at ASC LIMIT ?`).bind(brandId, available).all<ReplyTarget>();
   for (const reply of replies.results) {
     const mention = await db.prepare("SELECT url FROM mentions WHERE brand_id = ? AND id = ?").bind(brandId, reply.mention_id).first<{ url: string }>();
-    const replyAdapter = reply.adapter === "v1" ? "v1" : "v2";
-    const descriptor: CommentJobPayload = { mentionId: reply.mention_id, platform: "Instagram", mediaId: reply.media_id,
+    const replyAdapter = reply.platform === "Reddit" ? "reddit" : reply.adapter === "v1" ? "v1" : "v2";
+    const descriptor: CommentJobPayload = { mentionId: reply.mention_id, platform: reply.platform, mediaId: reply.media_id,
       postUrl: mention?.url ?? "", cursor: reply.cursor, commentId: reply.parent_comment_id, page: reply.pages_fetched + 1, replyAdapter };
-    const queryParams: JsonObject = replyAdapter === "v2"
-      ? { code_or_url: mention?.url ?? reply.media_id, comment_id: reply.parent_comment_id }
+    const queryParams: JsonObject = replyAdapter === "reddit"
+      ? { post_id: reply.media_id.startsWith("t3_") ? reply.media_id : `t3_${reply.media_id}`, cursor: reply.cursor, sort_type: "CONFIDENCE", need_format: true }
+      : replyAdapter === "v2" ? { code_or_url: mention?.url ?? reply.media_id, comment_id: reply.parent_comment_id }
       : { media_id: reply.media_id, comment_id: reply.parent_comment_id };
-    if (reply.cursor) queryParams[replyAdapter === "v2" ? "pagination_token" : "min_id"] = reply.cursor;
-    const run = await startQueryRun(apiKey, replyAdapter === "v2" ? REPLIES_V2_ENDPOINT : REPLIES_V1_ENDPOINT, queryParams);
+    if (reply.cursor && replyAdapter !== "reddit") queryParams[replyAdapter === "v2" ? "pagination_token" : "min_id"] = reply.cursor;
+    const run = await startQueryRun(apiKey, replyAdapter === "reddit" ? REDDIT_REPLIES_ENDPOINT : replyAdapter === "v2" ? REPLIES_V2_ENDPOINT : REPLIES_V1_ENDPOINT, queryParams);
     const job = await saveJob(db, brandId, run, "comment_replies", descriptor, reply.mention_id);
     await db.prepare("UPDATE social_comment_reply_queue SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ? AND parent_comment_id = ?")
       .bind(new Date().toISOString(), brandId, reply.mention_id, reply.parent_comment_id).run();
@@ -916,6 +1001,7 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
         ? { body: { query: `${terms.join(" OR ")} Facebook public post`, includeDomains: ["facebook.com"], numResults: 25 } }
         : { queryParams: platform === "X" ? { keyword: terms.join(" OR "), search_type: "Latest" }
           : platform === "YouTube" ? { keyword, type: "video", upload_date: "this_month", sort_by: "upload_date" }
+          : platform === "Reddit" ? { query: terms.join(" OR "), search_type: "post", sort: "NEW", time_range: "month", safe_search: "unset", allow_nsfw: "0", need_format: true }
           : { keyword, offset: 0 } };
       const started = await startProviderRun(apiKey, config.provider, config.endpoint, input);
       return { platform, config, started };
