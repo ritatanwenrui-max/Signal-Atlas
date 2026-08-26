@@ -21,6 +21,8 @@ type Mention = {
 type Entity = { id: number; type: string; value: string; language: string; active: number };
 type Alert = { id: number; title: string; severity: string; country: string; reason: string; acknowledged: number; created_at: string };
 type SyncRun = { id: number; provider: string; status: string; found_count: number; inserted_count: number; error: string; started_at: string; completed_at: string | null };
+type SyncPipelineJob = { id: string; task_type: "main" | "reddit"; stage: "reddit" | "maintenance" | "discovery" | "audience"; status: "queued" | "running" | "retrying" | "completed" | "failed";
+  attempts: number; max_attempts: number; next_retry_at: string; last_error: string; created_at: string; updated_at: string; completed_at: string; result_json?: string };
 type BrandProfile = { id: number; name: string; aliases: string; website: string; match_mode: string; scope_terms: string; exclude_terms: string; official_accounts: string };
 type Connector = { id: string; name: string; provider?: string; configurable?: boolean; configured?: boolean; lastFour?: string; status: "online" | "limited" | "credentials" | "approval"; detail: string; retryAt?: string; pending?: number; lastError?: string };
 type MediaSource = { id: number; domain: string; name: string; country: string; language: string; homepage_url: string; feed_url: string; sitemap_url: string; status: string; last_crawled_at: string; next_crawl_at: string; last_error: string };
@@ -45,6 +47,7 @@ type TeamWorkspace = { id: number; name: string; role: string; canManage: boolea
 type DashboardData = {
   mentions: Mention[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null;
   connectors: Connector[]; mediaSources: MediaSource[]; propagationEdges: PropagationEdge[]; analytics: Analytics;
+  syncPipeline: SyncPipelineJob | null; redditSyncPipeline: SyncPipelineJob | null;
   aiBrief: { executive_summary?: string; content_finding?: string; audience_finding?: string; regional_finding?: string; risk_finding?: string; opportunity?: string; recommended_actions?: string[]; caveats?: string; generated_at?: string; model?: string; version?: string } | null;
   viewer: { authenticated: boolean };
   workspace: TeamWorkspace | null;
@@ -86,7 +89,7 @@ type SocialCommentsData = {
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 
 const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, emotions: [], timeline: [], words: [], commentWords: [], commentSentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, commentsAnalyzed: 0, sources: [], crossBorderEdges: 0, archivedTotal: 0 };
-const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, aiBrief: null, viewer: { authenticated: false }, workspace: null };
+const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, syncPipeline: null, redditSyncPipeline: null, aiBrief: null, viewer: { authenticated: false }, workspace: null };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "内容舆情", "04"], ["comments", "受众舆情", "05"], ["coverage", "数据采集", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"], ["guide", "产品使用说明", "09"],
@@ -129,6 +132,10 @@ function syncTime(value?: string | null) {
   return formatDate(value);
 }
 
+const pipelineStageLabel: Record<SyncPipelineJob["stage"], string> = {
+  reddit: "Reddit 独立发现", maintenance: "档案维护", discovery: "全网发现", audience: "评论与分析",
+};
+
 function riskClass(risk: number) { return risk >= 70 ? "danger" : risk >= 40 ? "watch" : "safe"; }
 function sentimentClass(value: string) { return value === "负面" ? "negative" : value === "正面" ? "positive" : value === "混合" ? "mixed" : value === "无实意" ? "meaningless" : "neutral"; }
 function gapLabel(minutes: number) { return minutes < 60 ? `${minutes} 分钟` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时` : `${Math.round(minutes / 1440)} 天`; }
@@ -166,6 +173,7 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const syncPollRef = useRef(false);
 
   function navigateTo(nextView: ViewId, replace = false) {
     setView(nextView);
@@ -187,24 +195,56 @@ export default function Home() {
     document.title = `${label} · Somnia Lab`;
   }, [view]);
 
+  async function pollSync(jobId: string, announce = false) {
+    if (syncPollRef.current) return;
+    syncPollRef.current = true;
+    setSyncing(true);
+    try {
+      for (let attempt = 0; attempt < 90; attempt += 1) {
+        if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 4000));
+        const response = await fetch(`/api/sync?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error ?? "无法读取巡检进度");
+        setData(result.data);
+        const job = result.sync?.job as SyncPipelineJob | undefined;
+        const redditJob = result.sync?.redditJob as SyncPipelineJob | undefined;
+        if (!job) throw new Error("主巡检任务状态缺失");
+        if (job.status === "completed") {
+          if (announce) {
+            const redditNote = redditJob && ["queued", "running", "retrying"].includes(redditJob.status)
+              ? "；Reddit 正按独立任务继续运行" : redditJob?.status === "failed" ? "；Reddit 已进入失败复核" : "";
+            setToast(`主巡检完成，新闻档案、评论采集和分析结果已更新${redditNote}`);
+            window.setTimeout(() => setToast(""), 6200);
+          }
+          return;
+        }
+        if (job.status === "failed") throw new Error(job.last_error || "后台巡检多次重试后仍未完成");
+      }
+      if (announce) { setToast("巡检仍在后台继续，可稍后回来查看"); window.setTimeout(() => setToast(""), 5200); }
+    } catch (error) {
+      setToast(`${error instanceof Error ? error.message : "自动巡检失败"}，系统会保留当前阶段并继续重试`);
+      window.setTimeout(() => setToast(""), 4500);
+    } finally { syncPollRef.current = false; setSyncing(false); }
+  }
+
   async function syncNews(force = false, announce = false) {
-    if (syncing) return;
+    if (syncPollRef.current) return;
     setSyncing(true);
     try {
       const response = await fetch("/api/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "自动巡检失败");
       setData(result.data);
-      if (announce) {
-        const commentNote = result.sync.commentRefresh?.analyzedComments ? `；新增分析 ${result.sync.commentRefresh.analyzedComments} 条公开评论` : "";
-        const message = result.sync.skipped ? `系统刚完成过巡检，档案已是最新状态${commentNote}`
-          : `巡检完成：共发现 ${result.sync.found} 条，新增归档 ${result.sync.inserted} 条，追踪 ${result.sync.crawledSources ?? 0} 个媒体源${result.sync.socialPending ? `；${result.sync.socialPending} 个社媒任务正在后台处理` : ""}${commentNote}`;
-        setToast(message); window.setTimeout(() => setToast(""), 5200);
-      }
+      const job = result.sync?.job as SyncPipelineJob | undefined;
+      if (!job) throw new Error("后台巡检任务未能创建");
+      if (announce) setToast("主巡检与 Reddit 独立任务均已进入后台队列");
+      setSyncing(false);
+      await pollSync(job.id, announce);
     } catch (error) {
       setToast(`${error instanceof Error ? error.message : "自动巡检失败"}，系统会按退避策略重试`);
       window.setTimeout(() => setToast(""), 4500);
-    } finally { setSyncing(false); }
+      setSyncing(false);
+    }
   }
 
   useEffect(() => {
@@ -217,7 +257,9 @@ export default function Home() {
         const next = await response.json() as DashboardData;
         if (!cancelled) setData(next);
         if (next.viewer.authenticated) {
-          if (next.brand && next.workspace?.canEdit) void syncNews(false, false);
+          const activePipeline = next.syncPipeline && ["queued", "running", "retrying"].includes(next.syncPipeline.status) ? next.syncPipeline : null;
+          if (activePipeline && next.workspace?.canEdit) void pollSync(activePipeline.id, false);
+          else if (next.brand && next.workspace?.canEdit) void syncNews(false, false);
           if (next.workspace?.canEdit) timer = window.setInterval(() => void syncNews(false, false), 60 * 60 * 1000);
         }
       } catch { if (!cancelled) setToast("暂时无法读取情报档案，请稍后刷新"); }
@@ -270,7 +312,7 @@ export default function Home() {
   const initials = data.viewer.authenticated ? data.brand?.name.split(/\s+/).map((item) => item[0]).join("").slice(0, 2).toUpperCase() || "BR" : "--";
 
   useEffect(() => {
-    if (!data.viewer.authenticated || !data.workspace?.canEdit || !data.brand || monidConnector?.status !== "online" || !monidConnector.pending) {
+    if (!data.viewer.authenticated || !data.workspace?.canEdit || !data.brand || !monidConnector?.configured || !monidConnector.pending) {
       return;
     }
     if (syncing) return;
@@ -282,7 +324,7 @@ export default function Home() {
     return () => window.clearTimeout(timer);
     // Keep long-running Monid queues moving; retrying targets wait until their explicit retry time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.brand, data.viewer.authenticated, data.workspace?.canEdit, monidConnector?.pending, monidConnector?.retryAt, monidConnector?.status, syncing]);
+  }, [data.brand, data.viewer.authenticated, data.workspace?.canEdit, monidConnector?.configured, monidConnector?.pending, monidConnector?.retryAt, syncing]);
 
   return <main className="app-shell">
     <aside className="sidebar">
@@ -290,7 +332,9 @@ export default function Home() {
       <nav aria-label="主要导航">{nav.map(([id, label, number]) => <a key={id} href={routeByView[id]} aria-current={view === id ? "page" : undefined} className={view === id ? "nav-item active" : "nav-item"} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigateTo(id); }}><span>{number}</span>{label}{id === "overview" && activeAlerts.length > 0 && <b>{activeAlerts.length}</b>}</a>)}</nav>
       {data.viewer.authenticated && <div className="system-card">
         <div className="system-title"><i /> 混合监测已运行</div>
-        <div className="system-row"><span>调度巡检</span><strong>每小时 :17</strong></div>
+        <div className="system-row"><span>后台续跑</span><strong>每 5 分钟</strong></div>
+        {data.syncPipeline && <div className="system-row"><span>主巡检</span><strong>{data.syncPipeline.status === "completed" ? "已完成" : `${pipelineStageLabel[data.syncPipeline.stage]} · ${data.syncPipeline.status === "retrying" ? "等待重试" : data.syncPipeline.status === "running" ? "运行中" : data.syncPipeline.status === "failed" ? "失败待复核" : "已排队"}`}</strong></div>}
+        {data.redditSyncPipeline && <div className="system-row"><span>Reddit 独立任务</span><strong>{data.redditSyncPipeline.status === "completed" ? "已完成" : data.redditSyncPipeline.status === "retrying" ? `下次 ${formatDate(data.redditSyncPipeline.next_retry_at)}` : data.redditSyncPipeline.status === "running" ? "运行中" : data.redditSyncPipeline.status === "failed" ? "失败待复核" : "已排队"}</strong></div>}
         <div className="system-row"><span>全球发现</span><strong>6 小时 / 每日</strong></div>
         <div className="system-row"><span>六平台社媒搜索</span><strong>{monidConnector?.configured ? "每 6 小时" : "待配置"}</strong></div>
         <div className="system-row"><span>免费单源</span><strong>活跃 3h / 探测 12h</strong></div>
@@ -865,7 +909,7 @@ function SettingsView({ brand, connectors, entities, workspace, submit }: { bran
         <p className="form-warning exclusion-note">排除词保存后会立即从新闻档案、事件、内容舆情、受众舆情和导出报告中隐藏匹配结果；删除排除词后可恢复显示，原始档案不会被永久删除。</p>
         <div className="section-head entity-heading"><div><p className="eyebrow">ENTITY DICTIONARY</p><h3>团队扩展监测词典</h3></div><span className="count-chip">{entities.length}</span></div>{workspace.canEdit && <form className="inline-form" onSubmit={handleEntitySubmit}><select name="type" defaultValue="关键词"><option>公司</option><option>产品</option><option>人物</option><option>关键词</option><option>事件指纹</option><option>排除词</option></select><input name="value" required placeholder="输入产品、人物、别名或排除词" /><select name="language" defaultValue="通用"><option>通用</option><option>英文</option><option>简体中文</option><option>繁体中文</option><option>泰语</option><option>日语</option></select><button className="primary-button">添加</button></form>}<div className="entity-list">{entities.map((item) => { const core = ["品牌", "别名", "官网域名"].includes(item.type); return <div key={item.id}><span>{item.type}</span><strong>{item.value}</strong><small>{item.language}</small><i>启用</i>{workspace.canEdit && (core ? <em title="请在上方品牌档案中修改">档案管理</em> : <button type="button" onClick={() => void removeEntity(item)} aria-label={`删除词条 ${item.value}`}>删除</button>)}</div>; })}</div>
       </section>
-      <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["调度巡检", "Cloudflare 每小时第 17 分钟触发", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "Monid 每 6 小时搜索六个平台" : "由管理员在数据采集页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
+      <aside className="surface automation-card"><div className="section-head"><div><p className="eyebrow">AUTOMATION POLICY</p><h3>团队自动运行策略</h3></div></div>{[["共享数据", `${workspace.members.length} 位成员读取同一品牌、档案、事件与分析`, true], ["后台分阶段巡检", "每 5 分钟恢复未完成阶段；页面关闭后也会继续", true], ["全球发现", "NewsAPI.ai 每 6 小时；GDELT 每日兜底", true], ["多平台公开搜索", monidConfigured ? "各平台使用独立状态和重试时钟" : "由管理员在数据采集页配置 Monid", monidConfigured], ["评论与回复", monidConfigured ? "社媒与网页新闻公开评论统一归档" : "网页评论持续运行；社媒评论待配置", true], ["精准品牌匹配", "同一套身份锚点在入库前过滤", true], ["传播链路", "团队共享同一事件图谱", true], ["Meta / TikTok 官方接口", officialSocialConfigured ? "团队凭证已保存" : "可选配置", officialSocialConfigured]].map(([title, note, on]) => <div className="policy-row" key={String(title)}><div><strong>{title}</strong><small>{note}</small></div><span className={on ? "toggle on" : "toggle"}><i /></span></div>)}<div className="connector-mini">{connectors.map((item) => <div key={item.id}><span>{item.name}</span><strong>{item.status === "limited" ? "暂缓重试" : item.pending ? "采集中" : item.status === "online" ? "运行中" : item.configured ? "凭证已存" : "待接入"}</strong></div>)}</div></aside>
     </div>
   </div>;
 }

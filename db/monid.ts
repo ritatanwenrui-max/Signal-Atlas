@@ -11,6 +11,8 @@ type MonidRun = {
   cost?: { value?: number; currency?: string } | number | null;
 };
 type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "reddit_details" | "post_comments" | "comment_replies";
+export type MonidSearchPlatform = "Instagram" | "X" | "YouTube" | "TikTok" | "Facebook" | "Reddit";
+export type MonidCollectionOptions = { force?: boolean; platforms?: MonidSearchPlatform[]; includeComments?: boolean };
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
 type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1" | "reddit"; replyAdapter?: "v2" | "v1" | "reddit" };
 type SocialComment = {
@@ -43,6 +45,72 @@ const TERMINAL = new Set(["COMPLETED", "FAILED", "BLOCKED", "STOPPED", "TIME_OUT
 const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
 const COMMENT_JOBS_PER_CYCLE = 2;
 const MAX_COMMENT_FAILURES = 5;
+const SEARCH_INTERVAL_MS = 6 * 3600_000;
+
+function searchStage(platform: MonidSearchPlatform): MonidJobStage {
+  return platform === "Instagram" ? "search" : SOCIAL_SEARCHES[platform].stage;
+}
+
+function searchPlatform(stage: MonidJobStage): MonidSearchPlatform | null {
+  return stage === "search" ? "Instagram" : stage === "search_x" ? "X" : stage === "search_youtube" ? "YouTube"
+    : stage === "search_tiktok" ? "TikTok" : stage === "search_facebook" ? "Facebook"
+    : stage === "search_reddit" ? "Reddit" : null;
+}
+
+function platformHealthKey(brandId: number, platform: MonidSearchPlatform) { return `${brandId}:Monid / ${platform}`; }
+
+type PlatformHealth = { status: string; consecutive_failures: number; retry_after: string; last_success_at: string };
+
+async function loadPlatformHealth(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
+  return db.prepare(`SELECT status, consecutive_failures, retry_after, last_success_at FROM provider_health WHERE provider = ?`)
+    .bind(platformHealthKey(brandId, platform)).first<PlatformHealth>();
+}
+
+async function markPlatformRunning(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO provider_health
+    (provider, status, consecutive_failures, retry_after, last_error, last_attempt_at, last_success_at, updated_at)
+    VALUES (?, 'building', 0, '', '', ?, '', ?)
+    ON CONFLICT(provider) DO UPDATE SET status = 'building', retry_after = '', last_error = '',
+      last_attempt_at = excluded.last_attempt_at, updated_at = excluded.updated_at`)
+    .bind(platformHealthKey(brandId, platform), now, now).run();
+}
+
+async function markPlatformHealthy(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO provider_health
+    (provider, status, consecutive_failures, retry_after, last_error, last_attempt_at, last_success_at, updated_at)
+    VALUES (?, 'online', 0, '', '', ?, ?, ?)
+    ON CONFLICT(provider) DO UPDATE SET status = 'online', consecutive_failures = 0, retry_after = '', last_error = '',
+      last_attempt_at = excluded.last_attempt_at, last_success_at = excluded.last_success_at, updated_at = excluded.updated_at`)
+    .bind(platformHealthKey(brandId, platform), now, now, now).run();
+}
+
+async function markPlatformFailed(db: D1Database, brandId: number, platform: MonidSearchPlatform, error: unknown) {
+  const current = await loadPlatformHealth(db, brandId, platform);
+  const failures = Number(current?.consecutive_failures ?? 0) + 1;
+  const limited = error instanceof ProviderRequestError && error.status === 429;
+  const base = limited ? 30 * 60_000 : 5 * 60_000;
+  const hinted = error instanceof ProviderRequestError ? Number(error.retryAfterMs ?? 0) : 0;
+  const retryMs = Math.min(6 * 3600_000, Math.max(base * 2 ** Math.min(4, failures - 1), hinted));
+  const now = new Date().toISOString();
+  const retryAt = new Date(Date.now() + retryMs).toISOString();
+  const message = error instanceof Error ? error.message : "平台搜索启动失败";
+  await db.prepare(`INSERT INTO provider_health
+    (provider, status, consecutive_failures, retry_after, last_error, last_attempt_at, last_success_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, '', ?)
+    ON CONFLICT(provider) DO UPDATE SET status = excluded.status, consecutive_failures = excluded.consecutive_failures,
+      retry_after = excluded.retry_after, last_error = excluded.last_error, last_attempt_at = excluded.last_attempt_at,
+      updated_at = excluded.updated_at`)
+    .bind(platformHealthKey(brandId, platform), limited ? "limited" : "degraded", failures, retryAt, message, now, now).run();
+  return { retryAt, message };
+}
+
+function platformSearchDue(health: PlatformHealth | null, force: boolean) {
+  if (force) return true;
+  if (health?.retry_after && new Date(health.retry_after).getTime() > Date.now()) return false;
+  return !health?.last_success_at || Date.now() - new Date(health.last_success_at).getTime() >= SEARCH_INTERVAL_MS;
+}
 
 function pathValue(value: unknown, path: string) {
   return path.split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as JsonObject)[key] : undefined, value);
@@ -895,6 +963,21 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
   return Number(row?.count ?? 0);
 }
 
+export async function getMonidPlatformState(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
+  const stage = searchStage(platform);
+  const pending = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs
+    WHERE brand_id = ? AND stage = ? AND status IN (${PENDING_SQL})`).bind(brandId, stage).first<{ count: number }>();
+  const health = await loadPlatformHealth(db, brandId, platform);
+  return {
+    platform,
+    stage,
+    pending: Number(pending?.count ?? 0),
+    status: health?.status ?? "idle",
+    retryAt: health?.retry_after ?? "",
+    lastSuccessAt: health?.last_success_at ?? "",
+  };
+}
+
 export async function queueSocialCommentTarget(db: D1Database, brandId: number, mentionId: number, platform: string, rawMediaId: string, postUrlValue: string, reportedCount: number) {
   const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? postUrlValue
     : platform === "Reddit" && rawMediaId ? (rawMediaId.startsWith("t3_") ? rawMediaId : `t3_${rawMediaId}`) : rawMediaId || postUrlValue;
@@ -1060,34 +1143,65 @@ export async function refreshSocialFollowerCounts(db: D1Database, brandId: numbe
     WHERE brand_id = ? AND platform = 'Instagram'`).bind(brandId).run();
 }
 
-export async function collectMonidSocial(db: D1Database, brandId: number, terms: string[], apiKey: string, startNew: boolean) {
+export async function collectMonidSocial(db: D1Database, brandId: number, terms: string[], apiKey: string, options: MonidCollectionOptions = {}) {
   const candidates: MonitoringCandidate[] = [];
-  await registerHistoricalCommentTargets(db, brandId);
-  const pending = await db.prepare(`SELECT id, run_id, mention_id, stage, status, terms FROM monid_jobs
-    WHERE brand_id = ? AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 8`)
-    .bind(brandId).all<MonidJob>();
-  const pendingSearchStages = new Set(pending.results.filter((job) => job.stage.startsWith("search")).map((job) => job.stage));
-  const polled = await Promise.all(pending.results.map(async (job) => ({ job, run: await getRun(apiKey, job.run_id) })));
-  for (const { job, run } of polled) {
-    candidates.push(...await processJob(db, brandId, apiKey, job, run));
+  const platforms = options.platforms ?? ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"];
+  const selectedStages = platforms.map(searchStage);
+  const allowedStages: MonidJobStage[] = [...selectedStages, ...(options.includeComments
+    ? ["profiles", "resolve_post", "reddit_details", "post_comments", "comment_replies"] as MonidJobStage[] : [])];
+  if (options.includeComments) await registerHistoricalCommentTargets(db, brandId);
+
+  let pendingResults: MonidJob[] = [];
+  if (allowedStages.length) {
+    const placeholders = allowedStages.map(() => "?").join(",");
+    const pending = await db.prepare(`SELECT id, run_id, mention_id, stage, status, terms FROM monid_jobs
+      WHERE brand_id = ? AND stage IN (${placeholders}) AND status IN (${PENDING_SQL}) ORDER BY id ASC LIMIT 12`)
+      .bind(brandId, ...allowedStages).all<MonidJob>();
+    pendingResults = pending.results;
   }
-  if (startNew && !pendingSearchStages.has("search")) {
-    const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
-    if (searchTerms.length) {
-      const started = await startRun(apiKey, SEARCH_ENDPOINT, {
-        hashtags: searchTerms,
-        keywordSearch: true,
-        resultsType: "posts",
-        resultsLimit: 50,
-      });
-      const job = await saveJob(db, brandId, started, "search", searchTerms);
-      candidates.push(...await processJob(db, brandId, apiKey, job, started));
+  const pendingSearchStages = new Set(pendingResults.filter((job) => job.stage.startsWith("search")).map((job) => job.stage));
+  for (const job of pendingResults) {
+    const platform = searchPlatform(job.stage);
+    try {
+      const run = await getRun(apiKey, job.run_id);
+      const found = await processJob(db, brandId, apiKey, job, run);
+      candidates.push(...found);
+      if (platform && run.status === "COMPLETED") await markPlatformHealthy(db, brandId, platform);
+      else if (platform && !TERMINAL.has(run.status)) await markPlatformRunning(db, brandId, platform);
+    } catch (error) {
+      if (platform) await markPlatformFailed(db, brandId, platform, error);
     }
   }
-  if (startNew && terms.length) {
+
+  const healthEntries = await Promise.all(platforms.map(async (platform) => [platform, await loadPlatformHealth(db, brandId, platform)] as const));
+  const healthByPlatform = new Map(healthEntries);
+  const duePlatforms = platforms.filter((platform) => !pendingSearchStages.has(searchStage(platform))
+    && platformSearchDue(healthByPlatform.get(platform) ?? null, Boolean(options.force)));
+
+  if (duePlatforms.includes("Instagram")) {
+    const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
+    if (searchTerms.length) {
+      try {
+        const started = await startRun(apiKey, SEARCH_ENDPOINT, {
+          hashtags: searchTerms,
+          keywordSearch: true,
+          resultsType: "posts",
+          resultsLimit: 50,
+        });
+        const job = await saveJob(db, brandId, started, "search", { platform: "Instagram", terms: searchTerms });
+        if (started.status === "COMPLETED") {
+          candidates.push(...await processJob(db, brandId, apiKey, job, started));
+          await markPlatformHealthy(db, brandId, "Instagram");
+        } else await markPlatformRunning(db, brandId, "Instagram");
+      } catch (error) { await markPlatformFailed(db, brandId, "Instagram", error); }
+    }
+  }
+  const secondaryPlatforms = duePlatforms.filter((platform): platform is Exclude<MonidSearchPlatform, "Instagram"> => platform !== "Instagram");
+  if (secondaryPlatforms.length && terms.length) {
     const keyword = terms[0];
-    const searches = (Object.entries(SOCIAL_SEARCHES) as Array<[keyof typeof SOCIAL_SEARCHES, (typeof SOCIAL_SEARCHES)[keyof typeof SOCIAL_SEARCHES]]>)
-      .filter(([, config]) => !pendingSearchStages.has(config.stage)).map(async ([platform, config]) => {
+    const searchPlans = (Object.entries(SOCIAL_SEARCHES) as Array<[keyof typeof SOCIAL_SEARCHES, (typeof SOCIAL_SEARCHES)[keyof typeof SOCIAL_SEARCHES]]>)
+      .filter(([platform]) => secondaryPlatforms.includes(platform));
+    const searches = searchPlans.map(async ([platform, config]) => {
       const input = platform === "Facebook"
         ? { body: { query: `${terms.join(" OR ")} Facebook public post`, includeDomains: ["facebook.com"], numResults: 25 } }
         : platform === "Reddit" ? { body: {
@@ -1114,23 +1228,27 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
       return { platform, config, started };
     });
     const settled = await Promise.allSettled(searches);
-    let successfulStarts = 0;
-    for (const result of settled) {
-      if (result.status !== "fulfilled") continue;
-      successfulStarts += 1;
-      const { platform, config, started } = result.value;
-      const job = await saveJob(db, brandId, started, config.stage, { platform, terms });
-      if (started.status === "COMPLETED") candidates.push(...await processJob(db, brandId, apiKey, job, started));
-    }
-    if (searches.length && !successfulStarts) {
-      const failure = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
-      throw failure?.reason ?? new Error("Monid 多平台搜索启动失败");
+    for (let index = 0; index < settled.length; index += 1) {
+      const result = settled[index];
+      const platform = searchPlans[index][0];
+      if (result.status === "rejected") {
+        await markPlatformFailed(db, brandId, platform, result.reason);
+        continue;
+      }
+      const { config, started } = result.value;
+      try {
+        const job = await saveJob(db, brandId, started, config.stage, { platform, terms });
+        if (started.status === "COMPLETED") {
+          candidates.push(...await processJob(db, brandId, apiKey, job, started));
+          await markPlatformHealthy(db, brandId, platform);
+        } else await markPlatformRunning(db, brandId, platform);
+      } catch (error) { await markPlatformFailed(db, brandId, platform, error); }
     }
   }
   // Keyword discovery keeps its own cadence even when the comment backlog is non-empty.
   // Newly discovered post URLs are archived by the caller, queued as comment targets,
   // resolved to platform post IDs, then analyzed after comment text is stored.
-  await startCommentJobs(db, brandId, apiKey);
+  if (options.includeComments) await startCommentJobs(db, brandId, apiKey);
   return candidates;
 }
 

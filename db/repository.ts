@@ -177,6 +177,24 @@ const tables = [
     name TEXT PRIMARY KEY,
     locked_until TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS sync_pipeline_jobs (
+    id TEXT PRIMARY KEY,
+    brand_id INTEGER NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    task_type TEXT NOT NULL DEFAULT 'main',
+    force INTEGER NOT NULL DEFAULT 0,
+    stage TEXT NOT NULL DEFAULT 'maintenance',
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    next_retry_at TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT NOT NULL DEFAULT ''
+  )`,
   `CREATE TABLE IF NOT EXISTS provider_health (
     provider TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'online',
@@ -384,6 +402,8 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_alerts_brand_ack_severity ON alerts(brand_id, acknowledged, severity)",
   "CREATE INDEX IF NOT EXISTS idx_traffic_brand_country_recorded ON traffic_signals(brand_id, country, recorded_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_runs_brand_started ON sync_runs(brand_id, started_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_brand_task_status_retry ON sync_pipeline_jobs(brand_id, task_type, status, next_retry_at)",
+  "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_status_lease ON sync_pipeline_jobs(status, lease_until)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_sources_brand_domain ON media_sources(brand_id, domain)",
   "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_next_crawl ON media_sources(brand_id, status, next_crawl_at)",
   "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_country ON media_sources(brand_id, country)",
@@ -509,7 +529,7 @@ export async function loadDashboardData(userId = "") {
   const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
   const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow, syncPipeline, redditSyncPipeline] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
       social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
       social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
@@ -557,6 +577,10 @@ export async function loadDashboardData(userId = "") {
     db.prepare(`SELECT result_json, model, completed_at FROM llm_analysis_jobs
       WHERE brand_id = ? AND kind = 'report' AND status = 'completed' ORDER BY completed_at DESC LIMIT 1`)
       .bind(brandId).first<{ result_json: string; model: string; completed_at: string }>(),
+    db.prepare(`SELECT id, task_type, stage, status, attempts, max_attempts, next_retry_at, last_error, created_at, updated_at, completed_at
+      FROM sync_pipeline_jobs WHERE brand_id = ? AND task_type = 'main' ORDER BY created_at DESC LIMIT 1`).bind(brandId).first<Record<string, unknown>>(),
+    db.prepare(`SELECT id, task_type, stage, status, attempts, max_attempts, next_retry_at, last_error, created_at, updated_at, completed_at
+      FROM sync_pipeline_jobs WHERE brand_id = ? AND task_type = 'reddit' ORDER BY created_at DESC LIMIT 1`).bind(brandId).first<Record<string, unknown>>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -578,10 +602,14 @@ export async function loadDashboardData(userId = "") {
   const llmHealth = healthByName.get("OpenAI LLM");
   const llmLimited = Boolean(llmHealth?.retry_after && new Date(llmHealth.retry_after).getTime() > Date.now());
   const monidHealth = healthByName.get("Monid / Instagram");
-  const monidLimited = Boolean(monidHealth?.retry_after && new Date(monidHealth.retry_after).getTime() > Date.now());
+  const monidPlatforms = ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"] as const;
+  const monidPlatformHealth = new Map(monidPlatforms.map((platform) => [platform, healthByName.get(`Monid / ${platform}`)]));
+  const limitedPlatformHealth = [...monidPlatformHealth.values()].filter((item) => item?.retry_after && new Date(item.retry_after).getTime() > Date.now());
+  const monidLimited = limitedPlatformHealth.length > 0;
   const monidPending = Number(monidQueueStats?.count ?? monidJobs.results.filter((item) => ["CREATED", "QUEUED", "PENDING", "READY", "RUNNING"].includes(item.status)).length);
   const monidActive = Number(monidQueueStats?.active_count ?? 0);
-  const monidRetryAt = monidHealth?.retry_after || (!monidActive ? monidQueueStats?.next_retry_at ?? "" : "");
+  const monidRetryAt = limitedPlatformHealth.map((item) => item?.retry_after ?? "").filter(Boolean).sort()[0]
+    || (!monidActive ? monidQueueStats?.next_retry_at ?? "" : "");
   const newsApiAvailable = Boolean(newsApiConfigured && !eventRegistryLimited);
   const newsLimited = !newsApiAvailable && gdeltLimited;
   const newsDetail = newsApiConfigured
@@ -685,6 +713,8 @@ export async function loadDashboardData(userId = "") {
     entities: entities.results,
     alerts: alerts.results,
     syncRuns: syncRuns.results,
+    syncPipeline: syncPipeline ?? null,
+    redditSyncPipeline: redditSyncPipeline ?? null,
     brand,
     providerHealth: providerHealth.results.map((item) => ({ ...item, provider: item.provider.replace(/^\d+:/, "") })),
     mediaSources: sourceRows,
@@ -742,11 +772,20 @@ export async function loadDashboardData(userId = "") {
         detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook、Reddit 搜索与公开评论采集"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
           : monidPending ? `${monidPending} 个多平台采集步骤处理中${monidRetryAt && !monidActive ? ` · ${new Date(monidRetryAt).toLocaleString("zh-CN")} 继续重试` : ""}` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
-      ...(["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"] as const).map((platform) => ({
-        id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
-        status: (!monidConfigured ? "credentials" : monidLimited ? "limited" : "online") as "credentials" | "limited" | "online",
-        detail: !monidConfigured ? "共享上方 Monid API Key" : `${platform} 公开内容搜索 · 互动指标 · 可取得的评论区文本`,
-      })),
+      ...monidPlatforms.map((platform) => {
+        const platformHealth = monidPlatformHealth.get(platform);
+        const platformLimited = Boolean(platformHealth?.retry_after && new Date(platformHealth.retry_after).getTime() > Date.now());
+        const building = platformHealth?.status === "building";
+        const lastSuccess = platformHealth?.last_success_at ? ` · 最近成功 ${new Date(platformHealth.last_success_at).toLocaleString("zh-CN")}` : " · 等待首次成功搜索";
+        const retry = platformLimited ? ` · ${new Date(platformHealth!.retry_after).toLocaleString("zh-CN")} 重试` : "";
+        return {
+          id: `monid-${platform.toLowerCase()}`, name: `${platform} · Monid`, configured: monidConfigured,
+          status: (!monidConfigured ? "credentials" : platformLimited ? "limited" : "online") as "credentials" | "limited" | "online",
+          retryAt: platformHealth?.retry_after ?? "", lastError: platformHealth?.last_error ?? "",
+          detail: !monidConfigured ? "共享上方 Monid API Key"
+            : `${platform} 独立搜索状态与重试时钟${building ? " · 正在建库" : ""}${retry}${lastSuccess}`,
+        };
+      }),
       { id: "x", provider: "X", configurable: true, configured: xConfigured, lastFour: storedCredentials.get("X")?.last_four ?? (env.X_BEARER_TOKEN ? "环境密钥" : ""), name: "X", status: xConfigured ? "online" : "credentials", detail: xConfigured ? "近 7 日公开帖文、转发与引用链路" : "可在本页配置 Bearer Token" },
       { id: "youtube", provider: "YouTube", configurable: true, configured: youtubeConfigured, lastFour: storedCredentials.get("YouTube")?.last_four ?? (env.YOUTUBE_API_KEY ? "环境密钥" : ""), name: "YouTube", status: youtubeConfigured ? "online" : "credentials", detail: youtubeConfigured ? "视频、互动量与高相关评论" : "可在本页配置 API Key" },
       { id: "meta", provider: "Meta / Instagram", configurable: true, configured: metaConfigured, lastFour: storedCredentials.get("Meta / Instagram")?.last_four ?? "", name: "Meta / Instagram", status: metaConfigured ? "approval" : "credentials", detail: metaConfigured ? "凭证已保存 · 需 Business / Creator 权限和 App Review 后启用提及采集" : "可配置 Access Token 与 Instagram Business Account ID" },

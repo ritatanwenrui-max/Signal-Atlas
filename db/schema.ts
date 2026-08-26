@@ -209,6 +209,28 @@ export const syncLocks = sqliteTable("sync_locks", {
   lockedUntil: text("locked_until").notNull(),
 });
 
+export const syncPipelineJobs = sqliteTable("sync_pipeline_jobs", {
+  id: text("id").primaryKey(),
+  brandId: integer("brand_id").notNull(),
+  ownerUserId: text("owner_user_id").notNull(),
+  taskType: text("task_type").notNull().default("main"),
+  force: integer("force", { mode: "boolean" }).notNull().default(false),
+  stage: text("stage").notNull().default("maintenance"),
+  status: text("status").notNull().default("queued"),
+  attempts: integer("attempts").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  nextRetryAt: text("next_retry_at").notNull().default(""),
+  leaseUntil: text("lease_until").notNull().default(""),
+  lastError: text("last_error").notNull().default(""),
+  resultJson: text("result_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  completedAt: text("completed_at").notNull().default(""),
+}, (table) => [
+  index("idx_sync_pipeline_brand_task_status_retry").on(table.brandId, table.taskType, table.status, table.nextRetryAt),
+  index("idx_sync_pipeline_status_lease").on(table.status, table.leaseUntil),
+]);
+
 export const providerHealth = sqliteTable("provider_health", {
   provider: text("provider").primaryKey(),
   status: text("status").notNull().default("online"),

@@ -134,6 +134,20 @@
       "when": 1786694261944,
       "tag": "0018_burly_mandroid",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1787728515345,
+      "tag": "0019_sharp_ulik",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1787728931770,
+      "tag": "0020_icy_famine",
+      "breakpoints": true
     }
   ]
 }

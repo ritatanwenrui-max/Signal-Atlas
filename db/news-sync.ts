@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { refreshPublicCommentAnalyses } from "./comments";
-import { collectMonidSocial, countPendingMonidJobs, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts } from "./monid";
+import { collectMonidSocial, countPendingMonidJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
@@ -14,6 +14,7 @@ type SyncRun = { id: number; status: string; started_at: string };
 type ExistingMention = { id?: number; title: string; excerpt?: string; cluster_key: string; url: string; source: string; source_country: string; content_country?: string; language?: string; published_at?: string; parent_url?: string };
 type ProviderHealth = { provider: string; status: string; consecutive_failures: number; retry_after: string; last_error: string; last_success_at: string };
 type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> };
+export type NewsSyncMode = "full" | "reddit" | "maintenance" | "discovery" | "audience";
 
 const SIX_HOURS = 6 * 3600_000;
 const ONE_DAY = 24 * 3600_000;
@@ -368,7 +369,7 @@ async function rebuildPropagationEdges(db: D1Database, brandId: number, terms: s
   for (let index = 0; index < inserts.length; index += 75) await db.batch(inserts.slice(index, index + 75));
 }
 
-export async function runNewsSync(force = false, userId = "") {
+export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode = "full") {
   await ensureDatabase();
   const db = env.DB;
   const brand = await getActiveBrandForUser(db, userId);
@@ -391,30 +392,42 @@ export async function runNewsSync(force = false, userId = "") {
   if ((lease.meta.changes ?? 0) === 0) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0 };
 
   try {
-    // Analysis repair is independent from provider quotas, so old archives are enriched even during a provider cooldown.
-    await enrichHistoricalMentions(db, brandId);
-    await backfillMediaSources(db, brandId);
-    await rebuildStoryClusters(db, brandId, terms);
-    await rebuildPropagationEdges(db, brandId, terms);
-    const commentRefresh = await refreshPublicCommentAnalyses(db, brandId, terms);
-    const translationBefore = await runTranslationCycle(db, brandId, credentialOwnerId);
-    const hybridAnalysis = await runHybridAnalysisCycle(db, brandId, credentialOwnerId).catch((error) => ({
+    const maintenanceEnabled = mode === "full" || mode === "maintenance";
+    const audienceEnabled = mode === "full" || mode === "audience";
+    if (maintenanceEnabled) {
+      // Archive repair is separated from external provider work so an interrupted provider call cannot roll it back.
+      await enrichHistoricalMentions(db, brandId);
+      await backfillMediaSources(db, brandId);
+      await rebuildStoryClusters(db, brandId, terms);
+      await rebuildPropagationEdges(db, brandId, terms);
+    }
+    const commentRefresh = audienceEnabled ? await refreshPublicCommentAnalyses(db, brandId, terms) : { analyzedComments: 0 };
+    const translationBefore = audienceEnabled ? await runTranslationCycle(db, brandId, credentialOwnerId)
+      : { queued: 0, translated: 0, skipped: 0, errors: 0 };
+    const hybridAnalysis = audienceEnabled ? await runHybridAnalysisCycle(db, brandId, credentialOwnerId).catch((error) => ({
       configured: true, queued: 0, analyzed: 0, skipped: 0, errors: 1, reportGenerated: false,
       error: error instanceof Error ? error.message : "混合智能分析暂未完成",
-    }));
+    })) : { configured: false, queued: 0, analyzed: 0, skipped: 0, errors: 0, reportGenerated: false };
     const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
+
+    if (mode === "maintenance") return { skipped: false, phase: mode, inserted: 0, found: 0 };
+    if (mode === "audience") {
+      if (earlyMonidApiKey) await collectMonidSocial(db, brandId, terms, earlyMonidApiKey, { force, platforms: [], includeComments: true });
+      return { skipped: false, phase: mode, inserted: 0, found: 0, commentRefresh, translation: translationBefore,
+        hybridAnalysis, socialPending: await countPendingMonidJobs(db, brandId) };
+    }
 
     const lastRun = await db.prepare("SELECT id, status, started_at FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 1").bind(brandId).first<SyncRun>();
     const lastRunAge = lastRun ? Date.now() - new Date(lastRun.started_at).getTime() : Number.POSITIVE_INFINITY;
     if (lastRun?.status === "running" && lastRunAge < 3 * 60 * 1000) return { skipped: true, reason: "sync_in_progress", inserted: 0, found: 0, translation: translationBefore, hybridAnalysis };
-    if (lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
-    if (!force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
+    if (mode !== "reddit" && lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
+    if (mode !== "reddit" && !force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
 
     const query = gdeltQuery(terms);
     const startedAt = new Date().toISOString();
     const run = await db.prepare("INSERT INTO sync_runs (brand_id, provider, query, status, started_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(brandId, "Hybrid discovery + free crawler", query, "running", startedAt).run();
+      .bind(brandId, mode === "reddit" ? "Reddit independent discovery" : "Hybrid discovery + free crawler", query, "running", startedAt).run();
     const runId = run.meta.last_row_id;
 
     try {
@@ -428,16 +441,19 @@ export async function runNewsSync(force = false, userId = "") {
       const monidApiKey = earlyMonidApiKey;
       const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
       const gdeltDue = !newsApiKey || isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
-      const monidPending = earlyMonidPending;
-      const monidDue = force || isDue(health.get("Monid / Instagram")?.last_success_at, SIX_HOURS);
+      const monidPlatforms: MonidSearchPlatform[] = mode === "reddit" ? ["Reddit"]
+        : mode === "discovery" ? ["Instagram", "X", "YouTube", "TikTok", "Facebook"]
+        : ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"];
       const providers: ProviderTask[] = [
-        ...(discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
-        ...(discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
-        ...(monidApiKey && (monidDue || monidPending) ? [{ name: "Monid / Instagram", load: () => collectMonidSocial(db, brandId, terms, monidApiKey, monidDue) }] : []),
-        ...(xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
-        ...(youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
+        ...(mode !== "reddit" && discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
+        ...(mode !== "reddit" && discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
+        ...(monidApiKey ? [{ name: mode === "reddit" ? "Monid / Reddit" : "Monid social coordinator",
+          load: () => collectMonidSocial(db, brandId, terms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full" }) }] : []),
+        ...(mode !== "reddit" && xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
+        ...(mode !== "reddit" && youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
       ];
       const deferred = providers.filter((provider) => {
+        if (provider.name.startsWith("Monid")) return false;
         const retryAt = health.get(provider.name)?.retry_after;
         return Boolean(retryAt && new Date(retryAt).getTime() > Date.now());
       });
@@ -451,19 +467,23 @@ export async function runNewsSync(force = false, userId = "") {
       for (let index = 0; index < settled.length; index += 1) {
         const result = settled[index];
         const provider = ready[index];
-        if (result.status === "fulfilled") await markProviderHealthy(db, brandId, provider.name, attemptedAt);
+        if (result.status === "fulfilled") {
+          if (!provider.name.startsWith("Monid")) await markProviderHealthy(db, brandId, provider.name, attemptedAt);
+        }
         else {
-          const failure = await markProviderFailed(db, brandId, provider.name, result.reason, health.get(provider.name)?.consecutive_failures ?? 0, attemptedAt);
+          const failure = provider.name.startsWith("Monid")
+            ? { message: result.reason instanceof Error ? result.reason.message : "Monid 协调任务失败", retryAt: "", limited: false }
+            : await markProviderFailed(db, brandId, provider.name, result.reason, health.get(provider.name)?.consecutive_failures ?? 0, attemptedAt);
           errors.push(`${provider.name}: ${failure.message}`);
-          retryTimes.push(failure.retryAt);
+          if (failure.retryAt) retryTimes.push(failure.retryAt);
           rateLimited ||= failure.limited;
         }
       }
 
       const scopedDiscovery = discoveryCandidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand));
-      await registerMediaSources(db, brandId, scopedDiscovery);
-      const crawler = await crawlMediaSources(db, brandId, terms);
-      await markProviderHealthy(db, brandId, "Free media crawler", attemptedAt);
+      if (mode !== "reddit") await registerMediaSources(db, brandId, scopedDiscovery);
+      const crawler = mode === "reddit" ? { crawled: 0, candidates: [] as MonitoringCandidate[] } : await crawlMediaSources(db, brandId, terms);
+      if (mode !== "reddit") await markProviderHealthy(db, brandId, "Free media crawler", attemptedAt);
       const candidates = [...scopedDiscovery, ...crawler.candidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand))];
       const existing = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source, source_country, content_country, language, published_at, parent_url
         FROM mentions WHERE brand_id = ? ORDER BY published_at DESC LIMIT 5000`).bind(brandId).all<ExistingMention>();
@@ -521,14 +541,18 @@ export async function runNewsSync(force = false, userId = "") {
         await db.prepare("INSERT INTO alerts (brand_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?)")
           .bind(brandId, `品牌首次进入${country}的信息环境`, "High", country, "系统首次观察到该国家或地区的相关内容").run();
       }
-      await rebuildStoryClusters(db, brandId, terms);
-      await rebuildPropagationEdges(db, brandId, terms);
-      const translationAfter = inserted > 0 ? await runTranslationCycle(db, brandId, credentialOwnerId) : { queued: 0, translated: 0, skipped: 0, errors: 0 };
+      if (mode !== "reddit" || inserted > 0) {
+        await rebuildStoryClusters(db, brandId, terms);
+        await rebuildPropagationEdges(db, brandId, terms);
+      }
+      const translationAfter = inserted > 0 && mode === "full" ? await runTranslationCycle(db, brandId, credentialOwnerId)
+        : { queued: 0, translated: 0, skipped: 0, errors: 0 };
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
-      return { skipped: false, found: candidates.length, inserted, query, socialPending, commentRefresh,
+      const redditState = mode === "reddit" ? await getMonidPlatformState(db, brandId, "Reddit") : null;
+      return { skipped: false, phase: mode, found: candidates.length, inserted, query, socialPending, commentRefresh,
         hybridAnalysis,
         translation: {
           queued: translationBefore.queued + translationAfter.queued,
@@ -536,8 +560,9 @@ export async function runNewsSync(force = false, userId = "") {
           skipped: translationBefore.skipped + translationAfter.skipped,
           errors: translationBefore.errors + translationAfter.errors,
         },
-        provider: `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
-        warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "" };
+        provider: mode === "reddit" ? "Reddit 独立发现" : `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
+        warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "",
+        phasePending: Boolean(redditState?.pending), phaseRetryAt: redditState?.retryAt ?? "", phaseStatus: redditState?.status ?? "" };
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知同步错误";
       await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")

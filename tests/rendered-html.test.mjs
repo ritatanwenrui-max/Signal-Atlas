@@ -128,8 +128,8 @@ test("archive location inference is reviewable and Russia maps to the flat SVG",
 });
 
 test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated comments", async () => {
-  const [monid, page, comments, repository, newsSync] = await Promise.all([
-    source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"),
+  const [monid, page, comments, repository, newsSync, pipeline] = await Promise.all([
+    source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"), source("db/sync-pipeline.ts"),
   ]);
   assert.match(monid, /\/trudax\/reddit-scraper-lite/);
   assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_post_details/);
@@ -152,6 +152,18 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(comments, /platform: "Reddit"/);
   assert.match(repository, /"Reddit"\] as const/);
   assert.match(newsSync, /"Facebook", "Reddit"/);
+  assert.match(monid, /platformHealthKey/);
+  assert.match(monid, /Monid \/ \$\{platform\}/);
+  assert.match(monid, /markPlatformFailed/);
+  assert.match(pipeline, /MAIN_STAGES.*"maintenance", "discovery", "audience"/);
+  assert.match(pipeline, /SyncPipelineTaskType = "main" \| "reddit"/);
+  assert.match(pipeline, /enqueuePipelineTask\(userId, "main"/);
+  assert.match(pipeline, /enqueuePipelineTask\(userId, "reddit"/);
+  assert.match(pipeline, /job\.task_type === "reddit"/);
+  assert.match(pipeline, /lease_until/);
+  assert.match(pipeline, /phaseRetryAt/);
+  assert.ok(pipeline.indexOf("result?.phaseRetryAt") < pipeline.indexOf("result?.phasePending"));
+  assert.match(page, /Reddit 独立任务/);
 });
 
 test("connector credentials are workspace-shared and encrypted server-side", async () => {
@@ -277,7 +289,7 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(translation, /\.\.\.mentions\.results[\s\S]*\.\.\.comments\.results/);
   assert.match(translation, /Promise\.all\(remote\.map/);
   assert.match(sync, /runTranslationCycle/);
-  assert.match(sync, /inserted > 0 \? await runTranslationCycle/);
+  assert.match(sync, /inserted > 0 && mode === "full" \? await runTranslationCycle/);
   assert.match(schema, /translationEn: text\("translation_en"\)/);
   assert.match(schema, /translationError: text\("translation_error"\)/);
   assert.match(schema, /idx_mentions_brand_translation/);
@@ -393,11 +405,12 @@ test("Instagram comments and replies use TikHub V2 with V1 fallback and independ
   assert.match(page, /失败 \{target\.failure_count/);
 });
 
-test("worker runs the hybrid monitor hourly", async () => {
+test("worker resumes the staged monitor in the background", async () => {
   const [worker, vite] = await Promise.all([source("worker/index.ts"), source("vite.config.ts")]);
   assert.match(worker, /async scheduled/);
-  assert.match(worker, /runAllBrandSyncs\(\)/);
-  assert.match(vite, /crons: \["17 \* \* \* \*"\]/);
+  assert.match(worker, /runScheduledSyncPipelines\(\)/);
+  assert.match(worker, /ctx\.waitUntil\(processSyncPipeline\(pipelineId\)\)/);
+  assert.match(vite, /crons: \["\*\/5 \* \* \* \*"\]/);
 });
 
 test("hybrid analysis uses rules for all data and LLMs only for priority review and reports", async () => {
