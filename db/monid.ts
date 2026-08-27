@@ -7,7 +7,7 @@ type MonidRun = {
   runId: string;
   status: string;
   output?: unknown;
-  providerResponse?: { httpStatus?: number; error?: { message?: string } };
+  providerResponse?: { httpStatus?: number; data?: unknown; error?: { message?: string } };
   cost?: { value?: number; currency?: string } | number | null;
 };
 type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "reddit_details" | "post_comments" | "comment_replies";
@@ -46,6 +46,7 @@ const PENDING_SQL = "'CREATED','QUEUED','PENDING','READY','RUNNING'";
 const COMMENT_JOBS_PER_CYCLE = 2;
 const MAX_COMMENT_FAILURES = 5;
 const SEARCH_INTERVAL_MS = 6 * 3600_000;
+const REDDIT_SEARCH_CONTRACT_VERSION = 2;
 
 function searchStage(platform: MonidSearchPlatform): MonidJobStage {
   return platform === "Instagram" ? "search" : SOCIAL_SEARCHES[platform].stage;
@@ -228,6 +229,12 @@ export async function verifyMonidApiKey(apiKey: string) {
 }
 
 function normalized(value: string) { return value.normalize("NFKC").toLocaleLowerCase(); }
+
+// Monid exposes the provider result in providerResponse.data. Some older
+// providers still use the top-level output field, so keep that as a fallback.
+function runOutput(run: MonidRun) {
+  return run.providerResponse?.data ?? run.output;
+}
 
 function postUrl(row: JsonObject, postId: string) {
   const direct = firstText(row, ["url", "postUrl", "inputUrl", "permalink"]);
@@ -831,7 +838,7 @@ async function startProfileEnrichment(db: D1Database, brandId: number, apiKey: s
   const run = await startRun(apiKey, PROFILE_ENDPOINT, { usernames: pending, includeAboutSection: false });
   const job = await saveJob(db, brandId, run, "profiles", pending);
   if (run.status === "COMPLETED") {
-    await processProfiles(db, brandId, run.output);
+    await processProfiles(db, brandId, runOutput(run));
     await updateJob(db, job, run);
   }
 }
@@ -861,19 +868,20 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     if (job.stage === "resolve_post" || job.stage === "reddit_details" || job.stage === "post_comments" || job.stage === "comment_replies") return [];
     throw new ProviderRequestError("Monid / Instagram", providerStatus, null, message);
   }
+  const output = runOutput(run);
   if (job.stage === "profiles") {
-    await processProfiles(db, brandId, run.output);
+    await processProfiles(db, brandId, output);
     await updateJob(db, job, run);
     return [];
   }
   if (job.stage === "resolve_post") {
-    await processResolvedPost(db, brandId, job, run.output);
+    await processResolvedPost(db, brandId, job, output);
     await updateJob(db, job, run);
     return [];
   }
   if (job.stage === "reddit_details") {
     try {
-      await processRedditDetails(db, brandId, job, run.output);
+      await processRedditDetails(db, brandId, job, output);
       await updateJob(db, job, run);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Reddit 帖子详情无法解析";
@@ -885,7 +893,7 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   }
   if (job.stage === "post_comments" || job.stage === "comment_replies") {
     try {
-      await processCommentPage(db, brandId, job, run.output);
+      await processCommentPage(db, brandId, job, output);
       await updateJob(db, job, run);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Monid 评论结果无法解析";
@@ -899,8 +907,8 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
   const platform = job.stage === "search_x" ? "X" : job.stage === "search_youtube" ? "YouTube"
     : job.stage === "search_tiktok" ? "TikTok" : job.stage === "search_facebook" ? "Facebook"
     : job.stage === "search_reddit" ? "Reddit" : "Instagram";
-  const candidates = platform === "Instagram" ? parseInstagramPosts(run.output, terms)
-    : parseSocialPosts(run.output, terms, platform);
+  const candidates = platform === "Instagram" ? parseInstagramPosts(output, terms)
+    : parseSocialPosts(output, terms, platform);
   await updateJob(db, job, run);
   if (platform === "Instagram") await startProfileEnrichment(db, brandId, apiKey, candidates.flatMap((item) => item.socialMetrics?.authorUsername ? [item.socialMetrics.authorUsername] : []));
   return candidates;
@@ -1175,8 +1183,20 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
 
   const healthEntries = await Promise.all(platforms.map(async (platform) => [platform, await loadPlatformHealth(db, brandId, platform)] as const));
   const healthByPlatform = new Map(healthEntries);
+  const latestRedditSearch = platforms.includes("Reddit")
+    ? await db.prepare("SELECT terms FROM monid_jobs WHERE brand_id = ? AND stage = 'search_reddit' ORDER BY id DESC LIMIT 1")
+      .bind(brandId).first<{ terms: string }>()
+    : null;
+  let redditContractCurrent = false;
+  if (latestRedditSearch?.terms) {
+    try {
+      const payload = JSON.parse(latestRedditSearch.terms) as { contractVersion?: number };
+      redditContractCurrent = Number(payload.contractVersion ?? 0) >= REDDIT_SEARCH_CONTRACT_VERSION;
+    } catch { redditContractCurrent = false; }
+  }
   const duePlatforms = platforms.filter((platform) => !pendingSearchStages.has(searchStage(platform))
-    && platformSearchDue(healthByPlatform.get(platform) ?? null, Boolean(options.force)));
+    && (platform === "Reddit" && !redditContractCurrent
+      || platformSearchDue(healthByPlatform.get(platform) ?? null, Boolean(options.force))));
 
   if (duePlatforms.includes("Instagram")) {
     const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
@@ -1214,8 +1234,10 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
           searchMedia: false,
           skipComments: true,
           includeMediaLinks: true,
-          includeNSFW: false,
-          sort: "new",
+          // Brand monitoring must not silently exclude age-gated mentions.
+          // Relevance mirrors Reddit's normal search result ordering.
+          includeNSFW: true,
+          sort: "relevance",
           time: "month",
           maxItems: 50,
           maxPostCount: 50,
@@ -1237,7 +1259,9 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
       }
       const { config, started } = result.value;
       try {
-        const job = await saveJob(db, brandId, started, config.stage, { platform, terms });
+        const job = await saveJob(db, brandId, started, config.stage, {
+          platform, terms, ...(platform === "Reddit" ? { contractVersion: REDDIT_SEARCH_CONTRACT_VERSION } : {}),
+        });
         if (started.status === "COMPLETED") {
           candidates.push(...await processJob(db, brandId, apiKey, job, started));
           await markPlatformHealthy(db, brandId, platform);

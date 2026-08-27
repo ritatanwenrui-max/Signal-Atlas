@@ -138,7 +138,13 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(monid, /searches: terms\.slice\(0, 5\)/);
   assert.match(monid, /searchPosts: true/);
   assert.match(monid, /time: "month"/);
+  assert.match(monid, /includeNSFW: true/);
+  assert.match(monid, /sort: "relevance"/);
   assert.match(monid, /includeMediaLinks: true/);
+  assert.match(monid, /providerResponse\?\.data \?\? run\.output/);
+  assert.match(monid, /const output = runOutput\(run\)/);
+  assert.match(monid, /REDDIT_SEARCH_CONTRACT_VERSION = 2/);
+  assert.match(monid, /!redditContractCurrent/);
   assert.match(monid, /stage = "reddit_details"/);
   assert.match(monid, /processRedditDetails/);
   assert.match(monid, /UPDATE monid_jobs SET status = 'FAILED'/);
