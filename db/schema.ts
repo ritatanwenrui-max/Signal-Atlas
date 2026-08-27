@@ -204,6 +204,30 @@ export const syncRuns = sqliteTable("sync_runs", {
   completedAt: text("completed_at"),
 }, (table) => [index("idx_sync_runs_brand_started").on(table.brandId, table.startedAt)]);
 
+export const collectionDiagnostics = sqliteTable("collection_diagnostics", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull(),
+  syncRunId: integer("sync_run_id").notNull(),
+  platform: text("platform").notNull(),
+  providers: text("providers").notNull().default(""),
+  queryCount: integer("query_count").notNull().default(0),
+  candidateCount: integer("candidate_count").notNull().default(0),
+  relevantCount: integer("relevant_count").notNull().default(0),
+  insertedCount: integer("inserted_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  filteredCount: integer("filtered_count").notNull().default(0),
+  invalidCount: integer("invalid_count").notNull().default(0),
+  pendingCount: integer("pending_count").notNull().default(0),
+  filterReasons: text("filter_reasons").notNull().default("{}"),
+  status: text("status").notNull().default("complete"),
+  error: text("error").notNull().default(""),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_collection_diagnostics_run_platform").on(table.syncRunId, table.platform),
+  index("idx_collection_diagnostics_brand_completed").on(table.brandId, table.completedAt),
+]);
+
 export const syncLocks = sqliteTable("sync_locks", {
   name: text("name").primaryKey(),
   lockedUntil: text("locked_until").notNull(),

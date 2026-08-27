@@ -84,6 +84,7 @@ export async function POST(request: Request) {
           db.prepare("DELETE FROM alerts WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM traffic_signals WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM sync_runs WHERE brand_id = ?").bind(brandId),
+          db.prepare("DELETE FROM collection_diagnostics WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM propagation_edges WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM media_sources WHERE brand_id = ?").bind(brandId),
           db.prepare("DELETE FROM monid_jobs WHERE brand_id = ?").bind(brandId),

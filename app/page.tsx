@@ -21,6 +21,9 @@ type Mention = {
 type Entity = { id: number; type: string; value: string; language: string; active: number };
 type Alert = { id: number; title: string; severity: string; country: string; reason: string; acknowledged: number; created_at: string };
 type SyncRun = { id: number; provider: string; status: string; found_count: number; inserted_count: number; error: string; started_at: string; completed_at: string | null };
+type CollectionDiagnostic = { id: number; sync_run_id: number; platform: string; providers: string; query_count: number; candidate_count: number;
+  relevant_count: number; inserted_count: number; duplicate_count: number; filtered_count: number; invalid_count: number; pending_count: number;
+  filter_reasons: string; status: "complete" | "pending" | "partial"; error: string; started_at: string; completed_at: string };
 type SyncPipelineJob = { id: string; task_type: "main" | "reddit"; stage: "reddit" | "maintenance" | "discovery" | "audience"; status: "queued" | "running" | "retrying" | "completed" | "failed";
   attempts: number; max_attempts: number; next_retry_at: string; last_error: string; created_at: string; updated_at: string; completed_at: string; result_json?: string };
 type BrandProfile = { id: number; name: string; aliases: string; website: string; match_mode: string; scope_terms: string; exclude_terms: string; official_accounts: string };
@@ -46,6 +49,7 @@ type WorkspaceInvite = { id: number; email: string; role: string; status: string
 type TeamWorkspace = { id: number; name: string; role: string; canManage: boolean; canEdit: boolean; members: WorkspaceMember[]; invites: WorkspaceInvite[] };
 type DashboardData = {
   mentions: Mention[]; entities: Entity[]; alerts: Alert[]; syncRuns: SyncRun[]; brand: BrandProfile | null;
+  collectionDiagnostics: CollectionDiagnostic[];
   connectors: Connector[]; mediaSources: MediaSource[]; propagationEdges: PropagationEdge[]; analytics: Analytics;
   syncPipeline: SyncPipelineJob | null; redditSyncPipeline: SyncPipelineJob | null;
   aiBrief: { executive_summary?: string; content_finding?: string; audience_finding?: string; regional_finding?: string; risk_finding?: string; opportunity?: string; recommended_actions?: string[]; caveats?: string; generated_at?: string; model?: string; version?: string } | null;
@@ -89,7 +93,7 @@ type SocialCommentsData = {
 type StoryCluster = { key: string; items: Mention[]; title: string; risk: number; impact: number; countries: string[]; platforms: string[]; latest: string; originCountry: string; originSource: string };
 
 const emptyAnalytics: Analytics = { countries: [], sentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, emotions: [], timeline: [], words: [], commentWords: [], commentSentiment: { positive: 0, neutral: 0, negative: 0, mixed: 0 }, commentsAnalyzed: 0, sources: [], crossBorderEdges: 0, archivedTotal: 0 };
-const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, syncPipeline: null, redditSyncPipeline: null, aiBrief: null, viewer: { authenticated: false }, workspace: null };
+const emptyData: DashboardData = { mentions: [], entities: [], alerts: [], syncRuns: [], collectionDiagnostics: [], brand: null, connectors: [], mediaSources: [], propagationEdges: [], analytics: emptyAnalytics, syncPipeline: null, redditSyncPipeline: null, aiBrief: null, viewer: { authenticated: false }, workspace: null };
 const nav = [
   ["overview", "情报总览", "01"], ["archive", "新闻档案", "02"], ["propagation", "传播链路", "03"],
   ["analytics", "内容舆情", "04"], ["comments", "受众舆情", "05"], ["coverage", "数据采集", "06"], ["reports", "分析报告", "07"], ["settings", "品牌与团队", "08"], ["guide", "产品使用说明", "09"],
@@ -361,7 +365,7 @@ export default function Home() {
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} onSelect={setSelectedCluster} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} />}
           {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} canEdit={Boolean(data.workspace?.canEdit)} />}
-          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
+          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} diagnostics={data.collectionDiagnostics} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
           {view === "reports" && <ReportView brand={data.brand} workspaceName={data.workspace?.name ?? data.brand.name} mentions={data.mentions} analytics={data.analytics} clusters={clusters} countryCodes={countryCode} aiBrief={data.aiBrief} />}
           {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
           {view === "guide" && <ProductGuide />}
@@ -842,7 +846,7 @@ function ProductGuide() {
     <div className="guide-layout">
       <section className="surface" id="guide-purpose"><span>01</span><h3>产品用途与数据边界</h3><p>本系统用于持续收集、整理和分析与品牌相关的公开网络信息。数据范围包括网页新闻、媒体报道、社交媒体公开帖子，以及帖子下方公开展示的评论和回复。系统会按照时间、平台、媒体和地区进行归档，并在此基础上识别事件、分析传播过程、总结讨论话题，观察媒体态度和受众反馈。</p><p>系统只处理公开可访问的数据，不读取私人账号、私密帖子或私信。部分平台会限制评论、互动数据和历史内容的访问，因此系统不能保证收录互联网上的全部相关信息。重要的公关、法律和商业判断仍应回到原文并经过人工复核。</p></section>
       <section className="surface" id="guide-start"><span>02</span><h3>开始使用</h3><p>首次使用时，应先在“品牌与团队”中填写品牌名称、别名、产品、官网、官方账号、相关人物、行业、主要市场和常用语言。品牌名称较为常见时，还应设置身份锚点和排除词。身份锚点用于证明候选内容确实指向当前品牌，排除词用于过滤其他同名公司和无关结果。</p><p>品牌配置完成后，在“数据采集”中连接需要使用的新闻和社交媒体渠道。页面会显示各渠道能够采集的数据、最近成功时间、当前任务、失败原因和下次运行时间。首次运行默认补充最近一个月内能够获取的公开数据，此后按照页面显示的实际计划持续更新。</p></section>
-      <section className="surface" id="guide-archive"><span>03</span><h3>采集、归档与数据缺失</h3><p>社交媒体评论按照“发现帖子、保存帖子地址、采集主评论、采集回复、翻译与分析”的顺序处理。内容档案保留发布时间、平台、原文、媒体或账号、地区、原始链接、事件编号和公开互动数据。平台没有披露点赞、分享或播放量时，字段留空而不是写成零；只有接口明确返回零时才显示零。</p><p>系统通过URL、平台内容ID和正文相似度识别重复内容。重复内容只保留一条主记录，但不同媒体之间的转载关系仍可进入传播链路。用户也可以手动补充遗漏内容，人工补充会保留标记，并与自动采集内容一起参与后续分析。</p><p>添加排除词后，命中内容会从新闻档案、事件、内容舆情、受众舆情、词云和报告中移除。原始记录可以保留用于审计，但不再参与正常指标。删除排除词后，系统可以重新评估此前被过滤的数据。</p></section>
+      <section className="surface" id="guide-archive"><span>03</span><h3>采集、归档与数据缺失</h3><p>社交媒体评论按照“发现帖子、保存帖子地址、采集主评论、采集回复、翻译与分析”的顺序处理。内容档案保留发布时间、平台、原文、媒体或账号、地区、原始链接、事件编号和公开互动数据。平台没有披露点赞、分享或播放量时，字段留空而不是写成零；只有接口明确返回零时才显示零。</p><p>系统会把品牌名、无空格写法、别名、产品、事件指纹、官网域名以及“品牌名＋身份锚点”组合成搜索计划。Instagram 使用适合 hashtag 的无空格词形，YouTube 与 TikTok 会分别执行前三组高优先级关键词；NewsAPI.ai 在首批达到一百条时自动继续请求后续页面。搜索任务、异步返回和无新增复核全部完成后，才进入评论采集。</p><p>系统通过URL、平台内容ID和正文相似度识别重复内容。重复内容只保留一条主记录，但不同媒体之间的转载关系仍可进入传播链路。用户也可以手动补充遗漏内容，人工补充会保留标记，并与自动采集内容一起参与后续分析。“数据采集”页会分别显示接口候选、相关候选、新增、重复、过滤和失败原因，以便判断漏收发生在哪一层。</p><p>添加排除词后，命中内容会从新闻档案、事件、内容舆情、受众舆情、词云和报告中移除。原始记录可以保留用于审计，但不再参与正常指标。删除排除词后，系统可以重新评估此前被过滤的数据。</p></section>
       <section className="surface" id="guide-events"><span>04</span><h3>同一事件与传播链路</h3><p>“同一事件”是围绕同一件具体事情形成的一组报道和帖子，并不等于某段时间内所有提到品牌的内容。系统综合比较发布时间、标题、正文、人物、产品、地点、关键事实、相同段落和引用来源。三天内出现且内容高度相似的内容通常归入同一事件；相隔三至七天时，需要存在相同关键事实或明显文本继承；相隔超过七天时默认建立新事件，除非存在明确引用或持续更新。</p><p>传播链路只能从较早发布的内容指向较晚发布的内容。直接引用、链接或明显文本复制属于高置信关系；时间明确且内容高度相似但没有直接引用时属于中置信；只有时间和话题接近时属于低置信。低置信关系使用弱化样式展示，不能当作已经确认的转载事实。当前最早来源仅指系统现有数据中能够核实的最早公开内容。</p></section>
       <section className="surface" id="guide-analysis"><span>05</span><h3>内容舆情与受众舆情</h3><p>“内容舆情”分析新闻报道和社交媒体原帖，用于观察媒体和发布者如何描述品牌。“受众舆情”分析评论及回复，用于观察公众为什么接受、质疑或拒绝产品。两者共享底层数据，但分析对象不同，因此作为并列页面存在。</p><p>受众舆情不只判断正面、负面和中立，还会识别认可、期待、购买意向、好奇、怀疑、担忧、失望、愤怒、反感、伦理争议和轻松戏谑等具体状态，并结合价格、产品体验、安全隐私、服务售后等议题形成结论。所有自动结论都应显示样本、互动权重和代表性原文，不能只给出无法核对的摘要。</p><p>情绪模型优先分析原文，翻译只用于展示。简体中文、繁体中文和英文原文不重复翻译，其他语言在原文下方显示英文译文。词云会进行中英文分词，并过滤虚词、网址、平台名和无分析意义的高频词。</p></section>
       <section className="surface" id="guide-weight"><span>06</span><h3>评论数量与互动加权</h3><p>系统同时保留“原始数量”和“互动共鸣”两种口径。原始数量回答有多少评论表达了某种观点；互动共鸣回答哪些观点获得了更多点赞。回复数量主要代表讨论或争议强度，不直接视为对原评论的认同。</p><p>点赞采用对数转换和平台内标准化，避免一条爆款评论决定全部结果。同平台最近样本的点赞对数95分位数作为上限，标准化点赞和共鸣权重按以下方式计算：</p><pre>{`标准化点赞 = min(log(1 + 当前点赞数) ÷ 同平台点赞对数95分位数, 1)\n共鸣权重 = 1 + 2 × 标准化点赞`}</pre><p>每条有效评论至少保留权重1，高共鸣评论最高为3。该上限是防止极端值支配结果的产品约束，不代表一条评论等于三个人。不同平台分别标准化后才进行汇总。页面同时显示未加权结果和加权结果，避免高互动观点掩盖数量较多但互动较低的意见。</p></section>
@@ -852,8 +856,20 @@ function ProductGuide() {
   </article>;
 }
 
-function CoverageView({ connectors, sources, submit, canManage }: { connectors: Connector[]; sources: MediaSource[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean }) {
+function CoverageView({ connectors, sources, diagnostics, submit, canManage }: { connectors: Connector[]; sources: MediaSource[]; diagnostics: CollectionDiagnostic[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean }) {
   const active = sources.filter((item) => item.status === "active").length;
+  const latestDiagnosticMap = new Map<string, CollectionDiagnostic>();
+  for (const item of diagnostics) if (!latestDiagnosticMap.has(item.platform)) latestDiagnosticMap.set(item.platform, item);
+  const latestDiagnostics = [...latestDiagnosticMap.values()];
+  const diagnosticSummary = latestDiagnostics.reduce((total, item) => ({
+    candidates: total.candidates + Number(item.candidate_count), inserted: total.inserted + Number(item.inserted_count),
+    filtered: total.filtered + Number(item.filtered_count), duplicates: total.duplicates + Number(item.duplicate_count),
+    pending: total.pending + Number(item.pending_count),
+  }), { candidates: 0, inserted: 0, filtered: 0, duplicates: 0, pending: 0 });
+  function reasonSummary(value: string) {
+    try { return Object.entries(JSON.parse(value || "{}") as Record<string, number>).map(([reason, count]) => `${reason} ${count}`).join(" · ") || "没有被规则过滤的候选"; }
+    catch { return "过滤原因记录异常，等待下一轮刷新"; }
+  }
   const [editing, setEditing] = useState<string | null>(null);
   const [credential, setCredential] = useState("");
   const [secondaryCredential, setSecondaryCredential] = useState("");
@@ -875,6 +891,12 @@ function CoverageView({ connectors, sources, submit, canManage }: { connectors: 
   async function removeCredential(provider: string) { setBusy(true); try { await submit({ action: "deleteConnectorCredential", provider }, `${provider} 的团队 API 配置已删除`); } finally { setBusy(false); } }
   return <div className="coverage-page">
     <section className="coverage-architecture panel-dark"><div><h2>采集计划与混合分析</h2><p>新闻与社媒持续归档；规则模型处理全部数据，LLM 只复核高互动、高风险、跨语言或判断不明确的内容，最后由报告 Agent 汇总为可核验结论。</p></div><div className="architecture-flow"><article><b>01</b><strong>全球与社媒发现</strong><span>NewsAPI.ai / GDELT / Monid</span><small>每 6 小时 / 每日</small></article><i>→</i><article><b>02</b><strong>规则全量分析</strong><span>分词 / 情绪 / 议题 / 风险</span><small>全部归档内容</small></article><i>→</i><article><b>03</b><strong>LLM 重点复核</strong><span>高风险 / 高互动 / 低置信</span><small>人工标注优先</small></article><i>→</i><article><b>04</b><strong>报告汇总</strong><span>证据、判断与建议</span><small>结果缓存</small></article></div></section>
+    <section className="surface collection-diagnostics"><div className="section-head"><div><p className="eyebrow">COLLECTION DIAGNOSTICS</p><h3>采集完整度与漏收诊断</h3></div><span className={`diagnostic-state ${diagnosticSummary.pending ? "pending" : "complete"}`}>{diagnosticSummary.pending ? `${diagnosticSummary.pending} 个搜索任务待返回` : "最近批次已返回"}</span></div>
+      <p className="diagnostic-intro">系统保留各平台最近一轮搜索的候选去向。这里可以区分“平台没有返回”“被品牌规则过滤”“已经归档过”和“成功新增”，避免把接口失败误认为没有新闻。</p>
+      <div className="diagnostic-kpis"><article><span>接口返回候选</span><strong>{diagnosticSummary.candidates}</strong></article><article><span>新增档案</span><strong>{diagnosticSummary.inserted}</strong></article><article><span>重复内容</span><strong>{diagnosticSummary.duplicates}</strong></article><article><span>规则过滤</span><strong>{diagnosticSummary.filtered}</strong></article></div>
+      <div className="table-scroll"><table className="diagnostic-table"><thead><tr><th>平台</th><th>实际搜索</th><th>候选</th><th>相关</th><th>新增</th><th>重复</th><th>过滤</th><th>任务状态</th><th>原因与错误</th></tr></thead><tbody>{latestDiagnostics.map((item) => <tr key={`${item.sync_run_id}-${item.platform}`}><td><strong>{item.platform}</strong><small>{item.providers}</small></td><td>{item.query_count} 组</td><td>{item.candidate_count}</td><td>{item.relevant_count}</td><td>{item.inserted_count}</td><td>{item.duplicate_count}</td><td>{item.filtered_count}</td><td><span className={`diagnostic-status ${item.status}`}>{item.status === "pending" ? `等待 ${item.pending_count}` : item.status === "partial" ? "部分失败" : "批次完成"}</span><small>{formatDate(item.completed_at, true)}</small></td><td><span>{reasonSummary(item.filter_reasons)}</span>{item.error && <small className="diagnostic-error">{item.error}</small>}</td></tr>)}</tbody></table></div>
+      {!latestDiagnostics.length && <div className="empty-table">新版诊断会从下一次新闻巡检开始记录；现有历史档案不会受到影响。</div>}
+    </section>
     <section className="surface connector-section"><div className="section-head"><div><p className="eyebrow">CONNECTOR STATUS</p><h3>采集连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article key={connector.id}><div><i className={connector.status} /><strong>{connector.name}</strong><span className={`connector-state ${connector.status}`}>{connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权"}</span></div><p>{connector.detail}</p>{connector.configurable && connector.provider && <button className="connector-config-button" disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? `已配置 · ${connector.lastFour === "环境密钥" ? "站点默认密钥" : `•••• ${connector.lastFour}`}` : canManage ? "＋ 配置团队 API" : "管理员可配置"}</button>}</article>)}</div></section>
     <section className="surface credential-vault"><div className="vault-copy"><p className="eyebrow">TEAM API VAULT</p><h3>团队数据连接器</h3><p>管理员只需配置一次新闻、社媒和翻译服务，所有成员共享同一批采集与英文翻译结果。凭证由服务端加密，完整值不会返回任何成员的浏览器。</p><div className="vault-security"><span>✓ 团队共用采集结果</span><span>✓ 服务端加密</span><span>✓ 仅管理员可更换</span></div></div><div className="credential-list">{configurable.map((connector) => <article key={connector.id}><div><i className={connector.configured ? "configured" : ""} /><div><strong>{connector.name}</strong><small>{connector.configured ? connector.lastFour === "环境密钥" || connector.lastFour === "环境配置" ? "当前使用站点默认配置" : `团队配置 •••• ${connector.lastFour}` : connector.provider === "MyMemory" ? "匿名额度很小，建议添加联系邮箱" : "尚未配置团队密钥"}</small></div></div><div><button disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? "更换" : "配置"}</button>{canManage && connector.configured && !["环境密钥", "环境配置"].includes(connector.lastFour || "") && <button className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>删除</button>}</div></article>)}</div></section>
     {editing && canManage && <div className="credential-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="credential-modal" onSubmit={saveCredential} onMouseDown={(event) => event.stopPropagation()}>

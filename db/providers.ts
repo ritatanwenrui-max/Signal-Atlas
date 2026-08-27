@@ -209,37 +209,48 @@ function englishLabel(value?: EventRegistryLabel) {
 export async function fetchEventRegistry(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
   const apiKey = credential ?? env.NEWSAPI_AI_KEY;
   if (!apiKey) return [];
-  const response = await fetch("https://eventregistry.org/api/v1/article/getArticles", {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "getArticles",
-      keyword: terms.slice(0, 12),
-      keywordOper: "or",
-      keywordSearchMode: "phrase",
-      keywordLoc: "title,body",
-      articlesPage: 1,
-      articlesCount: 100,
-      articlesSortBy: "date",
-      articlesSortByAsc: false,
-      articleBodyLen: 2000,
-      dataType: ["news", "pr", "blog"],
-      forceMaxDataTimeWindow: 31,
-      resultType: "articles",
-      includeSourceLocation: true,
-      includeArticleSocialScore: true,
-      includeArticleOriginalArticle: true,
-      apiKey,
-    }),
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!response.ok) throw new ProviderRequestError("NewsAPI.ai", response.status, retryAfterMs(response), `NewsAPI.ai HTTP ${response.status}`);
-  const payload = await response.json() as EventRegistryPayload;
-  if (payload.error) {
-    const message = typeof payload.error === "string" ? payload.error : payload.error.message ?? "接口返回错误";
-    throw new Error(`NewsAPI.ai: ${message}`);
+  const fetchPage = async (articlesPage: number) => {
+    const response = await fetch("https://eventregistry.org/api/v1/article/getArticles", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "getArticles",
+        keyword: terms.slice(0, 12),
+        keywordOper: "or",
+        keywordSearchMode: "phrase",
+        keywordLoc: "title,body",
+        articlesPage,
+        articlesCount: 100,
+        articlesSortBy: "date",
+        articlesSortByAsc: false,
+        articleBodyLen: 2000,
+        dataType: ["news", "pr", "blog"],
+        forceMaxDataTimeWindow: 31,
+        resultType: "articles",
+        includeSourceLocation: true,
+        includeArticleSocialScore: true,
+        includeArticleOriginalArticle: true,
+        apiKey,
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) throw new ProviderRequestError("NewsAPI.ai", response.status, retryAfterMs(response), `NewsAPI.ai HTTP ${response.status}`);
+    const payload = await response.json() as EventRegistryPayload;
+    if (payload.error) {
+      const message = typeof payload.error === "string" ? payload.error : payload.error.message ?? "接口返回错误";
+      throw new Error(`NewsAPI.ai: ${message}`);
+    }
+    return payload.articles?.results ?? [];
+  };
+  const firstPage = await fetchPage(1);
+  const pageResults: EventRegistryArticle[][] = [firstPage];
+  if (firstPage.length === 100) {
+    const more = await Promise.allSettled([fetchPage(2), fetchPage(3)]);
+    pageResults.push(...more.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
   }
-  return (payload.articles?.results ?? []).filter((item) => item.url && item.title).map((item) => {
+  const uniqueArticles = new Map<string, EventRegistryArticle>();
+  for (const item of pageResults.flat()) if (item.url && item.title) uniqueArticles.set(item.url, item);
+  return [...uniqueArticles.values()].map((item) => {
     const sourceLocation = englishLabel(item.source?.location?.country?.label) ?? englishLabel(item.source?.location?.label);
     const engagement = Object.values(item.shares ?? {}).reduce<number>((total, value) => total + (Number(value) || 0), 0);
     return {

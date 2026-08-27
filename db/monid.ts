@@ -12,7 +12,7 @@ type MonidRun = {
 };
 type MonidJobStage = "search" | "search_x" | "search_youtube" | "search_tiktok" | "search_facebook" | "search_reddit" | "profiles" | "resolve_post" | "reddit_details" | "post_comments" | "comment_replies";
 export type MonidSearchPlatform = "Instagram" | "X" | "YouTube" | "TikTok" | "Facebook" | "Reddit";
-export type MonidCollectionOptions = { force?: boolean; platforms?: MonidSearchPlatform[]; includeComments?: boolean };
+export type MonidCollectionOptions = { force?: boolean; platforms?: MonidSearchPlatform[]; includeComments?: boolean; hashtagTerms?: string[] };
 type MonidJob = { id: number; run_id: string; mention_id: number; stage: MonidJobStage; status: string; terms: string };
 type CommentJobPayload = { mentionId: number; platform?: string; mediaId: string; postUrl: string; cursor?: string; commentId?: string; page?: number; commentAdapter?: "v2" | "v1" | "reddit"; replyAdapter?: "v2" | "v1" | "reddit" };
 type SocialComment = {
@@ -60,10 +60,16 @@ function searchPlatform(stage: MonidJobStage): MonidSearchPlatform | null {
 
 function platformHealthKey(brandId: number, platform: MonidSearchPlatform) { return `${brandId}:Monid / ${platform}`; }
 
-type PlatformHealth = { status: string; consecutive_failures: number; retry_after: string; last_success_at: string };
+type PlatformHealth = {
+  status: string;
+  consecutive_failures: number;
+  retry_after: string;
+  last_error: string;
+  last_success_at: string;
+};
 
 async function loadPlatformHealth(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
-  return db.prepare(`SELECT status, consecutive_failures, retry_after, last_success_at FROM provider_health WHERE provider = ?`)
+  return db.prepare(`SELECT status, consecutive_failures, retry_after, last_error, last_success_at FROM provider_health WHERE provider = ?`)
     .bind(platformHealthKey(brandId, platform)).first<PlatformHealth>();
 }
 
@@ -997,6 +1003,7 @@ export async function getMonidPlatformState(db: D1Database, brandId: number, pla
     status: health?.status ?? "idle",
     retryAt: health?.retry_after ?? "",
     lastSuccessAt: health?.last_success_at ?? "",
+    lastError: health?.last_error ?? "",
   };
 }
 
@@ -1214,15 +1221,17 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
 
   if (duePlatforms.includes("Instagram")) {
     const searchTerms = [...new Set(terms.map((item) => item.trim()).filter(Boolean))].slice(0, 5);
-    if (searchTerms.length) {
+    const hashtagTerms = [...new Set((options.hashtagTerms?.length ? options.hashtagTerms : searchTerms)
+      .map((item) => item.trim().replace(/^#/, "").replace(/[^\p{L}\p{N}_]+/gu, "")).filter((item) => item.length >= 3))].slice(0, 8);
+    if (searchTerms.length && hashtagTerms.length) {
       try {
         const started = await startRun(apiKey, SEARCH_ENDPOINT, {
-          hashtags: searchTerms,
+          hashtags: hashtagTerms,
           keywordSearch: true,
           resultsType: "posts",
           resultsLimit: 50,
         });
-        const job = await saveJob(db, brandId, started, "search", { platform: "Instagram", terms: searchTerms });
+        const job = await saveJob(db, brandId, started, "search", { platform: "Instagram", terms: searchTerms, hashtags: hashtagTerms });
         if (started.status === "COMPLETED") {
           candidates.push(...await processJob(db, brandId, apiKey, job, started));
           await markPlatformHealthy(db, brandId, "Instagram");
@@ -1232,10 +1241,12 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   }
   const secondaryPlatforms = duePlatforms.filter((platform): platform is Exclude<MonidSearchPlatform, "Instagram"> => platform !== "Instagram");
   if (secondaryPlatforms.length && terms.length) {
-    const keyword = terms[0];
     const searchPlans = (Object.entries(SOCIAL_SEARCHES) as Array<[keyof typeof SOCIAL_SEARCHES, (typeof SOCIAL_SEARCHES)[keyof typeof SOCIAL_SEARCHES]]>)
-      .filter(([platform]) => secondaryPlatforms.includes(platform));
-    const searches = searchPlans.map(async ([platform, config]) => {
+      .filter(([platform]) => secondaryPlatforms.includes(platform))
+      .flatMap(([platform, config]) => ["YouTube", "TikTok"].includes(platform)
+        ? terms.slice(0, 3).map((keyword) => ({ platform, config, keyword }))
+        : [{ platform, config, keyword: terms[0] }]);
+    const searches = searchPlans.map(async ({ platform, config, keyword }) => {
       const input = platform === "Facebook"
         ? { body: { query: `${terms.join(" OR ")} Facebook public post`, includeDomains: ["facebook.com"], numResults: 25 } }
         : platform === "Reddit" ? { body: {
@@ -1261,20 +1272,20 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
           : platform === "YouTube" ? { keyword, type: "video", upload_date: "this_month", sort_by: "upload_date" }
           : { keyword, offset: 0 } };
       const started = await startProviderRun(apiKey, config.provider, config.endpoint, input);
-      return { platform, config, started };
+      return { platform, config, keyword, started };
     });
     const settled = await Promise.allSettled(searches);
     for (let index = 0; index < settled.length; index += 1) {
       const result = settled[index];
-      const platform = searchPlans[index][0];
+      const platform = searchPlans[index].platform;
       if (result.status === "rejected") {
         await markPlatformFailed(db, brandId, platform, result.reason);
         continue;
       }
-      const { config, started } = result.value;
+      const { config, keyword, started } = result.value;
       try {
         const job = await saveJob(db, brandId, started, config.stage, {
-          platform, terms, ...(platform === "Reddit" ? { contractVersion: REDDIT_SEARCH_CONTRACT_VERSION } : {}),
+          platform, terms, query: keyword, ...(platform === "Reddit" ? { contractVersion: REDDIT_SEARCH_CONTRACT_VERSION } : {}),
         });
         if (started.status === "COMPLETED") {
           candidates.push(...await processJob(db, brandId, apiKey, job, started));

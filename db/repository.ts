@@ -174,6 +174,26 @@ const tables = [
     started_at TEXT NOT NULL,
     completed_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS collection_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL,
+    sync_run_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    providers TEXT NOT NULL DEFAULT '',
+    query_count INTEGER NOT NULL DEFAULT 0,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    relevant_count INTEGER NOT NULL DEFAULT 0,
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    filtered_count INTEGER NOT NULL DEFAULT 0,
+    invalid_count INTEGER NOT NULL DEFAULT 0,
+    pending_count INTEGER NOT NULL DEFAULT 0,
+    filter_reasons TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'complete',
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS sync_locks (
     name TEXT PRIMARY KEY,
     locked_until TEXT NOT NULL
@@ -403,6 +423,8 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_alerts_brand_ack_severity ON alerts(brand_id, acknowledged, severity)",
   "CREATE INDEX IF NOT EXISTS idx_traffic_brand_country_recorded ON traffic_signals(brand_id, country, recorded_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_runs_brand_started ON sync_runs(brand_id, started_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_diagnostics_run_platform ON collection_diagnostics(sync_run_id, platform)",
+  "CREATE INDEX IF NOT EXISTS idx_collection_diagnostics_brand_completed ON collection_diagnostics(brand_id, completed_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_brand_task_status_retry ON sync_pipeline_jobs(brand_id, task_type, status, next_retry_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_status_lease ON sync_pipeline_jobs(status, lease_until)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_sources_brand_domain ON media_sources(brand_id, domain)",
@@ -530,7 +552,7 @@ export async function loadDashboardData(userId = "") {
   const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
   const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow, syncPipeline, redditSyncPipeline] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, collectionDiagnostics, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow, syncPipeline, redditSyncPipeline] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
       social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
       social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
@@ -552,6 +574,7 @@ export async function loadDashboardData(userId = "") {
     db.prepare("SELECT * FROM tracked_entities WHERE brand_id = ? ORDER BY id DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM alerts WHERE brand_id = ? ORDER BY acknowledged ASC, id DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM sync_runs WHERE brand_id = ? ORDER BY id DESC LIMIT 20").bind(brandId).all(),
+    db.prepare("SELECT * FROM collection_diagnostics WHERE brand_id = ? ORDER BY completed_at DESC, id ASC LIMIT 60").bind(brandId).all(),
     db.prepare("SELECT * FROM provider_health WHERE provider LIKE ? ORDER BY provider").bind(healthPrefix).all<{ provider: string; status: string; retry_after: string; last_error: string; last_success_at: string }>(),
     db.prepare("SELECT * FROM media_sources WHERE brand_id = ? ORDER BY last_crawled_at DESC, id DESC").bind(brandId).all(),
     db.prepare("SELECT * FROM propagation_edges WHERE brand_id = ? ORDER BY cluster_key, time_gap_minutes ASC").bind(brandId).all(),
@@ -730,6 +753,7 @@ export async function loadDashboardData(userId = "") {
     entities: entities.results,
     alerts: alerts.results,
     syncRuns: syncRuns.results,
+    collectionDiagnostics: collectionDiagnostics.results,
     syncPipeline: syncPipeline ?? null,
     redditSyncPipeline: redditSyncPipeline ?? null,
     brand,

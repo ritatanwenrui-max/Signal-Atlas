@@ -109,6 +109,32 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(repository, /每 6 小时发现/);
 });
 
+test("archive discovery expands queries and explains every candidate disposition", async () => {
+  const [strategy, monid, sync, providers, schema, repository, page, migration, dataRoute] = await Promise.all([
+    source("db/search-strategy.ts"), source("db/monid.ts"), source("db/news-sync.ts"), source("db/providers.ts"),
+    source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"), source("drizzle/0021_typical_longshot.sql"), source("app/api/data/route.ts"),
+  ]);
+  assert.match(strategy, /buildDiscoveryTerms/);
+  assert.match(strategy, /compactVariant/);
+  assert.match(strategy, /pairedQueries/);
+  assert.match(strategy, /buildHashtagTerms/);
+  assert.match(monid, /hashtags: hashtagTerms/);
+  assert.match(monid, /terms\.slice\(0, 3\).*keyword/s);
+  assert.match(sync, /brandScopeDecision/);
+  assert.match(sync, /命中排除词/);
+  assert.match(sync, /品牌官方账号内容/);
+  assert.match(sync, /缺少身份锚点/);
+  assert.match(sync, /INSERT INTO collection_diagnostics/);
+  assert.match(providers, /fetchPage\(2\), fetchPage\(3\)/);
+  assert.match(schema, /collectionDiagnostics/);
+  assert.match(repository, /CREATE TABLE IF NOT EXISTS collection_diagnostics/);
+  assert.match(migration, /CREATE TABLE `collection_diagnostics`/);
+  assert.match(dataRoute, /DELETE FROM collection_diagnostics WHERE brand_id = \?/);
+  assert.match(page, /采集完整度与漏收诊断/);
+  assert.match(page, /接口返回候选/);
+  assert.match(page, /没有被规则过滤的候选/);
+});
+
 test("archive location inference is reviewable and Russia maps to the flat SVG", async () => {
   const [page, providers, sync, route, repository, map] = await Promise.all([
     source("app/page.tsx"), source("db/providers.ts"), source("db/news-sync.ts"), source("app/api/data/route.ts"), source("db/repository.ts"), source("public/world-map-flat.svg"),

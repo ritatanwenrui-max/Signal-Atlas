@@ -9,12 +9,17 @@ import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
 import { runHybridAnalysisCycle } from "./llm-analysis";
 import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost } from "./official-accounts";
+import { buildDiscoveryTerms, buildHashtagTerms, queryCountForPlatform } from "./search-strategy";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
 type ExistingMention = { id?: number; title: string; excerpt?: string; cluster_key: string; url: string; source: string; source_country: string; content_country?: string; language?: string; published_at?: string; parent_url?: string };
 type ProviderHealth = { provider: string; status: string; consecutive_failures: number; retry_after: string; last_error: string; last_success_at: string };
 type ProviderTask = { name: string; load: () => Promise<MonitoringCandidate[]> };
+type DiagnosticBucket = {
+  platform: string; providers: Set<string>; queryCount: number; candidateCount: number; relevantCount: number;
+  insertedCount: number; duplicateCount: number; filteredCount: number; invalidCount: number; reasons: Map<string, number>;
+};
 export type NewsSyncMode = "full" | "reddit" | "maintenance" | "discovery" | "audience";
 
 const SIX_HOURS = 6 * 3600_000;
@@ -36,24 +41,41 @@ function splitProfileTerms(value: unknown) {
 
 function normalizedScopeText(value: string) { return value.normalize("NFKC").toLocaleLowerCase(); }
 
-function matchesBrandScope(candidate: MonitoringCandidate, primaryTerms: string[], brand: Record<string, unknown>) {
+function brandScopeDecision(candidate: MonitoringCandidate, primaryTerms: string[], brand: Record<string, unknown>) {
   const body = normalizedScopeText(`${candidate.title} ${candidate.discussionText} ${candidate.source} ${candidate.author ?? ""} ${candidate.url}`);
   const exclusions = splitProfileTerms(brand.exclude_terms);
-  if (exclusions.some((term) => body.includes(normalizedScopeText(term)))) return false;
-  if (isUnattributedSyntheticSocialPost(candidate)) return false;
-  if (comesFromOfficialAccount(candidate, brand.official_accounts, [brand.name])) return false;
+  if (exclusions.some((term) => body.includes(normalizedScopeText(term)))) return { accepted: false, reason: "命中排除词" };
+  if (isUnattributedSyntheticSocialPost(candidate)) return { accepted: false, reason: "缺少可验证账号身份" };
+  if (comesFromOfficialAccount(candidate, brand.official_accounts, [brand.name])) return { accepted: false, reason: "品牌官方账号内容" };
   const website = normalizedScopeText(String(brand.website ?? "").replace(/^https?:\/\//, "").replace(/\/$/, ""));
   const officialDomainMatch = Boolean(website && normalizedScopeText(candidate.url).includes(website));
-  const brandMatch = primaryTerms.some((term) => body.includes(normalizedScopeText(term)));
-  if (officialDomainMatch) return true;
-  if (!brandMatch) return false;
+  const strongIdentityTerms = Array.isArray(brand.discovery_strong_terms) ? brand.discovery_strong_terms.map(String) : [];
+  const primaryMatch = primaryTerms.some((term) => body.includes(normalizedScopeText(term)));
+  const strongIdentityMatch = strongIdentityTerms.some((term) => body.includes(normalizedScopeText(term)));
+  const brandMatch = primaryMatch || strongIdentityMatch;
+  if (officialDomainMatch) return { accepted: true, reason: "官网域名命中" };
+  if (!brandMatch) return { accepted: false, reason: "未命中品牌或产品身份词" };
   const mode = String(brand.match_mode ?? "precise");
-  if (mode === "broad") return true;
+  if (mode === "broad") return { accepted: true, reason: "宽泛模式品牌词命中" };
   const anchors = splitProfileTerms(brand.scope_terms);
-  if (!anchors.length) return true;
+  if (!anchors.length) return { accepted: true, reason: "品牌词命中" };
   const anchorMatch = anchors.some((term) => body.includes(normalizedScopeText(term)));
-  if (mode === "precise") return anchorMatch;
-  return anchorMatch || primaryTerms.some((term) => normalizedScopeText(term).length >= 8 && body.includes(normalizedScopeText(term)));
+  if (mode === "precise") return anchorMatch ? { accepted: true, reason: "品牌词与身份锚点同时命中" }
+    : { accepted: false, reason: "缺少身份锚点" };
+  return anchorMatch || primaryTerms.some((term) => normalizedScopeText(term).length >= 8 && body.includes(normalizedScopeText(term)))
+    ? { accepted: true, reason: "平衡模式通过" } : { accepted: false, reason: "品牌身份置信不足" };
+}
+
+function diagnosticBucket(map: Map<string, DiagnosticBucket>, platform: string, queryCount = 0) {
+  const current = map.get(platform) ?? { platform, providers: new Set<string>(), queryCount, candidateCount: 0, relevantCount: 0,
+    insertedCount: 0, duplicateCount: 0, filteredCount: 0, invalidCount: 0, reasons: new Map<string, number>() };
+  current.queryCount = Math.max(current.queryCount, queryCount);
+  map.set(platform, current);
+  return current;
+}
+
+function addDiagnosticReason(bucket: DiagnosticBucket, reason: string) {
+  bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
 }
 
 function gdeltQuery(terms: string[]) {
@@ -381,8 +403,13 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
     .bind(brandId).all<TrackedEntity>();
   const terms = termsFrom(entities.results);
   const entityExclusions = entities.results.filter((item) => item.type === "排除词").map((item) => item.value.trim()).filter(Boolean);
-  const scopeBrand = { ...brand, exclude_terms: [...splitProfileTerms(brand.exclude_terms), ...entityExclusions].join("\n") };
+  const strongIdentityTerms = entities.results.filter((item) => item.active && ["产品", "公司", "事件指纹"].includes(item.type))
+    .map((item) => item.value.trim()).filter(Boolean);
+  const scopeBrand = { ...brand, discovery_strong_terms: strongIdentityTerms,
+    exclude_terms: [...splitProfileTerms(brand.exclude_terms), ...entityExclusions].join("\n") };
   if (!terms.length) return { skipped: true, reason: "brand_not_configured", inserted: 0, found: 0 };
+  const discoveryTerms = buildDiscoveryTerms(terms, entities.results, brand);
+  const hashtagTerms = buildHashtagTerms(terms, entities.results);
   const now = new Date().toISOString();
   const lockedUntil = new Date(Date.now() + 3 * 60 * 1000).toISOString();
   const lockName = `monitoring:${brandId}`;
@@ -424,7 +451,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
     if (mode !== "reddit" && lastRun && lastRunAge < 15 * 1000 && !earlyMonidPending) return { skipped: true, reason: "provider_cooldown", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
     if (mode !== "reddit" && !force && lastRun && lastRunAge < 20 * 60 * 1000 && !earlyMonidPending) return { skipped: true, reason: "recent_sync", inserted: 0, found: 0, commentRefresh, translation: translationBefore, hybridAnalysis };
 
-    const query = gdeltQuery(terms);
+    const query = gdeltQuery(discoveryTerms);
     const startedAt = new Date().toISOString();
     const run = await db.prepare("INSERT INTO sync_runs (brand_id, provider, query, status, started_at) VALUES (?, ?, ?, ?, ?)")
       .bind(brandId, mode === "reddit" ? "Reddit independent discovery" : "Hybrid discovery + free crawler", query, "running", startedAt).run();
@@ -445,12 +472,12 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         : mode === "discovery" ? ["Instagram", "X", "YouTube", "TikTok", "Facebook"]
         : ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"];
       const providers: ProviderTask[] = [
-        ...(mode !== "reddit" && discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(terms, newsApiKey) }] : []),
+        ...(mode !== "reddit" && discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(discoveryTerms, newsApiKey) }] : []),
         ...(mode !== "reddit" && discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
         ...(monidApiKey ? [{ name: mode === "reddit" ? "Monid / Reddit" : "Monid social coordinator",
-          load: () => collectMonidSocial(db, brandId, terms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full" }) }] : []),
-        ...(mode !== "reddit" && xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(terms, xBearerToken) }] : []),
-        ...(mode !== "reddit" && youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(terms, youtubeApiKey) }] : []),
+          load: () => collectMonidSocial(db, brandId, discoveryTerms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full", hashtagTerms }) }] : []),
+        ...(mode !== "reddit" && xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(discoveryTerms, xBearerToken) }] : []),
+        ...(mode !== "reddit" && youtubeApiKey && (force || isDue(health.get("YouTube")?.last_success_at, SIX_HOURS)) ? [{ name: "YouTube", load: () => fetchYouTube(discoveryTerms, youtubeApiKey) }] : []),
       ];
       const deferred = providers.filter((provider) => {
         if (provider.name.startsWith("Monid")) return false;
@@ -480,11 +507,24 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         }
       }
 
-      const scopedDiscovery = discoveryCandidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand));
+      const diagnostics = new Map<string, DiagnosticBucket>();
+      for (const platform of mode === "reddit" ? ["Reddit"] : ["网页新闻", "Instagram", "X", "YouTube", "TikTok", "Facebook"]) {
+        diagnosticBucket(diagnostics, platform, queryCountForPlatform(platform, discoveryTerms, hashtagTerms));
+      }
+      const applyScope = (candidate: MonitoringCandidate) => {
+        const bucket = diagnosticBucket(diagnostics, candidate.platform, queryCountForPlatform(candidate.platform, discoveryTerms, hashtagTerms));
+        bucket.providers.add(candidate.provider ?? "公开来源");
+        bucket.candidateCount += 1;
+        const decision = brandScopeDecision(candidate, terms, scopeBrand);
+        if (decision.accepted) bucket.relevantCount += 1;
+        else { bucket.filteredCount += 1; addDiagnosticReason(bucket, decision.reason); }
+        return decision.accepted;
+      };
+      const scopedDiscovery = discoveryCandidates.filter(applyScope);
       if (mode !== "reddit") await registerMediaSources(db, brandId, scopedDiscovery);
-      const crawler = mode === "reddit" ? { crawled: 0, candidates: [] as MonitoringCandidate[] } : await crawlMediaSources(db, brandId, terms);
+      const crawler = mode === "reddit" ? { crawled: 0, candidates: [] as MonitoringCandidate[] } : await crawlMediaSources(db, brandId, discoveryTerms);
       if (mode !== "reddit") await markProviderHealthy(db, brandId, "Free media crawler", attemptedAt);
-      const candidates = [...scopedDiscovery, ...crawler.candidates.filter((candidate) => matchesBrandScope(candidate, terms, scopeBrand))];
+      const candidates = [...scopedDiscovery, ...crawler.candidates.filter(applyScope)];
       const existing = await db.prepare(`SELECT id, title, excerpt, cluster_key, url, source, source_country, content_country, language, published_at, parent_url
         FROM mentions WHERE brand_id = ? ORDER BY published_at DESC LIMIT 5000`).bind(brandId).all<ExistingMention>();
       const known = [...existing.results];
@@ -494,10 +534,12 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       let inserted = 0;
 
       for (const candidate of candidates.sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))) {
+        const diagnostic = diagnosticBucket(diagnostics, candidate.platform, queryCountForPlatform(candidate.platform, discoveryTerms, hashtagTerms));
         const canonical = canonicalUrl(candidate.url);
-        if (!canonical) continue;
+        if (!canonical) { diagnostic.invalidCount += 1; addDiagnosticReason(diagnostic, "链接无效"); continue; }
         const archived = knownByUrl.get(canonical);
         if (archived) {
+          diagnostic.duplicateCount += 1;
           if (archived.id && candidate.socialMetrics) await upsertSocialMetrics(db, brandId, archived.id, candidate);
           continue;
         }
@@ -527,6 +569,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         knownByUrl.set(canonical, knownMention);
         await upsertSocialMetrics(db, brandId, mentionId, candidate);
         inserted += 1;
+        diagnostic.insertedCount += 1;
         if (!knownCountries.has(inferredLocation.country) && !["地区未披露", "地区待确认", "华语地区"].includes(inferredLocation.country)) newCountries.add(inferredLocation.country);
         if (analysis.risk >= 70 || impact >= 90) {
           await db.prepare("INSERT INTO alerts (brand_id, mention_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?, ?)")
@@ -548,12 +591,45 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const translationAfter = inserted > 0 && mode === "full" ? await runTranslationCycle(db, brandId, credentialOwnerId)
         : { queued: 0, translated: 0, skipped: 0, errors: 0 };
       const status = errors.length ? (rateLimited && !candidates.length ? "deferred" : "partial") : "completed";
+      const completedAt = new Date().toISOString();
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
-        .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
+        .bind(status, candidates.length, inserted, errors.join("；"), completedAt, runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
       const searchPending = mode === "discovery" ? await countPendingMonidSearchJobs(db, brandId,
         ["Instagram", "X", "YouTube", "TikTok", "Facebook"]) : 0;
       const redditState = mode === "reddit" ? await getMonidPlatformState(db, brandId, "Reddit") : null;
+      const platformStates = monidApiKey ? await Promise.all(monidPlatforms.map((platform) => getMonidPlatformState(db, brandId, platform))) : [];
+      const stateByPlatform = new Map(platformStates.map((item) => [item.platform, item]));
+      const defaultProviders: Record<string, string> = {
+        "网页新闻": ready.filter((item) => ["NewsAPI.ai", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
+        Instagram: "Monid / Instagram", X: xBearerToken ? "X API + Monid / X" : "Monid / X",
+        YouTube: youtubeApiKey ? "YouTube API + Monid / YouTube" : "Monid / YouTube",
+        TikTok: "Monid / TikTok", Facebook: "Monid / Facebook", Reddit: "Monid / Reddit",
+      };
+      const diagnosticWrites = [...diagnostics.values()].map((bucket) => {
+        const platformState = stateByPlatform.get(bucket.platform as MonidSearchPlatform);
+        const pendingCount = Number(platformState?.pending ?? 0);
+        const platformErrors = errors.filter((message) => bucket.platform === "网页新闻"
+          ? /NewsAPI\.ai|GDELT|crawler/i.test(message) : message.toLocaleLowerCase().includes(bucket.platform.toLocaleLowerCase()));
+        if (platformState?.lastError && !platformErrors.includes(platformState.lastError)) platformErrors.push(platformState.lastError);
+        const platformUnhealthy = Boolean(platformState && ["limited", "error", "blocked"].includes(platformState.status));
+        const diagnosticStatus = pendingCount ? "pending" : platformErrors.length || platformUnhealthy ? "partial" : "complete";
+        return db.prepare(`INSERT INTO collection_diagnostics
+          (brand_id, sync_run_id, platform, providers, query_count, candidate_count, relevant_count, inserted_count,
+           duplicate_count, filtered_count, invalid_count, pending_count, filter_reasons, status, error, started_at, completed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(sync_run_id, platform) DO UPDATE SET providers = excluded.providers, query_count = excluded.query_count,
+            candidate_count = excluded.candidate_count, relevant_count = excluded.relevant_count, inserted_count = excluded.inserted_count,
+            duplicate_count = excluded.duplicate_count, filtered_count = excluded.filtered_count, invalid_count = excluded.invalid_count,
+            pending_count = excluded.pending_count, filter_reasons = excluded.filter_reasons, status = excluded.status,
+            error = excluded.error, completed_at = excluded.completed_at`)
+          .bind(brandId, Number(runId), bucket.platform, [...bucket.providers].join(" + ") || defaultProviders[bucket.platform] || "公开来源",
+            bucket.queryCount, bucket.candidateCount, bucket.relevantCount, bucket.insertedCount, bucket.duplicateCount,
+            bucket.filteredCount, bucket.invalidCount, pendingCount,
+            JSON.stringify(Object.fromEntries([...bucket.reasons.entries()].sort((a, b) => b[1] - a[1]))), diagnosticStatus,
+            platformErrors.join("；"), startedAt, completedAt);
+      });
+      if (diagnosticWrites.length) await db.batch(diagnosticWrites);
       return { skipped: false, phase: mode, found: candidates.length, inserted, query, socialPending, searchPending, commentRefresh,
         hybridAnalysis,
         translation: {
