@@ -374,6 +374,20 @@ test("workspace exclusion terms immediately hide archived mentions and their com
   assert.match(sync, /exclusions\.some\(\(term\) => body\.includes/);
 });
 
+test("configured official social accounts are excluded from archive, audience analysis, and future ingestion", async () => {
+  const [officialAccounts, repository, comments, sync, page] = await Promise.all([
+    source("db/official-accounts.ts"), source("db/repository.ts"), source("app/api/comments/route.ts"),
+    source("db/news-sync.ts"), source("app/page.tsx"),
+  ]);
+  assert.match(officialAccounts, /officialAccountHandles/);
+  assert.match(officialAccounts, /socialMetrics\?\.authorUsername/);
+  assert.match(officialAccounts, /official\.has\(handle\)/);
+  assert.match(repository, /!comesFromOfficialAccount/);
+  assert.match(comments, /NOT EXISTS \(SELECT 1 FROM social_post_metrics official_metrics/);
+  assert.match(sync, /if \(comesFromOfficialAccount\(candidate, brand\.official_accounts\)\) return false/);
+  assert.match(page, /官方社媒账号内容会从外部舆情档案与分析中排除/);
+});
+
 test("human comment labels override model output and retrain a workspace calibration layer", async () => {
   const [page, route, calibration, commentsRoute, schema] = await Promise.all([
     source("app/page.tsx"), source("app/api/comment-labels/route.ts"), source("db/comment-calibration.ts"),

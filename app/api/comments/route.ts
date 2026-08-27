@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getCommentCalibrationStats } from "../../../db/comment-calibration";
 import { queueSocialCommentTarget } from "../../../db/monid";
+import { officialAccountHandles } from "../../../db/official-accounts";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "../../../db/repository";
 import { meaningfulTokens } from "../../../db/text-analysis";
 import { prepareWorkspaceForUser } from "../../../db/workspaces";
@@ -21,6 +22,18 @@ function profileTerms(value: unknown) {
 
 function escapedLikeTerm(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function officialAccountSql(handleCount: number) {
+  return Array.from({ length: handleCount }, () => `(LOWER(REPLACE(TRIM(COALESCE(m.author, '')), '@', '')) != ?
+    AND LOWER(REPLACE(TRIM(COALESCE(m.source, '')), '@', '')) != ?
+    AND NOT EXISTS (SELECT 1 FROM social_post_metrics official_metrics
+      WHERE official_metrics.mention_id = m.id
+        AND LOWER(REPLACE(TRIM(COALESCE(official_metrics.author_username, '')), '@', '')) = ?))`);
+}
+
+function officialAccountBinds(handles: string[]) {
+  return handles.flatMap((handle) => [handle, handle, handle]);
 }
 
 const audienceRegionSql = `CASE
@@ -164,19 +177,23 @@ export async function GET(request: Request) {
     binds.push(needle, needle, needle, needle);
   }
   const exclusions = [...new Set([...profileTerms(brand?.exclude_terms), ...entityExclusions.results.flatMap((item) => profileTerms(item.value))])];
+  const officialHandles = officialAccountHandles(brand?.official_accounts);
   const mentionText = "COALESCE(m.title, '') || ' ' || COALESCE(m.excerpt, '') || ' ' || COALESCE(m.summary, '') || ' ' || COALESCE(m.source, '') || ' ' || COALESCE(m.author, '') || ' ' || COALESCE(m.url, '')";
   for (const term of exclusions) {
     clauses.push(`(${mentionText} || ' ' || COALESCE(c.content, '')) NOT LIKE ? ESCAPE '\\'`);
     binds.push(`%${escapedLikeTerm(term)}%`);
   }
+  const officialClauses = officialAccountSql(officialHandles.length);
+  clauses.push(...officialClauses);
+  binds.push(...officialAccountBinds(officialHandles));
   const regionalWhere = clauses.join(" AND ");
   const regionalBinds = [...binds];
   if (region) { clauses.push(`${audienceRegionSql} = ?`); binds.push(region); }
   const where = clauses.join(" AND ");
   const analysisWhere = `${where} AND c.sentiment != '无实意'`;
-  const mentionOnlyClauses = exclusions.map(() => `(${mentionText}) NOT LIKE ? ESCAPE '\\'`);
+  const mentionOnlyClauses = [...exclusions.map(() => `(${mentionText}) NOT LIKE ? ESCAPE '\\'`), ...officialClauses];
   const mentionOnlyWhere = mentionOnlyClauses.length ? ` AND ${mentionOnlyClauses.join(" AND ")}` : "";
-  const mentionOnlyBinds = exclusions.map((term) => `%${escapedLikeTerm(term)}%`);
+  const mentionOnlyBinds = [...exclusions.map((term) => `%${escapedLikeTerm(term)}%`), ...officialAccountBinds(officialHandles)];
   const ordering = sort === "liked" ? "c.likes DESC, c.published_at DESC" : sort === "risk" ? "c.sentiment_score ASC, c.likes DESC, c.published_at DESC" : "c.published_at DESC, c.id DESC";
 
   const summarySql = `SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(NULLIF(c.author_id, ''), NULLIF(c.author_username, ''))) AS authors,

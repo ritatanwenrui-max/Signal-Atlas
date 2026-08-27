@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { meaningfulTokens } from "./text-analysis";
+import { comesFromOfficialAccount, officialAccountHandles } from "./official-accounts";
 
 const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
@@ -626,7 +627,14 @@ export async function loadDashboardData(userId = "") {
     ...profileTerms(brand?.exclude_terms),
     ...entityRows.filter((item) => String(item.type) === "排除词" && Number(item.active ?? 1) === 1).flatMap((item) => profileTerms(item.value)),
   ])];
-  const mentionRows = (mentions.results as Array<Record<string, unknown>>).filter((row) => !mentionContainsExcludedTerm(row, exclusions));
+  const officialHandles = officialAccountHandles(brand?.official_accounts);
+  const mentionRows = (mentions.results as Array<Record<string, unknown>>).filter((row) =>
+    !mentionContainsExcludedTerm(row, exclusions) && !comesFromOfficialAccount({
+      source: row.source,
+      author: row.author,
+      url: row.url,
+      socialMetrics: { authorUsername: row.social_author_username },
+    }, officialHandles));
   const visibleMentionIds = new Set(mentionRows.map((row) => Number(row.id)));
   const visiblePropagationEdges = (propagationEdges.results as Array<Record<string, unknown>>).filter((edge) =>
     visibleMentionIds.has(Number(edge.from_mention_id)) && visibleMentionIds.has(Number(edge.to_mention_id)));
