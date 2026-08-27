@@ -974,6 +974,17 @@ export async function countPendingMonidJobs(db: D1Database, brandId: number) {
   return Number(row?.count ?? 0);
 }
 
+export async function countPendingMonidSearchJobs(db: D1Database, brandId: number,
+  platforms: MonidSearchPlatform[] = ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"]) {
+  const stages = [...new Set(platforms.map(searchStage))];
+  if (!stages.length) return 0;
+  const placeholders = stages.map(() => "?").join(",");
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs
+    WHERE brand_id = ? AND stage IN (${placeholders}) AND status IN (${PENDING_SQL})`)
+    .bind(brandId, ...stages).first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
 export async function getMonidPlatformState(db: D1Database, brandId: number, platform: MonidSearchPlatform) {
   const stage = searchStage(platform);
   const pending = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs

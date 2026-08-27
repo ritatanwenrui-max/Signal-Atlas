@@ -169,6 +169,15 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(pipeline, /lease_until/);
   assert.match(pipeline, /phaseRetryAt/);
   assert.ok(pipeline.indexOf("result?.phaseRetryAt") < pipeline.indexOf("result?.phasePending"));
+  assert.match(monid, /countPendingMonidSearchJobs/);
+  assert.match(newsSync, /searchPending/);
+  assert.match(pipeline, /job\.stage === "discovery"/);
+  assert.match(pipeline, /archiveDiscoveryPending/);
+  assert.match(pipeline, /archiveChanged/);
+  assert.match(pipeline, /hasRunnableRedditDiscovery/);
+  assert.match(pipeline, /force = 0/);
+  assert.match(page, /新闻档案优先采集/);
+  assert.match(page, /受众舆情采集/);
   assert.match(page, /Reddit 独立任务/);
 });
 

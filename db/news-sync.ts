@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
 import { refreshPublicCommentAnalyses } from "./comments";
-import { collectMonidSocial, countPendingMonidJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
+import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
@@ -551,8 +551,10 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       await db.prepare("UPDATE sync_runs SET status = ?, found_count = ?, inserted_count = ?, error = ?, completed_at = ? WHERE id = ?")
         .bind(status, candidates.length, inserted, errors.join("；"), new Date().toISOString(), runId).run();
       const socialPending = await countPendingMonidJobs(db, brandId);
+      const searchPending = mode === "discovery" ? await countPendingMonidSearchJobs(db, brandId,
+        ["Instagram", "X", "YouTube", "TikTok", "Facebook"]) : 0;
       const redditState = mode === "reddit" ? await getMonidPlatformState(db, brandId, "Reddit") : null;
-      return { skipped: false, phase: mode, found: candidates.length, inserted, query, socialPending, commentRefresh,
+      return { skipped: false, phase: mode, found: candidates.length, inserted, query, socialPending, searchPending, commentRefresh,
         hybridAnalysis,
         translation: {
           queued: translationBefore.queued + translationAfter.queued,
@@ -562,7 +564,8 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         },
         provider: mode === "reddit" ? "Reddit 独立发现" : `${ready.map((item) => item.name).join(" + ") || "低频发现待机"} + 免费媒体追踪`, crawledSources: crawler.crawled,
         warnings: errors, rateLimited, retryAt: retryTimes.sort()[0] ?? "",
-        phasePending: Boolean(redditState?.pending), phaseRetryAt: redditState?.retryAt ?? "", phaseStatus: redditState?.status ?? "" };
+        phasePending: mode === "discovery" ? searchPending > 0 : Boolean(redditState?.pending),
+        phaseRetryAt: redditState?.retryAt ?? "", phaseStatus: mode === "discovery" && searchPending > 0 ? "archive_discovery" : redditState?.status ?? "" };
     } catch (error) {
       const message = error instanceof Error ? error.message : "未知同步错误";
       await db.prepare("UPDATE sync_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?")

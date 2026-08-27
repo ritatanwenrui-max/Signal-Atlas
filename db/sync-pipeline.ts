@@ -37,6 +37,16 @@ function retryDelay(attempts: number) {
   return Math.min(60 * 60_000, 15_000 * 2 ** Math.min(8, Math.max(0, attempts - 1)));
 }
 
+async function hasRunnableRedditDiscovery(db: D1Database, brandId: number) {
+  const now = new Date().toISOString();
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM sync_pipeline_jobs
+    WHERE brand_id = ? AND task_type = 'reddit' AND (
+      status IN ('queued','running') OR
+      (status = 'retrying' AND (next_retry_at = '' OR datetime(next_retry_at) <= datetime(?)))
+    )`).bind(brandId, now).first<{ count: number }>();
+  return Number(row?.count ?? 0) > 0;
+}
+
 export async function getSyncPipelineJob(jobId: string) {
   await ensureDatabase();
   return env.DB.prepare("SELECT * FROM sync_pipeline_jobs WHERE id = ?").bind(jobId).first<SyncPipelineJob>();
@@ -130,6 +140,21 @@ export async function processSyncPipeline(jobId: string) {
         next_retry_at = '', lease_until = '', last_error = '', result_json = ?, updated_at = ?, completed_at = ? WHERE id = ?`)
         .bind(resultJson, completedAt, completedAt, jobId).run();
       return await getSyncPipelineJob(jobId);
+    }
+    if (job.stage === "discovery") {
+      const redditDiscoveryActive = await hasRunnableRedditDiscovery(db, job.brand_id);
+      const archiveDiscoveryPending = Boolean(result?.phasePending);
+      const archiveChanged = Number(result?.inserted ?? 0) > 0;
+      if (archiveDiscoveryPending || archiveChanged || redditDiscoveryActive) {
+        const retryAt = new Date(Date.now() + 15_000).toISOString();
+        const progress = archiveDiscoveryPending ? `仍有 ${Number(result?.searchPending ?? 0)} 个社媒搜索任务待返回`
+          : archiveChanged ? `本轮新增 ${Number(result?.inserted ?? 0)} 条内容，正在执行无新增复核`
+          : "Reddit 发现任务仍在运行，新闻档案优先等待";
+        await db.prepare(`UPDATE sync_pipeline_jobs SET stage = 'discovery', status = 'queued', force = 0,
+          attempts = 0, next_retry_at = ?, lease_until = '', last_error = ?, result_json = ?, updated_at = ? WHERE id = ?`)
+          .bind(retryAt, progress, resultJson, new Date().toISOString(), jobId).run();
+        return await getSyncPipelineJob(jobId);
+      }
     }
     const next = nextStage(job.stage);
     if (!next) {

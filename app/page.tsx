@@ -133,7 +133,7 @@ function syncTime(value?: string | null) {
 }
 
 const pipelineStageLabel: Record<SyncPipelineJob["stage"], string> = {
-  reddit: "Reddit 独立发现", maintenance: "档案维护", discovery: "全网发现", audience: "评论与分析",
+  reddit: "Reddit 独立发现", maintenance: "档案维护", discovery: "新闻档案优先采集", audience: "受众舆情采集",
 };
 
 function riskClass(risk: number) { return risk >= 70 ? "danger" : risk >= 40 ? "watch" : "safe"; }
