@@ -24,16 +24,24 @@ function escapedLikeTerm(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
-function officialAccountSql(handleCount: number) {
-  return Array.from({ length: handleCount }, () => `(LOWER(REPLACE(TRIM(COALESCE(m.author, '')), '@', '')) != ?
+function officialAccountSql(handleCount: number, includeDisplayName: boolean) {
+  const clauses = Array.from({ length: handleCount }, () => `(LOWER(REPLACE(TRIM(COALESCE(m.author, '')), '@', '')) != ?
     AND LOWER(REPLACE(TRIM(COALESCE(m.source, '')), '@', '')) != ?
     AND NOT EXISTS (SELECT 1 FROM social_post_metrics official_metrics
       WHERE official_metrics.mention_id = m.id
         AND LOWER(REPLACE(TRIM(COALESCE(official_metrics.author_username, '')), '@', '')) = ?))`);
+  if (includeDisplayName) clauses.push(`NOT EXISTS (SELECT 1 FROM social_post_metrics official_name_metrics
+    WHERE official_name_metrics.mention_id = m.id AND COALESCE(official_name_metrics.author_id, '') != ''
+      AND LOWER(TRIM(COALESCE(official_name_metrics.author_name, ''))) = ?)`);
+  clauses.push(`NOT (m.platform = 'TikTok' AND LOWER(COALESCE(m.provider, '')) LIKE '%tikhub%'
+    AND LOWER(COALESCE(m.url, '')) LIKE '%tiktok.com/@user/video/%' AND COALESCE(m.author, '') = ''
+    AND NOT EXISTS (SELECT 1 FROM social_post_metrics attributed_metrics WHERE attributed_metrics.mention_id = m.id
+      AND (COALESCE(attributed_metrics.author_id, '') != '' OR COALESCE(attributed_metrics.author_username, '') != '')))`);
+  return clauses;
 }
 
-function officialAccountBinds(handles: string[]) {
-  return handles.flatMap((handle) => [handle, handle, handle]);
+function officialAccountBinds(handles: string[], displayName: string) {
+  return [...handles.flatMap((handle) => [handle, handle, handle]), ...(displayName ? [displayName.toLocaleLowerCase()] : [])];
 }
 
 const audienceRegionSql = `CASE
@@ -178,14 +186,15 @@ export async function GET(request: Request) {
   }
   const exclusions = [...new Set([...profileTerms(brand?.exclude_terms), ...entityExclusions.results.flatMap((item) => profileTerms(item.value))])];
   const officialHandles = officialAccountHandles(brand?.official_accounts);
+  const officialDisplayName = String(brand?.name ?? "").normalize("NFKC").trim().replace(/\s+/g, " ");
   const mentionText = "COALESCE(m.title, '') || ' ' || COALESCE(m.excerpt, '') || ' ' || COALESCE(m.summary, '') || ' ' || COALESCE(m.source, '') || ' ' || COALESCE(m.author, '') || ' ' || COALESCE(m.url, '')";
   for (const term of exclusions) {
     clauses.push(`(${mentionText} || ' ' || COALESCE(c.content, '')) NOT LIKE ? ESCAPE '\\'`);
     binds.push(`%${escapedLikeTerm(term)}%`);
   }
-  const officialClauses = officialAccountSql(officialHandles.length);
+  const officialClauses = officialAccountSql(officialHandles.length, Boolean(officialDisplayName));
   clauses.push(...officialClauses);
-  binds.push(...officialAccountBinds(officialHandles));
+  binds.push(...officialAccountBinds(officialHandles, officialDisplayName));
   const regionalWhere = clauses.join(" AND ");
   const regionalBinds = [...binds];
   if (region) { clauses.push(`${audienceRegionSql} = ?`); binds.push(region); }
@@ -193,7 +202,7 @@ export async function GET(request: Request) {
   const analysisWhere = `${where} AND c.sentiment != '无实意'`;
   const mentionOnlyClauses = [...exclusions.map(() => `(${mentionText}) NOT LIKE ? ESCAPE '\\'`), ...officialClauses];
   const mentionOnlyWhere = mentionOnlyClauses.length ? ` AND ${mentionOnlyClauses.join(" AND ")}` : "";
-  const mentionOnlyBinds = [...exclusions.map((term) => `%${escapedLikeTerm(term)}%`), ...officialAccountBinds(officialHandles)];
+  const mentionOnlyBinds = [...exclusions.map((term) => `%${escapedLikeTerm(term)}%`), ...officialAccountBinds(officialHandles, officialDisplayName)];
   const ordering = sort === "liked" ? "c.likes DESC, c.published_at DESC" : sort === "risk" ? "c.sentiment_score ASC, c.likes DESC, c.published_at DESC" : "c.published_at DESC, c.id DESC";
 
   const summarySql = `SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(NULLIF(c.author_id, ''), NULLIF(c.author_username, ''))) AS authors,

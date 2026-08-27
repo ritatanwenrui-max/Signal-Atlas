@@ -301,7 +301,8 @@ function walkObjects(value: unknown, output: JsonObject[] = [], depth = 0) {
 }
 
 function platformPostUrl(platform: string, row: JsonObject, postId: string, username: string) {
-  const direct = firstText(row, ["url", "web_url", "postUrl", "permalink", "link", "video_url", "navigation_url"]);
+  const direct = firstText(row, ["url", "web_url", "postUrl", "permalink", "link", "video_url", "navigation_url",
+    "aweme_info.share_url", "aweme_info.share_info.share_url", "share_url", "share_info.share_url"]);
   if (direct && /^https?:\/\//.test(direct)) return direct;
   if (platform === "Reddit" && direct.startsWith("/")) return `https://www.reddit.com${direct}`;
   if (platform === "X" && postId) return `https://x.com/${username || "i"}/status/${postId}`;
@@ -328,17 +329,19 @@ function parseSocialPosts(output: unknown, terms: string[], platform: "X" | "You
     const matchedTerms = terms.filter((term) => normalizedText.includes(normalized(term)));
     if (!matchedTerms.length) continue;
     let postId = firstText(row, platform === "YouTube" ? ["video_id", "videoId", "id"]
-      : platform === "TikTok" ? ["aweme_info.aweme_id", "aweme_id", "id"]
+      : platform === "TikTok" ? ["aweme_info.aweme_id", "aweme_id"]
       : platform === "X" ? ["rest_id", "tweet_id", "id_str", "id"]
       : platform === "Reddit" ? ["name", "post_id", "postId", "thingId", "id", "data.name", "data.id"] : ["id", "postId"]);
     if (platform === "Reddit" && postId && !postId.startsWith("t3_")) postId = `t3_${postId}`;
+    if (platform === "TikTok" && !postId) continue;
     const authorUsername = firstText(row, platform === "YouTube" ? ["author.name", "channel.title", "channel_name", "ownerText"]
-      : platform === "TikTok" ? ["aweme_info.author.unique_id", "author.unique_id", "author.username", "username"]
+      : platform === "TikTok" ? ["aweme_info.author.unique_id", "aweme_info.author.uniqueId", "aweme_info.author.username",
+        "author.unique_id", "author.uniqueId", "author.username", "authorInfo.unique_id", "authorInfo.uniqueId", "user.unique_id", "user.uniqueId", "username"]
       : platform === "X" ? ["core.user_results.result.legacy.screen_name", "user.legacy.screen_name", "screen_name", "username"]
       : platform === "Reddit" ? ["username", "authorInfo.name", "author.name", "author", "author_name", "data.author"]
       : ["author", "authorName", "source"]);
-    const authorName = firstText(row, ["author.name", "author.nickname", "core.user_results.result.legacy.name", "user.name", "channel_name", "source"]);
-    const authorId = firstText(row, ["author.id", "author.uid", "authorInfo.id", "channel_id", "core.user_results.result.rest_id", "user.id", "ownerId"]);
+    const authorName = firstText(row, ["aweme_info.author.nickname", "aweme_info.author.name", "author.name", "author.nickname", "core.user_results.result.legacy.name", "user.name", "channel_name", "source"]);
+    const authorId = firstText(row, ["aweme_info.author.uid", "aweme_info.author.id", "author.id", "author.uid", "authorInfo.id", "channel_id", "core.user_results.result.rest_id", "user.id", "ownerId"]);
     const url = platformPostUrl(platform, row, postId, authorUsername);
     if (!url || seen.has(url)) continue;
     seen.add(url);

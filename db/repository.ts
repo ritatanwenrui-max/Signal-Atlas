@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { meaningfulTokens } from "./text-analysis";
-import { comesFromOfficialAccount, officialAccountHandles } from "./official-accounts";
+import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost, officialAccountHandles } from "./official-accounts";
 
 const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
@@ -629,12 +629,21 @@ export async function loadDashboardData(userId = "") {
   ])];
   const officialHandles = officialAccountHandles(brand?.official_accounts);
   const mentionRows = (mentions.results as Array<Record<string, unknown>>).filter((row) =>
-    !mentionContainsExcludedTerm(row, exclusions) && !comesFromOfficialAccount({
+    !mentionContainsExcludedTerm(row, exclusions) && !isUnattributedSyntheticSocialPost({
+      platform: row.platform,
+      provider: row.provider,
       source: row.source,
       author: row.author,
       url: row.url,
-      socialMetrics: { authorUsername: row.social_author_username },
-    }, officialHandles));
+      socialMetrics: { authorId: row.social_author_id, authorUsername: row.social_author_username, authorName: row.social_author_name },
+    }) && !comesFromOfficialAccount({
+      platform: row.platform,
+      provider: row.provider,
+      source: row.source,
+      author: row.author,
+      url: row.url,
+      socialMetrics: { authorId: row.social_author_id, authorUsername: row.social_author_username, authorName: row.social_author_name },
+    }, officialHandles, [brand?.name]));
   const visibleMentionIds = new Set(mentionRows.map((row) => Number(row.id)));
   const visiblePropagationEdges = (propagationEdges.results as Array<Record<string, unknown>>).filter((edge) =>
     visibleMentionIds.has(Number(edge.from_mention_id)) && visibleMentionIds.has(Number(edge.to_mention_id)));

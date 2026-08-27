@@ -1,8 +1,10 @@
 type OfficialAccountCandidate = {
+  platform?: unknown;
+  provider?: unknown;
   source?: unknown;
   author?: unknown;
   url?: unknown;
-  socialMetrics?: { authorUsername?: unknown } | null;
+  socialMetrics?: { authorId?: unknown; authorUsername?: unknown; authorName?: unknown } | null;
 };
 
 function decoded(value: string) {
@@ -43,12 +45,29 @@ function identityHandles(value: unknown) {
   return [...handles];
 }
 
-export function comesFromOfficialAccount(candidate: OfficialAccountCandidate, configuredAccounts: unknown) {
+function normalizedDisplayName(value: unknown) {
+  return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+export function isUnattributedSyntheticSocialPost(candidate: OfficialAccountCandidate) {
+  if (String(candidate.platform ?? "") !== "TikTok") return false;
+  const url = String(candidate.url ?? "").toLocaleLowerCase();
+  const provider = String(candidate.provider ?? "").toLocaleLowerCase();
+  const username = normalizeSocialHandle(candidate.socialMetrics?.authorUsername);
+  const authorId = String(candidate.socialMetrics?.authorId ?? "").trim();
+  const author = String(candidate.author ?? "").trim();
+  return provider.includes("tikhub") && url.includes("tiktok.com/@user/video/") && !username && !authorId && !author;
+}
+
+export function comesFromOfficialAccount(candidate: OfficialAccountCandidate, configuredAccounts: unknown, officialDisplayNames: unknown[] = []) {
   const official = new Set(Array.isArray(configuredAccounts)
     ? configuredAccounts.map(normalizeSocialHandle).filter(Boolean)
     : officialAccountHandles(configuredAccounts));
-  if (!official.size) return false;
   const identities = [candidate.socialMetrics?.authorUsername, candidate.author, candidate.source, candidate.url]
     .flatMap(identityHandles);
-  return identities.some((handle) => official.has(handle));
+  if (identities.some((handle) => official.has(handle))) return true;
+  const names = new Set(officialDisplayNames.map(normalizedDisplayName).filter(Boolean));
+  const candidateName = normalizedDisplayName(candidate.socialMetrics?.authorName || candidate.author);
+  const stableAccountIdentity = Boolean(String(candidate.socialMetrics?.authorId ?? "").trim() || normalizeSocialHandle(candidate.socialMetrics?.authorUsername));
+  return stableAccountIdentity && candidateName !== "" && names.has(candidateName);
 }

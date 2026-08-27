@@ -8,7 +8,7 @@ import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, in
 import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
 import { runHybridAnalysisCycle } from "./llm-analysis";
-import { comesFromOfficialAccount } from "./official-accounts";
+import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost } from "./official-accounts";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -40,7 +40,8 @@ function matchesBrandScope(candidate: MonitoringCandidate, primaryTerms: string[
   const body = normalizedScopeText(`${candidate.title} ${candidate.discussionText} ${candidate.source} ${candidate.author ?? ""} ${candidate.url}`);
   const exclusions = splitProfileTerms(brand.exclude_terms);
   if (exclusions.some((term) => body.includes(normalizedScopeText(term)))) return false;
-  if (comesFromOfficialAccount(candidate, brand.official_accounts)) return false;
+  if (isUnattributedSyntheticSocialPost(candidate)) return false;
+  if (comesFromOfficialAccount(candidate, brand.official_accounts, [brand.name])) return false;
   const website = normalizedScopeText(String(brand.website ?? "").replace(/^https?:\/\//, "").replace(/\/$/, ""));
   const officialDomainMatch = Boolean(website && normalizedScopeText(candidate.url).includes(website));
   const brandMatch = primaryTerms.some((term) => body.includes(normalizedScopeText(term)));

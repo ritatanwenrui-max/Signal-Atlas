@@ -381,11 +381,25 @@ test("configured official social accounts are excluded from archive, audience an
   ]);
   assert.match(officialAccounts, /officialAccountHandles/);
   assert.match(officialAccounts, /socialMetrics\?\.authorUsername/);
+  assert.match(officialAccounts, /socialMetrics\?\.authorId/);
+  assert.match(officialAccounts, /officialDisplayNames/);
+  assert.match(officialAccounts, /isUnattributedSyntheticSocialPost/);
   assert.match(officialAccounts, /official\.has\(handle\)/);
   assert.match(repository, /!comesFromOfficialAccount/);
   assert.match(comments, /NOT EXISTS \(SELECT 1 FROM social_post_metrics official_metrics/);
-  assert.match(sync, /if \(comesFromOfficialAccount\(candidate, brand\.official_accounts\)\) return false/);
+  assert.match(comments, /official_name_metrics\.author_name/);
+  assert.match(comments, /tiktok\.com\/@user\/video/);
+  assert.match(sync, /if \(comesFromOfficialAccount\(candidate, brand\.official_accounts/);
   assert.match(page, /官方社媒账号内容会从外部舆情档案与分析中排除/);
+});
+
+test("TikTok parsing rejects nested sound objects and captures stable author identity paths", async () => {
+  const monid = await source("db/monid.ts");
+  assert.match(monid, /platform === "TikTok" && !postId\) continue/);
+  assert.match(monid, /aweme_info\.author\.uniqueId/);
+  assert.match(monid, /aweme_info\.author\.uid/);
+  assert.match(monid, /aweme_info\.share_info\.share_url/);
+  assert.doesNotMatch(monid, /platform === "TikTok" \? \["aweme_info\.aweme_id", "aweme_id", "id"\]/);
 });
 
 test("human comment labels override model output and retrain a workspace calibration layer", async () => {
