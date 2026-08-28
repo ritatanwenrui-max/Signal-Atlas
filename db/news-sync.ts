@@ -626,7 +626,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const platformStates = monidApiKey ? await Promise.all(monidPlatforms.map((platform) => getMonidPlatformState(db, brandId, platform))) : [];
       const stateByPlatform = new Map(platformStates.map((item) => [item.platform, item]));
       const defaultProviders: Record<string, string> = {
-        "网页新闻": ready.filter((item) => ["NewsAPI.ai", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
+        "网页新闻": ready.filter((item) => ["NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
         Instagram: "Monid / Instagram", X: xBearerToken ? "X API + Monid / X" : "Monid / X",
         YouTube: youtubeApiKey ? "YouTube API + Monid / YouTube" : "Monid / YouTube",
         TikTok: "Monid / TikTok", Facebook: "Monid / Facebook", Reddit: "Monid / Reddit",
@@ -635,7 +635,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         const platformState = stateByPlatform.get(bucket.platform as MonidSearchPlatform);
         const pendingCount = Number(platformState?.pending ?? 0);
         const platformErrors = errors.filter((message) => bucket.platform === "网页新闻"
-          ? /NewsAPI\.ai|GDELT|crawler/i.test(message) : message.toLocaleLowerCase().includes(bucket.platform.toLocaleLowerCase()));
+          ? /NewsAPI\.ai|Media Cloud|NewsData\.io|World News API|GDELT|crawler/i.test(message) : message.toLocaleLowerCase().includes(bucket.platform.toLocaleLowerCase()));
         if (platformState?.lastError && !platformErrors.includes(platformState.lastError)) platformErrors.push(platformState.lastError);
         const platformUnhealthy = Boolean(platformState && ["limited", "error", "blocked"].includes(platformState.status));
         const diagnosticStatus = pendingCount ? "pending" : platformErrors.length || platformUnhealthy ? "partial" : "complete";
