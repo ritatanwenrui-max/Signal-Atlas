@@ -1,6 +1,7 @@
 "use client";
 
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { getUiLocale } from "./ui-language";
 
 type Mention = {
   id: number; title: string; url: string; source: string; platform: string; source_country: string; sentiment: string;
@@ -52,11 +53,11 @@ const sentimentColors: Record<string, string> = { 正面: "#6f963e", 中性: "#a
 
 function shortDate(value: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(date);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat(getUiLocale(), { month: "2-digit", day: "2-digit" }).format(date);
 }
 function fullDate(value: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat(getUiLocale(), { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 function pct(value: number, total: number) { return total ? Math.round(value / total * 100) : 0; }
 function signed(value: number) { return `${value > 0 ? "+" : ""}${value}`; }

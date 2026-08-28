@@ -505,3 +505,22 @@ test("hybrid analysis uses rules for all data and LLMs only for priority review 
   assert.match(page, /前往 OpenAI 创建 API Key/);
   assert.match(report, /LLM 辅助研判/);
 });
+
+test("the complete interface offers a persistent Chinese and English language switch", async () => {
+  const [page, language, styles, report] = await Promise.all([
+    source("app/page.tsx"), source("app/ui-language.ts"), source("app/globals.css"), source("app/report-view.tsx"),
+  ]);
+  assert.match(page, /useInterfaceLanguage/);
+  assert.match(page, /className="language-button"/);
+  assert.match(page, /role="menuitemradio"/);
+  assert.match(page, /English interface/);
+  assert.match(language, /somnia-media-ui-language/);
+  assert.match(language, /MutationObserver/);
+  assert.match(language, /document\.documentElement\.lang/);
+  assert.match(language, /"新闻档案": "Media Archive"/);
+  assert.match(language, /"受众舆情": "Audience Intelligence"/);
+  assert.match(language, /"数据采集": "Data Collection"/);
+  assert.match(language, /"产品使用说明": "Product Guide"/);
+  assert.match(styles, /\.language-options/);
+  assert.match(report, /getUiLocale/);
+});

@@ -2,6 +2,7 @@
 
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReportView from "./report-view";
+import { getUiLocale, useInterfaceLanguage } from "./ui-language";
 
 type Mention = {
   id: number; title: string; url: string; source: string; platform: string; source_country: string; content_country: string;
@@ -122,7 +123,7 @@ function formatDate(value?: string, full = false) {
   if (!value) return "—";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", full
+  return new Intl.DateTimeFormat(getUiLocale(), full
     ? { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
     : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
 }
@@ -167,6 +168,8 @@ function EnglishTranslation({ value, status, language, error, nextRetryAt }: {
 }
 
 export default function Home() {
+  const { language, setLanguage } = useInterfaceLanguage();
+  const [languageOpen, setLanguageOpen] = useState(false);
   const [view, setView] = useState<ViewId>(() => typeof window === "undefined" ? "overview" : viewFromPath(window.location.pathname));
   const [data, setData] = useState<DashboardData>(emptyData);
   const [loading, setLoading] = useState(true);
@@ -196,8 +199,9 @@ export default function Home() {
 
   useEffect(() => {
     const label = nav.find(([id]) => id === view)?.[1] ?? "品牌舆情监测";
-    document.title = `${label} · Somnia Lab`;
-  }, [view]);
+    const englishLabel = { overview: "Overview", archive: "Media Archive", propagation: "Propagation", analytics: "Content Intelligence", comments: "Audience Intelligence", coverage: "Data Collection", reports: "Analysis Reports", settings: "Brand & Team", guide: "Product Guide" }[view];
+    document.title = `${language === "en" ? englishLabel : label} · Somnia Lab`;
+  }, [language, view]);
 
   async function pollSync(jobId: string, announce = false) {
     if (syncPollRef.current) return;
@@ -352,6 +356,13 @@ export default function Home() {
       <header className="topbar">
         <div><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div>
         <div className="top-actions">
+          <div className={languageOpen ? "language-menu open" : "language-menu"}>
+            <button type="button" className="language-button" aria-label="选择语言" aria-haspopup="menu" aria-expanded={languageOpen} onClick={() => setLanguageOpen((current) => !current)}><span>◎</span><strong>{language === "zh" ? "中文" : "English"}</strong><i>⌄</i></button>
+            {languageOpen && <div className="language-options" role="menu" aria-label="主要导航语言">
+              <button type="button" role="menuitemradio" aria-checked={language === "zh"} className={language === "zh" ? "active" : ""} onClick={() => { setLanguage("zh"); setLanguageOpen(false); }}><span>中</span><div><strong>中文</strong><small>简体中文界面</small></div><b>✓</b></button>
+              <button type="button" role="menuitemradio" aria-checked={language === "en"} className={language === "en" ? "active" : ""} onClick={() => { setLanguage("en"); setLanguageOpen(false); }}><span>EN</span><div><strong>English</strong><small>English interface</small></div><b>✓</b></button>
+            </div>}
+          </div>
           <label className="search-box"><span>⌕</span><input disabled={!data.viewer.authenticated} aria-label="搜索全部档案" placeholder="搜索标题、来源、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>全档案</kbd></label>
           {data.workspace && <span className="team-chip">共享工作区 · {data.workspace.members.length} 人</span>}
           <button className="primary-button" disabled={syncing || !data.brand || !data.workspace?.canEdit} onClick={() => void syncNews(true, true)}><span>{syncing ? "↻" : "◎"}</span>{syncing ? "巡检中…" : "立即巡检"}</button>
