@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { meaningfulTokens } from "./text-analysis";
 import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost, officialAccountHandles } from "./official-accounts";
+import { getNewsProviderQuotaSnapshots } from "./news-provider-budget";
 
 const tables = [
   `CREATE TABLE IF NOT EXISTS brand_profiles (
@@ -226,6 +227,15 @@ const tables = [
     last_success_at TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS provider_daily_usage (
+    credential_owner_user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    usage_date TEXT NOT NULL,
+    units_used INTEGER NOT NULL DEFAULT 0,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (credential_owner_user_id, provider, usage_date)
+  )`,
   `CREATE TABLE IF NOT EXISTS connector_credentials (
     user_id TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -427,6 +437,7 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_collection_diagnostics_brand_completed ON collection_diagnostics(brand_id, completed_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_brand_task_status_retry ON sync_pipeline_jobs(brand_id, task_type, status, next_retry_at)",
   "CREATE INDEX IF NOT EXISTS idx_sync_pipeline_status_lease ON sync_pipeline_jobs(status, lease_until)",
+  "CREATE INDEX IF NOT EXISTS idx_provider_daily_usage_date ON provider_daily_usage(usage_date, provider)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_sources_brand_domain ON media_sources(brand_id, domain)",
   "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_next_crawl ON media_sources(brand_id, status, next_crawl_at)",
   "CREATE INDEX IF NOT EXISTS idx_media_sources_brand_country ON media_sources(brand_id, country)",
@@ -613,6 +624,9 @@ export async function loadDashboardData(userId = "") {
   const eventRegistryLimited = Boolean(eventRegistryHealth?.retry_after && new Date(eventRegistryHealth.retry_after).getTime() > Date.now());
   const storedCredentials = new Map(credentialRows.results.map((item) => [item.provider, item]));
   const newsApiConfigured = Boolean(env.NEWSAPI_AI_KEY || storedCredentials.has("NewsAPI.ai"));
+  const mediaCloudConfigured = Boolean(env.MEDIACLOUD_API_KEY || storedCredentials.has("Media Cloud"));
+  const newsDataConfigured = Boolean(env.NEWSDATA_API_KEY || storedCredentials.has("NewsData.io"));
+  const worldNewsConfigured = Boolean(env.WORLD_NEWS_API_KEY || storedCredentials.has("World News API"));
   const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
@@ -625,6 +639,8 @@ export async function loadDashboardData(userId = "") {
   const llmConfigured = Boolean(env.OPENAI_API_KEY || storedCredentials.has("OpenAI LLM"));
   const llmHealth = healthByName.get("OpenAI LLM");
   const llmLimited = Boolean(llmHealth?.retry_after && new Date(llmHealth.retry_after).getTime() > Date.now());
+  const newsQuotaSnapshots = await getNewsProviderQuotaSnapshots(db, credentialOwnerId);
+  const newsQuotaByProvider = new Map(newsQuotaSnapshots.map((item) => [item.provider, item]));
   const monidHealth = healthByName.get("Monid / Instagram");
   const monidPlatforms = ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"] as const;
   const monidPlatformHealth = new Map(monidPlatforms.map((platform) => [platform, healthByName.get(`Monid / ${platform}`)]));
@@ -762,6 +778,7 @@ export async function loadDashboardData(userId = "") {
     propagationEdges: visiblePropagationEdges,
     aiBrief,
     connectorCredentials: credentialRows.results,
+    newsProviderQuotas: newsQuotaSnapshots,
     workspace: workspace ? {
       id: workspaceId,
       name: String(workspace.name ?? `${String(brand?.name ?? "品牌")}团队工作区`),
@@ -786,6 +803,25 @@ export async function loadDashboardData(userId = "") {
     },
     connectors: [
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
+      ...[
+        { id: "mediacloud", provider: "Media Cloud", configured: mediaCloudConfigured, envConfigured: Boolean(env.MEDIACLOUD_API_KEY), name: "Media Cloud 全球新闻库" },
+        { id: "newsdata", provider: "NewsData.io", configured: newsDataConfigured, envConfigured: Boolean(env.NEWSDATA_API_KEY), name: "NewsData.io 多语言发现" },
+        { id: "worldnews", provider: "World News API", configured: worldNewsConfigured, envConfigured: Boolean(env.WORLD_NEWS_API_KEY), name: "World News API 全球补全" },
+      ].map((item) => {
+        const quota = newsQuotaByProvider.get(item.provider)!;
+        const health = healthByName.get(item.provider);
+        const limited = Boolean((health?.retry_after && new Date(health.retry_after).getTime() > Date.now()) || quota.remaining <= 0);
+        return {
+          id: item.id, provider: item.provider, configurable: true, configured: item.configured,
+          lastFour: storedCredentials.get(item.provider)?.last_four ?? (item.envConfigured ? "环境密钥" : ""), name: item.name,
+          status: (!item.configured ? "credentials" : limited ? "limited" : "online") as "credentials" | "limited" | "online",
+          retryAt: quota.remaining <= 0 ? quota.resetAt : health?.retry_after ?? "",
+          quotaUsed: quota.used, quotaLimit: quota.limit, quotaRemaining: quota.remaining, quotaResetAt: quota.resetAt,
+          scheduleLabel: quota.scheduleLabel,
+          detail: !item.configured ? `${quota.scheduleLabel}自动更新 · 配置免费 API Key 后启用`
+            : `${quota.scheduleLabel}自动更新 · 今日 ${quota.used}/${quota.limit} · 剩余 ${quota.remaining} · ${quota.rationale}`,
+        };
+      }),
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
       { id: "llm-openai", provider: "OpenAI LLM", configurable: true, configured: llmConfigured,
         lastFour: storedCredentials.get("OpenAI LLM")?.last_four ?? (env.OPENAI_API_KEY ? "环境密钥" : ""), name: "混合智能分析",

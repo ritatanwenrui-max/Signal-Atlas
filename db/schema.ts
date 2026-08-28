@@ -266,6 +266,18 @@ export const providerHealth = sqliteTable("provider_health", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const providerDailyUsage = sqliteTable("provider_daily_usage", {
+  credentialOwnerUserId: text("credential_owner_user_id").notNull(),
+  provider: text("provider").notNull(),
+  usageDate: text("usage_date").notNull(),
+  unitsUsed: integer("units_used").notNull().default(0),
+  requestCount: integer("request_count").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  primaryKey({ columns: [table.credentialOwnerUserId, table.provider, table.usageDate] }),
+  index("idx_provider_daily_usage_date").on(table.usageDate, table.provider),
+]);
+
 export const connectorCredentials = sqliteTable("connector_credentials", {
   userId: text("user_id").notNull(),
   provider: text("provider").notNull(),

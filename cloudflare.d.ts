@@ -30,6 +30,9 @@ declare module "cloudflare:workers" {
     X_BEARER_TOKEN?: string;
     YOUTUBE_API_KEY?: string;
     NEWSAPI_AI_KEY?: string;
+    MEDIACLOUD_API_KEY?: string;
+    NEWSDATA_API_KEY?: string;
+    WORLD_NEWS_API_KEY?: string;
     MONID_API_KEY?: string;
     CREDENTIALS_ENCRYPTION_KEY?: string;
     AZURE_TRANSLATOR_KEY?: string;

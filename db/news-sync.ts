@@ -4,12 +4,13 @@ import { backfillMediaSources, crawlMediaSources, registerMediaSources } from ".
 import { refreshPublicCommentAnalyses } from "./comments";
 import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
-import { fetchEventRegistry, fetchGdelt, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { fetchEventRegistry, fetchGdelt, fetchMediaCloud, fetchNewsData, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
 import { runHybridAnalysisCycle } from "./llm-analysis";
 import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost } from "./official-accounts";
 import { buildDiscoveryTerms, buildHashtagTerms, queryCountForPlatform } from "./search-strategy";
+import { NEWS_PROVIDER_PLANS, reserveNewsProviderQuota } from "./news-provider-budget";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -295,6 +296,17 @@ function isDue(lastSuccessAt: string | undefined, interval: number) {
   return !lastSuccessAt || Date.now() - new Date(lastSuccessAt).getTime() >= interval;
 }
 
+function quotaProtectedTask(db: D1Database, credentialOwnerId: string, provider: string, load: () => Promise<MonitoringCandidate[]>) {
+  return async () => {
+    const reservation = await reserveNewsProviderQuota(db, credentialOwnerId, provider);
+    if (!reservation.allowed) {
+      const retryAfter = Math.max(60_000, new Date(reservation.resetAt).getTime() - Date.now());
+      throw new ProviderRequestError(provider, 429, retryAfter, `${provider} 今日自动采集预算已用完`);
+    }
+    return load();
+  };
+}
+
 async function enrichHistoricalMentions(db: D1Database, brandId: number) {
   const rows = await db.prepare(`SELECT id, title, excerpt, url, source, source_country, language FROM mentions
     WHERE brand_id = ? AND (source_country IN ('地区未披露', '地区待确认', '') OR language IN ('自动识别', '语言待确认', ''))
@@ -461,19 +473,32 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const healthRows = await db.prepare("SELECT provider, status, consecutive_failures, retry_after, last_error, last_success_at FROM provider_health WHERE provider LIKE ?")
         .bind(`${brandId}:%`).all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
-      const [newsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
+      const [newsApiKey, mediaCloudApiKey, newsDataApiKey, worldNewsApiKey, xBearerToken, youtubeApiKey] = await Promise.all([
         loadConnectorCredential(db, "NewsAPI.ai", credentialOwnerId),
+        loadConnectorCredential(db, "Media Cloud", credentialOwnerId),
+        loadConnectorCredential(db, "NewsData.io", credentialOwnerId),
+        loadConnectorCredential(db, "World News API", credentialOwnerId),
         loadConnectorCredential(db, "X", credentialOwnerId), loadConnectorCredential(db, "YouTube", credentialOwnerId),
       ]);
       const monidApiKey = earlyMonidApiKey;
-      const discoveryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, SIX_HOURS);
-      const gdeltDue = !newsApiKey || isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
+      const eventRegistryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, NEWS_PROVIDER_PLANS["NewsAPI.ai"].intervalMs);
+      const mediaCloudDue = force || isDue(health.get("Media Cloud")?.last_success_at, NEWS_PROVIDER_PLANS["Media Cloud"].intervalMs);
+      const newsDataDue = force || isDue(health.get("NewsData.io")?.last_success_at, NEWS_PROVIDER_PLANS["NewsData.io"].intervalMs);
+      const worldNewsDue = force || isDue(health.get("World News API")?.last_success_at, NEWS_PROVIDER_PLANS["World News API"].intervalMs);
+      const gdeltDue = isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
       const monidPlatforms: MonidSearchPlatform[] = mode === "reddit" ? ["Reddit"]
         : mode === "discovery" ? ["Instagram", "X", "YouTube", "TikTok", "Facebook"]
         : ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"];
       const providers: ProviderTask[] = [
-        ...(mode !== "reddit" && discoveryDue && newsApiKey ? [{ name: "NewsAPI.ai", load: () => fetchEventRegistry(discoveryTerms, newsApiKey) }] : []),
-        ...(mode !== "reddit" && discoveryDue && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
+        ...(mode !== "reddit" && eventRegistryDue && newsApiKey ? [{ name: "NewsAPI.ai",
+          load: quotaProtectedTask(db, credentialOwnerId, "NewsAPI.ai", () => fetchEventRegistry(discoveryTerms, newsApiKey)) }] : []),
+        ...(mode !== "reddit" && mediaCloudDue && mediaCloudApiKey ? [{ name: "Media Cloud",
+          load: quotaProtectedTask(db, credentialOwnerId, "Media Cloud", () => fetchMediaCloud(discoveryTerms, mediaCloudApiKey)) }] : []),
+        ...(mode !== "reddit" && newsDataDue && newsDataApiKey ? [{ name: "NewsData.io",
+          load: quotaProtectedTask(db, credentialOwnerId, "NewsData.io", () => fetchNewsData(discoveryTerms, newsDataApiKey)) }] : []),
+        ...(mode !== "reddit" && worldNewsDue && worldNewsApiKey ? [{ name: "World News API",
+          load: quotaProtectedTask(db, credentialOwnerId, "World News API", () => fetchWorldNews(discoveryTerms, worldNewsApiKey)) }] : []),
+        ...(mode !== "reddit" && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
         ...(monidApiKey ? [{ name: mode === "reddit" ? "Monid / Reddit" : "Monid social coordinator",
           load: () => collectMonidSocial(db, brandId, discoveryTerms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full", hashtagTerms }) }] : []),
         ...(mode !== "reddit" && xBearerToken && (force || isDue(health.get("X")?.last_success_at, 2 * 3600_000)) ? [{ name: "X", load: () => fetchX(discoveryTerms, xBearerToken) }] : []),

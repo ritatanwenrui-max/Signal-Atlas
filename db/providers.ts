@@ -52,6 +52,22 @@ type EventRegistryPayload = {
   articles?: { results?: EventRegistryArticle[] };
   error?: string | { message?: string };
 };
+type MediaCloudStory = {
+  id?: string; indexed_date?: string; publish_date?: string; language?: string; media_name?: string;
+  media_url?: string; title?: string; url?: string;
+};
+type MediaCloudPayload = { stories?: MediaCloudStory[]; pagination_token?: string | null; detail?: string };
+type NewsDataArticle = {
+  article_id?: string; title?: string; link?: string; description?: string | null; content?: string | null;
+  pubDate?: string; source_id?: string; source_name?: string; source_url?: string; language?: string;
+  country?: string[]; creator?: string[] | null; sentiment?: string | null;
+};
+type NewsDataPayload = { status?: string; totalResults?: number; results?: NewsDataArticle[]; nextPage?: string | null; message?: string };
+type WorldNewsArticle = {
+  id?: number; title?: string; url?: string; text?: string; summary?: string; publish_date?: string;
+  authors?: string[]; language?: string; source_country?: string; sentiment?: number; news_site?: string;
+};
+type WorldNewsPayload = { offset?: number; number?: number; available?: number; news?: WorldNewsArticle[]; message?: string };
 type XUser = { id: string; username?: string; name?: string; location?: string };
 type XPlace = { id: string; country?: string; country_code?: string; full_name?: string };
 type XPost = {
@@ -206,6 +222,23 @@ function englishLabel(value?: EventRegistryLabel) {
   return typeof value === "string" ? value : value?.eng;
 }
 
+function compactBooleanQuery(terms: string[], maxLength = 96) {
+  const values: string[] = [];
+  for (const raw of terms) {
+    const term = raw.replaceAll('"', "").trim();
+    if (!term) continue;
+    const value = /\s|[^\x00-\x7F]/.test(term) ? `"${term}"` : term;
+    if ([...values, value].join(" OR ").length > maxLength) break;
+    values.push(value);
+  }
+  return values.join(" OR ");
+}
+
+function sourceNameFromUrl(url: string, fallback = "公开媒体") {
+  if (fallback.trim()) return fallback.trim();
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "公开媒体"; }
+}
+
 export async function fetchEventRegistry(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
   const apiKey = credential ?? env.NEWSAPI_AI_KEY;
   if (!apiKey) return [];
@@ -271,6 +304,84 @@ export async function fetchEventRegistry(terms: string[], credential?: string): 
       discoveredVia: "global_discovery",
     };
   });
+}
+
+export async function fetchMediaCloud(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.MEDIACLOUD_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://search.mediacloud.org/api/search/story-list");
+  endpoint.searchParams.set("q", compactBooleanQuery(terms, 180));
+  endpoint.searchParams.set("start", new Date(Date.now() - 31 * 86400_000).toISOString().slice(0, 10));
+  endpoint.searchParams.set("end", new Date().toISOString().slice(0, 10));
+  endpoint.searchParams.set("platform", "onlinenews-mediacloud");
+  endpoint.searchParams.set("sort_order", "desc");
+  endpoint.searchParams.set("page_size", "100");
+  const response = await fetch(endpoint, {
+    headers: { Accept: "application/json", Authorization: `Token ${apiKey}`, "User-Agent": "SignalAtlas/2.0 brand-monitoring" },
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!response.ok) throw new ProviderRequestError("Media Cloud", response.status, retryAfterMs(response), `Media Cloud HTTP ${response.status}`);
+  const payload = await response.json() as MediaCloudPayload;
+  return (payload.stories ?? []).filter((item) => item.url && item.title).map((item) => ({
+    title: item.title!.trim(), url: item.url!, source: sourceNameFromUrl(item.url!, item.media_name ?? item.media_url ?? ""),
+    platform: "网页新闻", sourceCountry: "地区待确认",
+    language: item.language ? languageNames[item.language] ?? item.language : "语言待确认",
+    publishedAt: isoDate(item.publish_date ?? item.indexed_date), engagement: 0, discussionText: "", commentsAnalyzed: 0,
+    parentUrl: "", relation: "", author: "", provider: "Media Cloud", discoveredVia: "global_discovery",
+  }));
+}
+
+export async function fetchNewsData(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.NEWSDATA_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://newsdata.io/api/1/latest");
+  endpoint.searchParams.set("apikey", apiKey);
+  endpoint.searchParams.set("q", compactBooleanQuery(terms));
+  endpoint.searchParams.set("timeframe", "48");
+  endpoint.searchParams.set("size", "10");
+  endpoint.searchParams.set("removeduplicate", "1");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("NewsData.io", response.status, retryAfterMs(response), `NewsData.io HTTP ${response.status}`);
+  const payload = await response.json() as NewsDataPayload;
+  if (payload.status === "error") throw new Error(`NewsData.io: ${payload.message || "接口返回错误"}`);
+  return (payload.results ?? []).filter((item) => item.link && item.title).map((item) => {
+    const declaredCountry = item.country?.[0] ?? "";
+    return {
+      title: item.title!.trim(), url: item.link!, source: sourceNameFromUrl(item.link!, item.source_name ?? item.source_id ?? ""),
+      platform: "网页新闻" as const,
+      sourceCountry: (countryCodes[declaredCountry.toUpperCase()] ?? countryNames[declaredCountry] ?? declaredCountry) || "地区待确认",
+      language: item.language ? languageNames[item.language] ?? item.language : "语言待确认",
+      publishedAt: isoDate(item.pubDate), engagement: 0,
+      discussionText: [item.description ?? "", item.content ?? "", item.sentiment ? `provider-sentiment:${item.sentiment}` : ""].join(" "),
+      commentsAnalyzed: 0, parentUrl: "", relation: "", author: item.creator?.join(", ") ?? "",
+      provider: "NewsData.io", discoveredVia: "global_discovery" as const,
+    };
+  });
+}
+
+export async function fetchWorldNews(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.WORLD_NEWS_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://api.worldnewsapi.com/search-news");
+  endpoint.searchParams.set("text", compactBooleanQuery(terms));
+  endpoint.searchParams.set("text-match-indexes", "title,content");
+  endpoint.searchParams.set("earliest-publish-date", new Date(Date.now() - 31 * 86400_000).toISOString().replace("T", " ").slice(0, 19));
+  endpoint.searchParams.set("sort", "publish-time");
+  endpoint.searchParams.set("sort-direction", "DESC");
+  endpoint.searchParams.set("number", "20");
+  const response = await fetch(endpoint, {
+    headers: { Accept: "application/json", "x-api-key": apiKey }, signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) throw new ProviderRequestError("World News API", response.status, retryAfterMs(response), `World News API HTTP ${response.status}`);
+  const payload = await response.json() as WorldNewsPayload;
+  return (payload.news ?? []).filter((item) => item.url && item.title).map((item) => ({
+    title: item.title!.trim(), url: item.url!, source: sourceNameFromUrl(item.url!, item.news_site ?? ""), platform: "网页新闻",
+    sourceCountry: item.source_country ? countryCodes[item.source_country.toUpperCase()] ?? countryNames[item.source_country] ?? item.source_country : "地区待确认",
+    language: item.language ? languageNames[item.language] ?? item.language : "语言待确认", publishedAt: isoDate(item.publish_date), engagement: 0,
+    discussionText: [item.summary ?? "", item.text ?? "", item.sentiment == null ? "" : `provider-sentiment:${item.sentiment}`].join(" "),
+    commentsAnalyzed: 0, parentUrl: "", relation: "", author: item.authors?.join(", ") ?? "", provider: "World News API",
+    discoveredVia: "global_discovery",
+  }));
 }
 
 export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> {

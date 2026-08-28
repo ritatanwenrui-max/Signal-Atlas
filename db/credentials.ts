@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 
 const supportedProviders = new Set([
-  "NewsAPI.ai", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
+  "NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
   "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory", "OpenAI LLM",
 ]);
 
@@ -44,6 +44,9 @@ export async function deleteConnectorCredential(db: D1Database, userId: string, 
 
 export async function loadConnectorCredential(db: D1Database, provider: string, userId = "") {
   const environmentValue = provider === "NewsAPI.ai" ? env.NEWSAPI_AI_KEY : provider === "Monid / Instagram" ? env.MONID_API_KEY
+    : provider === "Media Cloud" ? env.MEDIACLOUD_API_KEY
+    : provider === "NewsData.io" ? env.NEWSDATA_API_KEY
+    : provider === "World News API" ? env.WORLD_NEWS_API_KEY
     : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY
     : provider === "Azure Translator" && env.AZURE_TRANSLATOR_KEY
       ? JSON.stringify({ key: env.AZURE_TRANSLATOR_KEY, region: env.AZURE_TRANSLATOR_REGION || "", endpoint: env.AZURE_TRANSLATOR_ENDPOINT || "" })
