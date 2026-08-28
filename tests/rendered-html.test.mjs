@@ -42,7 +42,8 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /并列事件对比/);
   assert.match(page, /高度转载率/);
   assert.match(page, /同一事件扩散路径/);
-  assert.match(page, /起点：\{cluster\.originSource\}/);
+  assert.match(page, /起点：\$\{cluster\.originSource\}/);
+  assert.match(page, /Starting point: \$\{cluster\.originSource\}/);
   assert.doesNotMatch(page, /cluster\.countries\.join\(" → "\)/);
   assert.match(page, /network-edge cross/);
   assert.match(page, /样本不足/);
@@ -548,11 +549,14 @@ test("English mode contains no Chinese fallback and translates workspace content
   assert.match(route, /translateTextToAmericanEnglish/);
   assert.match(route, /locale: "en-US"/);
   assert.match(translation, /target_lang: "EN-US"/);
-  assert.match(page, /translatedMentionCopy\(item, uiLanguage\)/);
-  assert.match(page, /translatedCommentCopy\(comment, uiLanguage\)/);
+  assert.match(page, /useMentionCopies/);
+  assert.match(page, /mentionCopy\(cluster\.items\[0\]\)\.title/);
+  assert.match(page, /commentCopy\(comment\)/);
+  assert.doesNotMatch(page, /Translation into American English is pending/);
   assert.match(page, /word-cloud" data-no-ui-translate/);
   assert.match(page, /Translating analysis terms/);
-  assert.match(report, /reportCommentText\(item, uiLanguage\)/);
+  assert.match(report, /translatedReportCommentText/);
+  assert.doesNotMatch(report, /Translation into American English is pending/);
   assert.match(report, /report-inline-conclusion" data-no-ui-translate/);
   assert.match(report, /localizedReportWords/);
   assert.match(commentsRoute, /m\.translation_en/);
