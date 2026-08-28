@@ -15,10 +15,11 @@ type TranslationCredentials = {
 const MYMEMORY_ENDPOINT = "https://api.mymemory.translated.net/get";
 const MAX_CANDIDATES_PER_CYCLE = 40;
 const MAX_ANONYMOUS_ITEMS_PER_CYCLE = 2;
-const MAX_CONFIGURED_ITEMS_PER_CYCLE = 12;
+const MAX_CONFIGURED_ITEMS_PER_CYCLE = 24;
 const MAX_SEGMENT_BYTES = 450;
 
 const languageCodes: Record<string, string> = {
+  "简体中文": "zh", "繁体中文": "zh", "中文": "zh", chinese: "zh", zh: "zh", "zh-cn": "zh", "zh-tw": "zh", "zh-hk": "zh",
   "泰语": "th", thai: "th", th: "th",
   "日语": "ja", japanese: "ja", ja: "ja",
   "韩语": "ko", korean: "ko", ko: "ko",
@@ -40,12 +41,11 @@ function normalizedLanguage(value: string) {
 
 export function translationNotNeeded(language: string, source: string) {
   const normalized = normalizedLanguage(language);
-  if (language.includes("中文") || ["zh", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant", "chinese"].includes(normalized)) return true;
   if (["英文", "英语", "en", "en-us", "en-gb", "english"].includes(normalized)) return true;
   if (/\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|\p{Script=Thai}/u.test(source)) return false;
   const han = (source.match(/\p{Script=Han}/gu) ?? []).length;
   const latin = (source.match(/[A-Za-z]/g) ?? []).length;
-  if (han >= 4 && han >= latin * 0.35) return true;
+  if (han >= 2) return false;
   if (!han && latin >= 24) {
     const englishSignals = (source.toLocaleLowerCase().match(/\b(the|and|for|with|from|this|that|has|have|will|was|were|are|company|news|post|about|into|its|their)\b/g) ?? []).length;
     if (englishSignals >= 2) return true;
@@ -59,7 +59,19 @@ function sourceLanguageCode(language: string, source: string) {
   if (/\p{Script=Thai}/u.test(source)) return "th";
   if (/\p{Script=Hiragana}|\p{Script=Katakana}/u.test(source)) return "ja";
   if (/\p{Script=Hangul}/u.test(source)) return "ko";
+  if (/\p{Script=Han}/u.test(source)) return "zh";
   return "Autodetect";
+}
+
+function normalizeAmericanEnglish(value: string) {
+  const replacements: Array<[RegExp, string]> = [
+    [/\bcolours\b/gi, "colors"], [/\bcolour\b/gi, "color"], [/\bbehaviours\b/gi, "behaviors"], [/\bbehaviour\b/gi, "behavior"],
+    [/\borganisations\b/gi, "organizations"], [/\borganisation\b/gi, "organization"], [/\bcentres\b/gi, "centers"], [/\bcentre\b/gi, "center"],
+    [/\brecognises\b/gi, "recognizes"], [/\brecognise\b/gi, "recognize"], [/\banalyses\b/gi, "analyzes"], [/\banalyse\b/gi, "analyze"],
+    [/\bfavourites\b/gi, "favorites"], [/\bfavourite\b/gi, "favorite"], [/\bfavours\b/gi, "favors"], [/\bfavour\b/gi, "favor"],
+    [/\btravelling\b/gi, "traveling"], [/\btravelled\b/gi, "traveled"], [/\bmetres\b/gi, "meters"], [/\bmetre\b/gi, "meter"],
+  ];
+  return replacements.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value).trim();
 }
 
 function sourceHash(value: string) {
@@ -189,6 +201,10 @@ async function translateWithDeepL(source: string, apiKey: string): Promise<Trans
 
 async function translate(source: string, language: string, credentials: TranslationCredentials) {
   const failures: string[] = [];
+  if (credentials.deeplKey) {
+    try { return await translateWithDeepL(source, credentials.deeplKey); }
+    catch (error) { failures.push(`DeepL：${error instanceof Error ? error.message : "调用失败"}`); }
+  }
   if (credentials.libre) {
     try { return await translateWithLibreTranslate(source, credentials.libre); }
     catch (error) { failures.push(`LibreTranslate：${error instanceof Error ? error.message : "调用失败"}`); }
@@ -197,15 +213,19 @@ async function translate(source: string, language: string, credentials: Translat
     try { return await translateWithAzure(source, credentials.azure); }
     catch (error) { failures.push(`Azure：${error instanceof Error ? error.message : "调用失败"}`); }
   }
-  if (credentials.deeplKey) {
-    try { return await translateWithDeepL(source, credentials.deeplKey); }
-    catch (error) { failures.push(`DeepL：${error instanceof Error ? error.message : "调用失败"}`); }
-  }
   try { return await translateWithMyMemory(source, language, credentials.myMemoryEmail); }
   catch (error) {
     failures.push(`MyMemory：${error instanceof Error ? error.message : "调用失败"}`);
     throw new Error(failures.join("；"));
   }
+}
+
+export async function translateTextToAmericanEnglish(db: D1Database, credentialOwnerId: string, source: string, language = "Autodetect") {
+  const clean = source.trim().slice(0, 8_000);
+  if (!clean || translationNotNeeded(language, clean)) return clean;
+  const credentials = await loadTranslationCredentials(db, credentialOwnerId);
+  const result = await translate(clean, language, credentials);
+  return normalizeAmericanEnglish(result.text);
 }
 
 function tableFor(kind: TranslationKind) {
@@ -240,13 +260,13 @@ async function processItem(db: D1Database, brandId: number, item: TranslationRow
     .bind(attempt, brandId, item.id).run();
   try {
     const result = await translate(item.source, item.language, credentials);
-    if (["en", "en-us", "en-gb", "zh", "zh-cn", "zh-tw", "zh-hk"].includes(normalizedLanguage(result.detectedLanguage))) {
+    if (["en", "en-us", "en-gb"].includes(normalizedLanguage(result.detectedLanguage))) {
       await updateSkipped(db, brandId, item);
       return "skipped" as const;
     }
     await db.prepare(`UPDATE ${table} SET translation_en = ?, translation_status = 'translated', translation_provider = ?,
       translation_source_hash = ?, translation_error = '', translation_next_retry_at = '', translated_at = ?
-      WHERE brand_id = ? AND id = ?`).bind(result.text, result.provider, hash, new Date().toISOString(), brandId, item.id).run();
+      WHERE brand_id = ? AND id = ?`).bind(normalizeAmericanEnglish(result.text), result.provider, hash, new Date().toISOString(), brandId, item.id).run();
     return "translated" as const;
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : "独立翻译失败";
@@ -270,6 +290,12 @@ export async function runTranslationCycle(db: D1Database, brandId: number, crede
       WHERE brand_id = ? AND translation_status IN ('translating','blocked')`).bind(brandId),
     db.prepare(`UPDATE mention_comments SET translation_status = 'pending', translation_provider = '', translation_error = '', translation_next_retry_at = ''
       WHERE brand_id = ? AND translation_status IN ('translating','blocked')`).bind(brandId),
+    db.prepare(`UPDATE mentions SET translation_status = 'pending', translation_provider = '', translation_error = '', translation_next_retry_at = ''
+      WHERE brand_id = ? AND translation_status = 'skipped' AND translation_en = ''
+        AND (language LIKE '%中文%' OR LOWER(language) IN ('zh','zh-cn','zh-tw','zh-hk','chinese') OR title GLOB '*[一-龥]*' OR excerpt GLOB '*[一-龥]*')`).bind(brandId),
+    db.prepare(`UPDATE mention_comments SET translation_status = 'pending', translation_provider = '', translation_error = '', translation_next_retry_at = ''
+      WHERE brand_id = ? AND translation_status = 'skipped' AND translation_en = ''
+        AND (language LIKE '%中文%' OR LOWER(language) IN ('zh','zh-cn','zh-tw','zh-hk','chinese') OR content GLOB '*[一-龥]*')`).bind(brandId),
   ];
   if (hasDedicatedTranslator(credentials)) statements.push(
     db.prepare(`UPDATE mentions SET translation_status = 'pending', translation_error = '', translation_next_retry_at = ''

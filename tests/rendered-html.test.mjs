@@ -322,7 +322,10 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(translation, /translation_next_retry_at/);
   assert.match(translation, /翻译已迁移到独立队列/);
   assert.match(translation, /MAX_ANONYMOUS_ITEMS_PER_CYCLE = 2/);
-  assert.match(translation, /MAX_CONFIGURED_ITEMS_PER_CYCLE = 12/);
+  assert.match(translation, /MAX_CONFIGURED_ITEMS_PER_CYCLE = 24/);
+  assert.match(translation, /target_lang: "EN-US"/);
+  assert.match(translation, /translateTextToAmericanEnglish/);
+  assert.match(translation, /language LIKE '%中文%'/);
   assert.match(translation, /hasDedicatedTranslator\(credentials\)/);
   assert.match(translation, /!hasDedicatedTranslator\(credentials\) && isDailyQuotaError/);
   assert.match(translation, /USED ALL AVAILABLE FREE TRANSLATIONS/);
@@ -343,8 +346,9 @@ test("collected posts and comments receive persisted English translations", asyn
   assert.match(repository, /LibreTranslate 自托管/);
   assert.match(comments, /translation_status = CASE WHEN mention_comments\.content != excluded\.content THEN 'pending'/);
   assert.match(page, /function EnglishTranslation/);
-  assert.match(page, /function translationNotNeeded/);
-  assert.match(page, /status === "skipped" \|\| translationNotNeeded\(language\)/);
+  assert.match(page, /function translatedMentionCopy/);
+  assert.match(page, /function translatedCommentCopy/);
+  assert.match(page, /uiLanguage === "en"/);
   assert.match(page, /等待英文翻译/);
   assert.match(page, /翻译失败/);
   assert.match(page, /系统将在额度恢复后自动重试/);
@@ -523,4 +527,22 @@ test("the complete interface offers a persistent Chinese and English language sw
   assert.match(language, /"产品使用说明": "Product Guide"/);
   assert.match(styles, /\.language-options/);
   assert.match(report, /getUiLocale/);
+});
+
+test("English mode contains no Chinese fallback and translates workspace content into American English", async () => {
+  const [page, uiLanguage, route, translation, report, commentsRoute] = await Promise.all([
+    source("app/page.tsx"), source("app/ui-language.ts"), source("app/api/ui-translate/route.ts"),
+    source("db/translation.ts"), source("app/report-view.tsx"), source("app/api/comments/route.ts"),
+  ]);
+  assert.match(uiLanguage, /Translating into American English/);
+  assert.match(uiLanguage, /Translation is temporarily unavailable/);
+  assert.match(uiLanguage, /fetch\("\/api\/ui-translate"/);
+  assert.doesNotMatch(uiLanguage, /closest\("\[data-no-ui-translate\], \.english-translation/);
+  assert.match(route, /translateTextToAmericanEnglish/);
+  assert.match(route, /locale: "en-US"/);
+  assert.match(translation, /target_lang: "EN-US"/);
+  assert.match(page, /translatedMentionCopy\(item, uiLanguage\)/);
+  assert.match(page, /translatedCommentCopy\(comment, uiLanguage\)/);
+  assert.match(report, /reportCommentText\(item, uiLanguage\)/);
+  assert.match(commentsRoute, /m\.translation_en/);
 });

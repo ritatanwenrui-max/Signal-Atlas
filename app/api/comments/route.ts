@@ -215,7 +215,7 @@ export async function GET(request: Request) {
       SUM(CASE WHEN c.sentiment != '无实意' THEN 1 ELSE 0 END) AS meaningful_total,
       COALESCE(ROUND(AVG(CASE WHEN c.sentiment != '无实意' THEN c.sentiment_score END)), 0) AS average_score
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}`;
-  const commentsSql = `SELECT c.*, m.title AS post_title, m.url AS post_url, m.source AS post_source,
+  const commentsSql = `SELECT c.*, m.title AS post_title, m.translation_en AS post_translation_en, m.language AS post_language, m.url AS post_url, m.source AS post_source,
       ${audienceRegionSql} AS audience_region, ${regionConfidenceSql} AS region_confidence, ${regionBasisSql} AS region_basis,
       metrics.author_username AS post_author, metrics.follower_count AS post_author_followers,
       annotation.model_sentiment, annotation.model_emotion, annotation.model_topic, annotation.model_score,
@@ -225,14 +225,14 @@ export async function GET(request: Request) {
     LEFT JOIN social_post_metrics metrics ON metrics.mention_id = c.mention_id
     LEFT JOIN comment_annotations annotation ON annotation.comment_id = c.id
     WHERE ${where} ORDER BY ${ordering} LIMIT ? OFFSET ?`;
-  const topPostsSql = `SELECT c.mention_id, m.title, m.url, m.source, COUNT(*) AS comments,
+  const topPostsSql = `SELECT c.mention_id, m.title, m.translation_en, m.language, m.url, m.source, COUNT(*) AS comments,
       SUM(CASE WHEN c.sentiment = '负面' THEN 1 ELSE 0 END) AS negative, COALESCE(SUM(c.likes), 0) AS likes
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${where}
-    GROUP BY c.mention_id, m.title, m.url, m.source ORDER BY comments DESC, likes DESC LIMIT 8`;
+    GROUP BY c.mention_id, m.title, m.translation_en, m.language, m.url, m.source ORDER BY comments DESC, likes DESC LIMIT 8`;
   const keywordSql = `SELECT c.keywords FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
     WHERE ${analysisWhere} ORDER BY c.id DESC LIMIT 5000`;
-  const analysisRowsSql = `SELECT c.id, c.platform, c.likes, c.replies, c.sentiment, c.emotion, c.topic, c.language,
-      c.content, c.published_at, m.title AS post_title, ${audienceRegionSql} AS audience_region,
+  const analysisRowsSql = `SELECT c.id, c.platform, c.likes, c.replies, c.sentiment, c.emotion, c.topic, c.language, c.translation_en,
+      c.content, c.published_at, m.title AS post_title, m.translation_en AS post_translation_en, m.language AS post_language, ${audienceRegionSql} AS audience_region,
       ${regionConfidenceSql} AS region_confidence, ${regionBasisSql} AS region_basis
     FROM mention_comments c JOIN mentions m ON m.id = c.mention_id WHERE ${analysisWhere}
     ORDER BY c.id DESC LIMIT 10000`;
@@ -248,7 +248,7 @@ export async function GET(request: Request) {
     db.prepare(keywordSql).bind(...binds).all<{ keywords: string }>(),
     db.prepare(analysisRowsSql).bind(...binds).all<Record<string, unknown>>(),
     db.prepare(regionalRowsSql).bind(...regionalBinds).all<Record<string, unknown>>(),
-    db.prepare(`SELECT target.*, m.title AS post_title, m.source AS post_source, m.url AS mention_url,
+    db.prepare(`SELECT target.*, m.title AS post_title, m.translation_en AS post_translation_en, m.language AS post_language, m.source AS post_source, m.url AS mention_url,
         (target.v2_failures + target.v1_failures) AS failure_count,
         CASE WHEN target.status = 'retrying' THEN datetime(target.updated_at, '+30 minutes') ELSE '' END AS next_retry_at
       FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
@@ -258,7 +258,7 @@ export async function GET(request: Request) {
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
       FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
       WHERE target.brand_id = ?${mentionOnlyWhere}`).bind(brandId, ...mentionOnlyBinds).first<{ reported: number; collected: number }>(),
-    db.prepare(`SELECT c.*, m.title AS post_title, m.url AS post_url,
+    db.prepare(`SELECT c.*, m.title AS post_title, m.translation_en AS post_translation_en, m.language AS post_language, m.url AS post_url,
       annotation.model_sentiment, annotation.model_emotion, annotation.manual_sentiment, annotation.manual_emotion
       FROM mention_comments c JOIN mentions m ON m.id = c.mention_id
       LEFT JOIN comment_annotations annotation ON annotation.comment_id = c.id
@@ -402,9 +402,9 @@ export async function GET(request: Request) {
     .filter((row) => String(row.content ?? "").trim())
     .sort((a, b) => (Number(b.likes ?? 0) + Number(b.replies ?? 0) * 2) - (Number(a.likes ?? 0) + Number(a.replies ?? 0) * 2))
     .slice(0, 8).map((row) => ({
-      id: Number(row.id), content: String(row.content ?? ""), sentiment: String(row.sentiment ?? "中性"), emotion: String(row.emotion ?? "中性陈述"),
+      id: Number(row.id), content: String(row.content ?? ""), translation_en: String(row.translation_en ?? ""), language: String(row.language ?? ""), sentiment: String(row.sentiment ?? "中性"), emotion: String(row.emotion ?? "中性陈述"),
       topic: String(row.topic ?? "其他讨论"), likes: Number(row.likes ?? 0), replies: Number(row.replies ?? 0), platform: String(row.platform ?? ""),
-      post_title: String(row.post_title ?? ""), audience_region: String(row.audience_region ?? "地区未知"), region_confidence: String(row.region_confidence ?? "未知"),
+      post_title: String(row.post_title ?? ""), post_translation_en: String(row.post_translation_en ?? ""), post_language: String(row.post_language ?? ""), audience_region: String(row.audience_region ?? "地区未知"), region_confidence: String(row.region_confidence ?? "未知"),
     }));
 
   const total = Number(summary?.total ?? 0);

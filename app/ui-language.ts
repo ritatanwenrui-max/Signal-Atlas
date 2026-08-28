@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 export type UiLanguage = "zh" | "en";
 
@@ -33,6 +33,10 @@ const ENGLISH: Record<string, string> = {
   "立即巡检": "Run scan now",
   "巡检中…": "Scanning…",
   "混合监测已运行": "Hybrid monitoring is active",
+  "受众舆情采集": "Audience collection",
+  "新闻档案优先采集": "Archive-first collection",
+  "档案维护": "Archive maintenance",
+  "Reddit 独立发现": "Independent Reddit discovery",
   "后台续跑": "Background resume",
   "每 5 分钟": "Every 5 minutes",
   "主巡检": "Main scan",
@@ -52,6 +56,7 @@ const ENGLISH: Record<string, string> = {
   "采集中": "Collecting",
   "暂缓重试": "Backoff",
   "品牌情报工作区": "Brand intelligence workspace",
+  "团队工作区": "Team workspace",
   "尚未配置品牌": "Brand not configured",
   "尚未登录": "Not signed in",
   "正在读取长期新闻档案与传播图谱…": "Loading the long-term media archive and propagation graph…",
@@ -87,6 +92,7 @@ const ENGLISH: Record<string, string> = {
   "首次巡检后生成": "Generated after the first scan",
   "历史新闻档案": "Lifetime media archive",
   "持续累积，不覆盖旧记录": "Continuously accumulated; old records are preserved",
+  "有史以来全部记录": "All records since monitoring began",
   "连续 96 小时无新增则切分事件": "An event closes after 96 hours without new coverage",
   "国家 / 地区": "Countries / regions",
   "由来源元数据、域名、媒体及语言推断": "Inferred from source metadata, domain, publisher and language",
@@ -101,6 +107,10 @@ const ENGLISH: Record<string, string> = {
   "全部档案 →": "All records →",
   "正在扩散的报道链路": "Active propagation events",
   "舆情告警": "Intelligence alerts",
+  "品牌首次进入西班牙的信息环境": "First observed brand coverage in Spain",
+  "品牌首次进入印度尼西亚的信息环境": "First observed brand coverage in Indonesia",
+  "品牌首次进入法国的信息环境": "First observed brand coverage in France",
+  "系统首次观察到该国家或地区的相关内容": "This is the first related content observed in this country or region.",
   "标记已处理": "Mark as resolved",
   "当前没有待处理高风险信号": "No unresolved high-risk signals",
   "品牌历史媒体档案": "Lifetime Brand Media Archive",
@@ -208,10 +218,33 @@ const ENGLISH: Record<string, string> = {
   "共鸣权重": "Resonance weight",
   "地区接受情况": "Regional acceptance",
   "当前受众结论": "Current audience findings",
+  "系统把评论原文、互动共鸣、具体情绪、讨论议题和受众地区放在一起分析，并为每条结论保留可核对的评论依据。": "The system analyzes original comments, engagement resonance, specific emotions, discussion themes and audience regions together, while retaining verifiable comment evidence for every finding.",
+  "关键词搜帖": "Keyword post discovery",
+  "归档帖子 URL": "Archive post URLs",
+  "逐帖采集评论": "Collect comments per post",
+  "内部语义分析": "Internal semantic analysis",
+  "舆情展示": "Intelligence presentation",
+  "Monid 多平台发现": "Monid multi-platform discovery",
+  "保留来源与互动": "Retain sources and engagement",
+  "主评论与回复分页": "Paginated comments and replies",
+  "分词、情绪与议题": "Terms, sentiment and topics",
+  "词云、趋势与风险": "Word clouds, trends and risk",
+  "已归档评论": "Archived comments",
+  "独立参与者": "Unique participants",
+  "高共鸣负面": "High-resonance negative",
+  "评论互动": "Comment engagement",
+  "按公开账号 ID 去重": "Deduplicated by public account ID",
+  "按评论获赞标准化加权": "Normalized weighting by comment likes",
+  "有效评论数量占比": "Share of meaningful comments",
+  "评论获赞与回复合计": "Comment likes and replies combined",
   "国家 / 地区接受情况": "Audience acceptance by country / region",
   "采集计划与混合分析": "Collection plan and hybrid analysis",
   "新闻与社媒持续归档；规则模型处理全部数据，LLM 只复核高互动、高风险、跨语言或判断不明确的内容，最后由报告 Agent 汇总为可核验结论。": "News and social content are continuously archived. Rule-based models process all data; the LLM reviews only high-engagement, high-risk, cross-language or ambiguous items, and the report agent produces traceable findings.",
   "采集完整度与漏收诊断": "Collection completeness and missed-result diagnostics",
+  "最近批次已返回": "Latest batch returned",
+  "系统保留各平台最近一轮搜索的候选去向。这里可以区分“平台没有返回”“被品牌规则过滤”“已经归档过”和“成功新增”，避免把接口失败误认为没有新闻。": "The system retains the disposition of candidates from each platform's latest search. This distinguishes no platform response, brand-rule filtering, existing archive records and successful additions, so an API failure is not mistaken for no news.",
+  "接口返回候选": "API candidates returned",
+  "新增档案": "New archive records",
   "接口候选": "API candidates",
   "实际收录": "Archived",
   "重复内容": "Duplicates",
@@ -288,6 +321,8 @@ const ENGLISH: Record<string, string> = {
   "Meta / TikTok 官方接口": "Meta / TikTok official APIs",
   "可选配置": "Optional",
   "已加入成员": "Members",
+  "成员登录后直接读取同一品牌配置、历史档案、事件聚类、传播链路、评论分析和连接器采集结果，无需重新配置或重新跑流程。": "Members can access the same brand settings, archive, event clusters, propagation paths, comment analysis and connector results immediately after signing in, without reconfiguring or rerunning the workflow.",
+  "每行一个邮箱。必须与同事登录 ChatGPT 时使用的邮箱一致。": "Enter one email per line. It must match the email your colleague uses to sign in to ChatGPT.",
   "你的权限": "Your role",
   "邀请同事邮箱": "Invite colleagues by email",
   "加入后的权限": "Role after joining",
@@ -439,6 +474,9 @@ const ENGLISH: Record<string, string> = {
   "部分帖子待核验": "Some posts need review",
   "当前队列已完成": "Current queue completed",
   "等待建立帖子目标": "Waiting to create post targets",
+  "数据生成于": "Data generated",
+  "当前公开评论正文样本不足，受众态度不能仅根据平台披露的评论总数推断。": "There is not enough collected public comment text to assess audience attitudes. Platform-reported comment totals alone are not evidence of sentiment.",
+  "建议继续观察香港和网页新闻的声量变化，在形成异常峰值时回到事件传播页核验来源。": "Continue monitoring volume changes in Hong Kong and web news. If an abnormal peak appears, verify the source on the propagation page.",
   "整体平稳": "Stable overall",
   "需要关注": "Requires attention",
   "需要处理": "Action required",
@@ -485,14 +523,69 @@ const ENGLISH: Record<string, string> = {
 };
 
 const EMBEDDED = Object.entries(ENGLISH)
-  .filter(([source]) => source.length >= 6)
+  .filter(([source]) => source.length >= 2)
   .sort(([a], [b]) => b.length - a.length);
 
 const ORIGINAL_TEXT = new WeakMap<Text, string>();
 const ORIGINAL_ATTRIBUTES = new WeakMap<Element, Map<string, string>>();
+const DYNAMIC_CACHE_KEY = "somnia-media-dynamic-en-us";
+const DYNAMIC_ENGLISH = new Map<string, string>();
+const DYNAMIC_PENDING = new Set<string>();
+const NON_ENGLISH_SCRIPT = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|\p{Script=Thai}|\p{Script=Cyrillic}|\p{Script=Arabic}|\p{Script=Hebrew}|\p{Script=Devanagari}/u;
+let dynamicLoaded = false;
+let dynamicTimer: number | undefined;
+let dynamicInFlight = false;
+
+function loadDynamicTranslations() {
+  if (dynamicLoaded || typeof window === "undefined") return;
+  dynamicLoaded = true;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DYNAMIC_CACHE_KEY) || "{}") as Record<string, string>;
+    Object.entries(parsed).slice(-400).forEach(([source, translated]) => DYNAMIC_ENGLISH.set(source, translated));
+  } catch { /* an invalid local cache is safe to ignore */ }
+}
+
+function saveDynamicTranslations() {
+  try { window.localStorage.setItem(DYNAMIC_CACHE_KEY, JSON.stringify(Object.fromEntries([...DYNAMIC_ENGLISH].slice(-400)))); }
+  catch { /* local preferences can fail in private browsing */ }
+}
+
+async function flushDynamicTranslations() {
+  if (dynamicInFlight || !DYNAMIC_PENDING.size || document.documentElement.lang !== "en") return;
+  dynamicInFlight = true;
+  const texts = [...DYNAMIC_PENDING].slice(0, 16);
+  texts.forEach((text) => DYNAMIC_PENDING.delete(text));
+  try {
+    const response = await fetch("/api/ui-translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ texts }) });
+    const payload = await response.json().catch(() => ({})) as { translations?: Record<string, string> };
+    for (const text of texts) DYNAMIC_ENGLISH.set(text, payload.translations?.[text] || "Translation is temporarily unavailable.");
+  } catch {
+    for (const text of texts) DYNAMIC_ENGLISH.set(text, "Translation is temporarily unavailable.");
+  } finally {
+    dynamicInFlight = false;
+    saveDynamicTranslations();
+    if (document.documentElement.lang === "en") applyLanguage(document.body, "en");
+    if (DYNAMIC_PENDING.size) dynamicTimer = window.setTimeout(() => void flushDynamicTranslations(), 180);
+  }
+}
+
+function queueDynamicTranslation(source: string) {
+  loadDynamicTranslations();
+  if (DYNAMIC_ENGLISH.has(source) || DYNAMIC_PENDING.has(source) || source.length > 2_000) return;
+  DYNAMIC_PENDING.add(source);
+  if (dynamicTimer) window.clearTimeout(dynamicTimer);
+  dynamicTimer = window.setTimeout(() => void flushDynamicTranslations(), 120);
+}
 
 function translateDynamic(value: string) {
   return value
+    .replace(/^(\d+) 小时 \/ 每日$/, "$1 hours / daily")
+    .replace(/^每 (\d+) 小时$/, "Every $1 hours")
+    .replace(/^活跃 (\d+)h \/ 探测 (\d+)h$/, "Active $1h / discovery $2h")
+    .replace(/^(\d+) \/ (\d+) 条已归档 · (\d+)%$/, "$1 / $2 archived · $3%")
+    .replace(/^共 (\d+) 条 · 第 (\d+) \/ (\d+) 页$/, "$1 items · Page $2 of $3")
+    .replace(/^已请求 (\d+) 页 · 失败 (\d+) 次$/, "$1 pages requested · $2 failures")
+    .replace(/^过去 (\d+) 天$/, "Past $1 days")
     .replace(/^(\d+) 分钟前$/, "$1 minutes ago")
     .replace(/^(\d+) 小时前$/, "$1 hours ago")
     .replace(/^(\d+) 天前$/, "$1 days ago")
@@ -502,6 +595,7 @@ function translateDynamic(value: string) {
     .replace(/^(\d+) 位成员$/, "$1 members")
     .replace(/^(\d+) 人$/, "$1 people")
     .replace(/^(\d+) 个媒体来源$/, "$1 media sources")
+    .replace(/^(\d+) 个$/, "$1")
     .replace(/^(\d+) 条归档$/, "$1 archived items")
     .replace(/^(\d+) 篇报道$/, "$1 articles")
     .replace(/^(\d+) 条$/, "$1 items")
@@ -528,12 +622,17 @@ export function translateUiText(value: string) {
   if (translated === core && /[\u3400-\u9fff]/.test(core)) {
     for (const [source, target] of EMBEDDED) translated = translated.replaceAll(source, target);
   }
+  if (NON_ENGLISH_SCRIPT.test(translated)) {
+    loadDynamicTranslations();
+    queueDynamicTranslation(core);
+    translated = DYNAMIC_ENGLISH.get(core) ?? "Translating into American English…";
+  }
   return `${leading}${translated}${trailing}`;
 }
 
 function shouldSkip(node: Text) {
   const parent = node.parentElement;
-  return Boolean(parent?.closest("[data-no-ui-translate], .english-translation, script, style"));
+  return Boolean(parent?.closest("[data-no-ui-translate], script, style"));
 }
 
 function applyLanguage(root: ParentNode, language: UiLanguage) {
@@ -542,7 +641,7 @@ function applyLanguage(root: ParentNode, language: UiLanguage) {
   while (node) {
     if (!shouldSkip(node)) {
       if (language === "en") {
-        if (/[\u3400-\u9fff]/.test(node.data)) ORIGINAL_TEXT.set(node, node.data);
+        if (NON_ENGLISH_SCRIPT.test(node.data)) ORIGINAL_TEXT.set(node, node.data);
         const original = ORIGINAL_TEXT.get(node) ?? node.data;
         const next = translateUiText(original);
         if (next !== node.data) node.data = next;
@@ -560,7 +659,7 @@ function applyLanguage(root: ParentNode, language: UiLanguage) {
       const current = element.getAttribute(attribute);
       if (!current) continue;
       if (language === "en") {
-        if (/[\u3400-\u9fff]/.test(current)) saved.set(attribute, current);
+        if (NON_ENGLISH_SCRIPT.test(current)) saved.set(attribute, current);
         const next = translateUiText(saved.get(attribute) ?? current);
         if (next !== current) element.setAttribute(attribute, next);
       } else if (saved.has(attribute)) element.setAttribute(attribute, saved.get(attribute)!);
@@ -576,17 +675,15 @@ export function useInterfaceLanguage() {
     catch { return "zh"; }
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.lang = language === "en" ? "en" : "zh-CN";
     try { window.localStorage.setItem(STORAGE_KEY, language); } catch { /* local preferences can fail in private browsing */ }
-    let scheduled = false;
+    let applying = false;
     const refresh = () => {
-      if (scheduled) return;
-      scheduled = true;
-      window.requestAnimationFrame(() => {
-        scheduled = false;
-        applyLanguage(document.body, language);
-      });
+      if (applying) return;
+      applying = true;
+      applyLanguage(document.body, language);
+      window.queueMicrotask(() => { applying = false; });
     };
     refresh();
     const observer = new MutationObserver(refresh);
@@ -597,6 +694,7 @@ export function useInterfaceLanguage() {
   function setLanguage(next: UiLanguage) {
     document.documentElement.lang = next === "en" ? "en" : "zh-CN";
     try { window.localStorage.setItem(STORAGE_KEY, next); } catch { /* local preferences can fail in private browsing */ }
+    applyLanguage(document.body, next);
     setLanguageState(next);
   }
   return { language, setLanguage };
