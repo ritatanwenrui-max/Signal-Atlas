@@ -24,6 +24,11 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /world-map-flat\.svg/);
   assert.doesNotMatch(page, /world-map-detailed\.svg/);
   assert.match(page, /map-zoom-controls/);
+  assert.match(page, /WorldHeatMap countries=\{data\.analytics\.countries\} uiLanguage=\{uiLanguage\}/);
+  assert.match(page, /world-map-wrap" data-no-ui-translate/);
+  assert.match(page, /Lower coverage/);
+  assert.match(page, /Highest coverage/);
+  assert.match(page, /tooltip\.count === 1 \? "article" : "articles"/);
   assert.match(page, /map-data-tooltip/);
   assert.match(page, /smallRegionAnchors/);
   assert.match(page, /HK: \{ x: 680\.5, y: 463\.5 \}/);
@@ -534,7 +539,7 @@ test("English mode contains no Chinese fallback and translates workspace content
     source("app/page.tsx"), source("app/ui-language.ts"), source("app/api/ui-translate/route.ts"),
     source("db/translation.ts"), source("app/report-view.tsx"), source("app/api/comments/route.ts"),
   ]);
-  assert.match(uiLanguage, /Translating into American English/);
+  assert.match(uiLanguage, /translated = usableAmericanEnglish\(cached\) \? cached! : ""/);
   assert.match(uiLanguage, /Translation is temporarily unavailable/);
   assert.match(uiLanguage, /fetch\("\/api\/ui-translate"/);
   assert.match(uiLanguage, /useAmericanEnglishBatch/);

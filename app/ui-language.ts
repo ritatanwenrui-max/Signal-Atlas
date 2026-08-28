@@ -626,7 +626,8 @@ export function translateUiText(value: string) {
   if (NON_ENGLISH_SCRIPT.test(translated)) {
     loadDynamicTranslations();
     queueDynamicTranslation(core);
-    translated = DYNAMIC_ENGLISH.get(core) ?? "Translating into American English…";
+    const cached = DYNAMIC_ENGLISH.get(core);
+    translated = usableAmericanEnglish(cached) ? cached! : "";
   }
   return `${leading}${translated}${trailing}`;
 }

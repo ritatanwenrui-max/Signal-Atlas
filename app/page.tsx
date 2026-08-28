@@ -447,7 +447,7 @@ function Overview({ data, brand, clusters, alerts, setView, selectCluster, ackno
       <Metric label="免费媒体来源" value={String(data.mediaSources.length)} note="自动增长的追踪来源库" />
     </section>
     <div className="overview-grid">
-      <section className="surface map-panel"><div className="section-head"><div><p className="eyebrow">GLOBAL NEWS INTENSITY</p><h3>全球报道热力分布</h3></div><button className="text-button" onClick={() => setView("analytics")}>查看完整分析 →</button></div><WorldHeatMap countries={data.analytics.countries} /></section>
+      <section className="surface map-panel"><div className="section-head"><div><p className="eyebrow">GLOBAL NEWS INTENSITY</p><h3>全球报道热力分布</h3></div><button className="text-button" onClick={() => setView("analytics")}>查看完整分析 →</button></div><WorldHeatMap countries={data.analytics.countries} uiLanguage={uiLanguage} /></section>
       <section className="surface recent-panel"><div className="section-head"><div><p className="eyebrow">LATEST ARCHIVE</p><h3>最新归档新闻</h3></div><button className="text-button" onClick={() => setView("archive")}>全部档案 →</button></div><div className="latest-list">{data.mentions.slice(0, 6).map((item) => <article key={item.id}><span className={`tone-dot ${sentimentClass(item.sentiment)}`} /><div><a href={item.url} target="_blank" rel="noreferrer">{translatedMentionCopy(item, uiLanguage).title}</a><small>{item.source} · {item.source_country} · {formatDate(item.published_at)}</small></div><b className={`risk-pill ${riskClass(item.risk)}`}>{item.risk}</b></article>)}</div></section>
       <section className="surface event-panel"><div className="section-head"><div><p className="eyebrow">PROPAGATION EVENTS</p><h3>正在扩散的报道链路</h3></div><span className="count-chip">{clusters.length}</span></div><div className="event-list">{clusters.slice(0, 5).map((cluster, index) => <button key={cluster.key} onClick={() => selectCluster(cluster.key)}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{translatedMentionCopy(cluster.items[0], uiLanguage).title}</strong><small>起点：{cluster.originCountry} · 覆盖 {cluster.countries.length} 个地区 · {cluster.items.length} 个节点</small></div><b>{cluster.items.length}</b><i>→</i></button>)}</div></section>
       <section className="surface alerts-panel"><div className="section-head"><div><p className="eyebrow">ACTION QUEUE</p><h3>舆情告警</h3></div><span className="count-chip">{alerts.length}</span></div>{alerts.length ? <div className="alert-list">{alerts.slice(0, 4).map((alert) => <article key={alert.id}><div><span className={`severity ${alert.severity.toLowerCase()}`}>{alert.severity}</span><small>{alert.country}</small></div><h4>{alert.title}</h4><p>{alert.reason}</p>{canEdit && <button onClick={() => void acknowledge(alert.id)}>标记已处理</button>}</article>)}</div> : <div className="empty-mini">当前没有待处理高风险信号</div>}</section>
@@ -457,13 +457,20 @@ function Overview({ data, brand, clusters, alerts, setView, selectCluster, ackno
 
 function Metric({ label, value, note, danger = false }: { label: string; value: string; note: string; danger?: boolean }) { return <article className={danger ? "metric danger" : "metric"}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>; }
 
-function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
+function WorldHeatMap({ countries, uiLanguage }: { countries: CountryStat[]; uiLanguage: UiLanguage }) {
   const max = Math.max(1, ...countries.map((item) => item.count));
   const mapRef = useRef<HTMLObjectElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [tooltip, setTooltip] = useState<{ country: string; count: number; x: number; y: number } | null>(null);
   const placed = countries.filter((item) => /^[A-Z]{2}$/.test(countryCode[item.country] ?? ""));
+  const countryLabel = (country: string) => {
+    if (uiLanguage !== "en") return country;
+    const code = countryCode[country];
+    if (!code || code === "??" || code === "GL" || code === "ZH") return country === "全球" ? "Global" : "Unknown region";
+    try { return new Intl.DisplayNames(["en-US"], { type: "region" }).of(code) ?? country; }
+    catch { return country; }
+  };
   function changeZoom(next: number) {
     const viewport = viewportRef.current;
     const bounded = Math.min(5, Math.max(1, Math.round(next * 2) / 2));
@@ -520,15 +527,18 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
       interactiveNode.style.cursor = "pointer";
       interactiveNode.setAttribute("tabindex", "0");
       interactiveNode.setAttribute("role", "button");
-      interactiveNode.setAttribute("aria-label", `${item.country}，${item.count} 篇报道`);
+      const accessibleLabel = uiLanguage === "en"
+        ? `${countryLabel(item.country)}, ${item.count} ${item.count === 1 ? "article" : "articles"}`
+        : `${item.country}，${item.count} 篇报道`;
+      interactiveNode.setAttribute("aria-label", accessibleLabel);
       const nativeTitle = [...interactiveNode.children].find((child) => child.tagName.toLowerCase() === "title");
-      if (nativeTitle) nativeTitle.textContent = `${item.country}：${item.count} 篇报道`;
+      if (nativeTitle) nativeTitle.textContent = accessibleLabel;
       const show = (event: PointerEvent | MouseEvent | FocusEvent) => {
         const mouse = "clientX" in event && event.clientX > 0;
         const screenBounds = interactiveNode!.getBoundingClientRect();
         const x = mouse ? event.clientX : screenBounds.left + screenBounds.width / 2;
         const y = mouse ? event.clientY : screenBounds.top + screenBounds.height / 2;
-        setTooltip({ country: item.country, count: item.count, x: Math.min(window.innerWidth - 180, x + 14), y: Math.max(12, y - 12) });
+        setTooltip({ country: countryLabel(item.country), count: item.count, x: Math.min(window.innerWidth - 180, x + 14), y: Math.max(12, y - 12) });
       };
       interactiveNode.onpointerenter = show;
       interactiveNode.onpointermove = show;
@@ -538,18 +548,18 @@ function WorldHeatMap({ countries }: { countries: CountryStat[] }) {
     }
   }
   useEffect(() => { paintCountries(); });
-  return <div className="world-map-wrap">
-    <div className="map-zoom-controls" aria-label="地图缩放控件"><button type="button" aria-label="放大地图" onClick={() => changeZoom(zoom + .5)}>＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label="缩小地图" disabled={zoom <= 1} onClick={() => changeZoom(zoom - .5)}>−</button><button type="button" onClick={() => changeZoom(1)}>重置</button></div>
-    <div ref={viewportRef} className="world-map" aria-label="按国家地区显示新闻量的世界热力图" onDoubleClick={() => changeZoom(zoom + .5)} onWheel={(event) => { event.preventDefault(); changeZoom(zoom + (event.deltaY < 0 ? .5 : -.5)); }}>
+  return <div className="world-map-wrap" data-no-ui-translate>
+    <div className="map-zoom-controls" aria-label={uiLanguage === "en" ? "Map zoom controls" : "地图缩放控件"}><button type="button" aria-label={uiLanguage === "en" ? "Zoom in" : "放大地图"} onClick={() => changeZoom(zoom + .5)}>＋</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label={uiLanguage === "en" ? "Zoom out" : "缩小地图"} disabled={zoom <= 1} onClick={() => changeZoom(zoom - .5)}>−</button><button type="button" onClick={() => changeZoom(1)}>{uiLanguage === "en" ? "Reset" : "重置"}</button></div>
+    <div ref={viewportRef} className="world-map" aria-label={uiLanguage === "en" ? "World heat map of archived coverage by country and region" : "按国家地区显示新闻量的世界热力图"} onDoubleClick={() => changeZoom(zoom + .5)} onWheel={(event) => { event.preventDefault(); changeZoom(zoom + (event.deltaY < 0 ? .5 : -.5)); }}>
       <div className="world-map-canvas" style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}>
-        <object ref={mapRef} className="world-map-base" data="/world-map-flat.svg" type="image/svg+xml" aria-label="矩形平面展开的国家边界与报道强度" onLoad={paintCountries} />
+        <object ref={mapRef} className="world-map-base" data="/world-map-flat.svg" type="image/svg+xml" aria-label={uiLanguage === "en" ? "Flat world map with country boundaries and coverage intensity" : "矩形平面展开的国家边界与报道强度"} onLoad={paintCountries} />
       </div>
     </div>
-    {tooltip && <div className="map-data-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.country}</strong><span>{tooltip.count.toLocaleString()} 篇报道</span></div>}
-    <p className="map-usage-hint">悬停查看地区数据 · 滚轮、双击或按钮缩放 · 放大后拖动滚动条定位小区域</p>
-    <div className="heat-legend"><span>报道较少</span><i /><i /><i /><i /><span>报道最多</span></div>
-    <span className="map-attribution">矩形平面展开 · 支持缩放</span>
-    {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{item.country} <b>{item.count}</b></span>)}</div>}
+    {tooltip && <div className="map-data-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.country}</strong><span>{uiLanguage === "en" ? `${tooltip.count.toLocaleString("en-US")} ${tooltip.count === 1 ? "article" : "articles"}` : `${tooltip.count.toLocaleString()} 篇报道`}</span></div>}
+    <p className="map-usage-hint">{uiLanguage === "en" ? "Hover for regional data · Use the wheel, double-click, or buttons to zoom · Scroll to locate small regions" : "悬停查看地区数据 · 滚轮、双击或按钮缩放 · 放大后拖动滚动条定位小区域"}</p>
+    <div className="heat-legend"><span>{uiLanguage === "en" ? "Lower coverage" : "报道较少"}</span><i /><i /><i /><i /><span>{uiLanguage === "en" ? "Highest coverage" : "报道最多"}</span></div>
+    <span className="map-attribution">{uiLanguage === "en" ? "Flat projection · Zoom supported" : "矩形平面展开 · 支持缩放"}</span>
+    {countries.length > placed.length && <div className="unmapped-regions">{countries.filter((item) => !placed.includes(item)).slice(0, 6).map((item) => <span key={item.country}>{countryLabel(item.country)} <b>{item.count}</b></span>)}</div>}
   </div>;
 }
 
