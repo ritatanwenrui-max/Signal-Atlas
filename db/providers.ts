@@ -15,7 +15,7 @@ export type MonitoringCandidate = {
   relation: string;
   author?: string;
   provider?: string;
-  discoveredVia?: "global_discovery" | "free_crawler" | "official_api" | "monid_public_search" | "manual";
+  discoveredVia?: "global_discovery" | "free_crawler" | "official_api" | "monid_public_search" | "third_party_social_search" | "manual";
   socialMetrics?: {
     postId: string;
     authorId: string;
@@ -68,6 +68,7 @@ type WorldNewsArticle = {
   authors?: string[]; language?: string; source_country?: string; sentiment?: number; news_site?: string;
 };
 type WorldNewsPayload = { offset?: number; number?: number; available?: number; news?: WorldNewsArticle[]; message?: string };
+type SearchResult = { title?: string; url?: string; link?: string; description?: string; snippet?: string; page_age?: string; date?: string; source?: string; display_link?: string };
 type XUser = { id: string; username?: string; name?: string; location?: string };
 type XPlace = { id: string; country?: string; country_code?: string; full_name?: string };
 type XPost = {
@@ -237,6 +238,193 @@ function compactBooleanQuery(terms: string[], maxLength = 96) {
 function sourceNameFromUrl(url: string, fallback = "公开媒体") {
   if (fallback.trim()) return fallback.trim();
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "公开媒体"; }
+}
+
+const socialHostPlatforms: Array<[RegExp, MonitoringCandidate["platform"]]> = [
+  [/(^|\.)instagram\.com$/i, "Instagram"], [/(^|\.)tiktok\.com$/i, "TikTok"],
+  [/(^|\.)(x|twitter)\.com$/i, "X"], [/(^|\.)facebook\.com$/i, "Facebook"],
+  [/(^|\.)reddit\.com$/i, "Reddit"], [/(^|\.)(youtube\.com|youtu\.be)$/i, "YouTube"],
+];
+
+function socialPlatformFromUrl(value: string) {
+  try {
+    const host = new URL(value).hostname.replace(/^www\./, "");
+    return socialHostPlatforms.find(([pattern]) => pattern.test(host))?.[1] ?? null;
+  } catch { return null; }
+}
+
+function numberFrom(value: unknown) {
+  const number = Number(typeof value === "string" ? value.replaceAll(",", "") : value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function valueAt(record: Record<string, unknown>, paths: string[]) {
+  for (const path of paths) {
+    let value: unknown = record;
+    for (const key of path.split(".")) value = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function stringAt(record: Record<string, unknown>, paths: string[]) {
+  const value = valueAt(record, paths);
+  return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+}
+
+function dateAt(record: Record<string, unknown>) {
+  const value = valueAt(record, ["publishedAt", "published_at", "created_at", "create_time", "timestamp", "taken_at", "date"]);
+  if (typeof value === "number" || (typeof value === "string" && /^\d{10,13}$/.test(value))) {
+    const raw = Number(value); return new Date(raw < 10_000_000_000 ? raw * 1000 : raw).toISOString();
+  }
+  return isoDate(typeof value === "string" ? value : undefined);
+}
+
+function collectObjectRecords(value: unknown, output: Record<string, unknown>[] = [], depth = 0) {
+  if (depth > 5 || output.length >= 300 || value == null) return output;
+  if (Array.isArray(value)) {
+    for (const item of value) collectObjectRecords(item, output, depth + 1);
+    return output;
+  }
+  if (typeof value !== "object") return output;
+  const record = value as Record<string, unknown>;
+  const url = stringAt(record, ["url", "link", "permalink", "webVideoUrl", "share_url", "web_url"]);
+  const text = stringAt(record, ["title", "caption", "desc", "description", "text"]);
+  if (url || text) output.push(record);
+  for (const nested of Object.values(record)) if (typeof nested === "object") collectObjectRecords(nested, output, depth + 1);
+  return output;
+}
+
+function candidateFromSearchResult(item: SearchResult, provider: string): MonitoringCandidate | null {
+  const url = item.url ?? item.link ?? "";
+  const platform = socialPlatformFromUrl(url);
+  if (!url || !platform) return null;
+  const source = item.source || (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return platform; } })();
+  return {
+    title: (item.title || item.description || item.snippet || `${platform} 公开内容`).trim(), url, source, platform,
+    sourceCountry: "地区待确认", language: "自动识别", publishedAt: isoDate(item.page_age ?? item.date), engagement: 0,
+    discussionText: [item.description ?? "", item.snippet ?? ""].join(" "), commentsAnalyzed: 0,
+    parentUrl: "", relation: "搜索索引发现", author: source, provider, discoveredVia: "third_party_social_search",
+    socialMetrics: { postId: url, authorId: "", authorUsername: "", authorName: source, followerCount: 0,
+      likes: 0, comments: 0, shares: 0, views: 0, plays: 0, matchedTerms: [] },
+  };
+}
+
+function compactSocialQuery(terms: string[]) {
+  return terms.slice(0, 4).map((term) => /\s|[^\x00-\x7F]/.test(term) ? `"${term.replaceAll('"', "")}"` : term).join(" OR ");
+}
+
+function groupedSocialQueries(terms: string[]) {
+  const brand = compactSocialQuery(terms);
+  return [
+    `(${brand}) (site:instagram.com OR site:tiktok.com)`,
+    `(${brand}) (site:x.com OR site:twitter.com OR site:facebook.com)`,
+    `(${brand}) (site:reddit.com OR site:youtube.com OR site:youtu.be)`,
+  ];
+}
+
+export async function fetchScrapeCreators(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.SCRAPECREATORS_API_KEY;
+  if (!apiKey) return [];
+  const query = terms.find((term) => term.trim().length >= 3)?.trim() ?? terms[0] ?? "";
+  if (!query) return [];
+  const endpoints = [
+    { platform: "Instagram" as const, url: new URL("https://api.scrapecreators.com/v2/instagram/reels/search") },
+    { platform: "TikTok" as const, url: new URL("https://api.scrapecreators.com/v1/tiktok/search/keyword") },
+  ];
+  endpoints[0].url.searchParams.set("query", query); endpoints[0].url.searchParams.set("date_posted", "last-month"); endpoints[0].url.searchParams.set("page", "1");
+  endpoints[1].url.searchParams.set("query", query); endpoints[1].url.searchParams.set("date_posted", "this-month"); endpoints[1].url.searchParams.set("sort_by", "date-posted"); endpoints[1].url.searchParams.set("trim", "true");
+  const settled = await Promise.allSettled(endpoints.map(async ({ platform, url }) => {
+    const response = await fetch(url, { headers: { Accept: "application/json", "x-api-key": apiKey }, signal: AbortSignal.timeout(25_000) });
+    if (!response.ok) throw new ProviderRequestError("ScrapeCreators", response.status, retryAfterMs(response), `ScrapeCreators ${platform} HTTP ${response.status}`);
+    return { platform, payload: await response.json() as unknown };
+  }));
+  const failures = settled.filter((item): item is PromiseRejectedResult => item.status === "rejected");
+  if (failures.length === settled.length) throw failures[0].reason;
+  const candidates: MonitoringCandidate[] = [];
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    for (const record of collectObjectRecords(result.value.payload)) {
+      let url = stringAt(record, ["url", "link", "permalink", "webVideoUrl", "share_url", "web_url"]);
+      const id = stringAt(record, ["id", "pk", "shortcode", "code", "aweme_id"]);
+      const username = stringAt(record, ["username", "author.unique_id", "author.uniqueId", "author.username", "owner.username", "user.username"]);
+      if (!url && result.value.platform === "Instagram" && id) url = `https://www.instagram.com/reel/${id}/`;
+      if (!url && result.value.platform === "TikTok" && id) url = `https://www.tiktok.com/@${username || "i"}/video/${id}`;
+      if (!url || (socialPlatformFromUrl(url) ?? result.value.platform) !== result.value.platform) continue;
+      const text = stringAt(record, ["caption", "desc", "description", "text", "title"]);
+      if (!text) continue;
+      const likes = numberFrom(valueAt(record, ["like_count", "likes", "digg_count", "stats.digg_count", "statistics.like_count"]));
+      const comments = numberFrom(valueAt(record, ["comment_count", "comments", "stats.comment_count", "statistics.comment_count"]));
+      const shares = numberFrom(valueAt(record, ["share_count", "shares", "stats.share_count", "statistics.share_count"]));
+      const views = numberFrom(valueAt(record, ["view_count", "views", "play_count", "stats.play_count", "statistics.play_count"]));
+      candidates.push({
+        title: text.slice(0, 500), url, source: username ? `@${username}` : result.value.platform, platform: result.value.platform,
+        sourceCountry: "地区待确认", language: "自动识别", publishedAt: dateAt(record), engagement: likes + comments + shares,
+        discussionText: text, commentsAnalyzed: 0, parentUrl: "", relation: "平台关键词发现", author: username,
+        provider: "ScrapeCreators", discoveredVia: "third_party_social_search",
+        socialMetrics: { postId: id, authorId: stringAt(record, ["author.id", "author.uid", "owner.id", "user.pk"]), authorUsername: username,
+          authorName: stringAt(record, ["author.nickname", "author.name", "owner.full_name", "user.full_name"]),
+          followerCount: numberFrom(valueAt(record, ["author.follower_count", "author.stats.followerCount", "owner.follower_count"])),
+          likes, comments, shares, views, plays: views, matchedTerms: [query] },
+      });
+    }
+  }
+  return [...new Map(candidates.map((item) => [item.url, item])).values()];
+}
+
+export async function fetchBraveSocialSearch(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) return [];
+  const responses = await Promise.all(groupedSocialQueries(terms).map(async (query) => {
+    const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
+    endpoint.searchParams.set("q", query); endpoint.searchParams.set("count", "20"); endpoint.searchParams.set("freshness", "pm");
+    endpoint.searchParams.set("safesearch", "moderate"); endpoint.searchParams.set("search_lang", "en");
+    const response = await fetch(endpoint, { headers: { Accept: "application/json", "X-Subscription-Token": apiKey }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new ProviderRequestError("Brave Search", response.status, retryAfterMs(response), `Brave Search HTTP ${response.status}`);
+    const payload = await response.json() as { web?: { results?: SearchResult[] } };
+    return payload.web?.results ?? [];
+  }));
+  return responses.flat().flatMap((item) => { const candidate = candidateFromSearchResult(item, "Brave Search"); return candidate ? [candidate] : []; });
+}
+
+export async function fetchApifySocialSearch(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const token = credential ?? env.APIFY_API_TOKEN;
+  if (!token) return [];
+  const endpoint = new URL("https://api.apify.com/v2/acts/apify~google-search-scraper/run-sync-get-dataset-items");
+  endpoint.searchParams.set("token", token); endpoint.searchParams.set("timeout", "90");
+  const response = await fetch(endpoint, {
+    method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ queries: groupedSocialQueries(terms).join("\n"), maxPagesPerQuery: 1, resultsPerPage: 20,
+      mobileResults: false, languageCode: "en", countryCode: "us", includeUnfilteredResults: false, saveHtml: false }),
+    signal: AbortSignal.timeout(100_000),
+  });
+  if (!response.ok) throw new ProviderRequestError("Apify", response.status, retryAfterMs(response), `Apify HTTP ${response.status}`);
+  const payload = await response.json() as unknown;
+  return collectObjectRecords(payload).flatMap((record) => {
+    const result: SearchResult = { title: stringAt(record, ["title"]), url: stringAt(record, ["url", "link"]),
+      description: stringAt(record, ["description", "snippet"]), date: stringAt(record, ["date", "publishedAt"]), source: stringAt(record, ["source", "displayLink"]) };
+    const candidate = candidateFromSearchResult(result, "Apify"); return candidate ? [candidate] : [];
+  });
+}
+
+export async function fetchBrightDataSocialSearch(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const stored = credential ?? (env.BRIGHTDATA_API_KEY ? JSON.stringify({ token: env.BRIGHTDATA_API_KEY, zone: env.BRIGHTDATA_SERP_ZONE || "" }) : "");
+  if (!stored) return [];
+  let token = stored; let zone = "";
+  try { const parsed = JSON.parse(stored) as { token?: string; zone?: string }; token = parsed.token ?? ""; zone = parsed.zone ?? ""; } catch { /* legacy raw token */ }
+  if (!token || !zone) throw new Error("Bright Data: 需要同时配置 API Key 与 SERP Zone");
+  const query = groupedSocialQueries(terms).join(" OR ");
+  const target = new URL("https://www.google.com/search"); target.searchParams.set("q", query); target.searchParams.set("hl", "en"); target.searchParams.set("gl", "us");
+  const response = await fetch("https://api.brightdata.com/request", {
+    method: "POST", headers: { Accept: "application/json", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ zone, url: target.toString(), format: "raw", data_format: "parsed_light", method: "GET", country: "us" }),
+    signal: AbortSignal.timeout(35_000),
+  });
+  if (!response.ok) throw new ProviderRequestError("Bright Data", response.status, retryAfterMs(response), `Bright Data HTTP ${response.status}`);
+  const payload = await response.json() as { organic?: Array<{ link?: string; title?: string; description?: string; source?: string }> };
+  return (payload.organic ?? []).flatMap((item) => {
+    const candidate = candidateFromSearchResult({ ...item, url: item.link }, "Bright Data"); return candidate ? [candidate] : [];
+  });
 }
 
 export async function fetchEventRegistry(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {

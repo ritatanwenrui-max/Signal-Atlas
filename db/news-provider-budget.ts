@@ -31,6 +31,26 @@ export const NEWS_PROVIDER_PLANS: Record<string, NewsProviderPlan> = {
     scheduleLabel: "每 6 小时", quotaLabel: "36 points / 日自动预算",
     rationale: "免费额度 50 points / 日；按每次搜索及返回结果预扣 2 points，保留 14 points 余量",
   },
+  "ScrapeCreators": {
+    provider: "ScrapeCreators", intervalMs: 3 * HOUR, dailyLimit: 20, unitsPerRun: 2,
+    scheduleLabel: "每 3 小时", quotaLabel: "20 credits / 日站内安全预算",
+    rationale: "每轮各运行一次 Instagram Reels 与 TikTok 关键词搜索；保留 credits 给补扫与重试",
+  },
+  "Brave Search": {
+    provider: "Brave Search", intervalMs: 6 * HOUR, dailyLimit: 16, unitsPerRun: 3,
+    scheduleLabel: "每 6 小时", quotaLabel: "16 次搜索 / 日站内安全预算",
+    rationale: "每轮按三组社交平台域名检索；保留免费月度 credits 给人工补扫",
+  },
+  "Apify": {
+    provider: "Apify", intervalMs: 12 * HOUR, dailyLimit: 2, unitsPerRun: 1,
+    scheduleLabel: "每 12 小时", quotaLabel: "2 个补全批次 / 日站内安全预算",
+    rationale: "每天最多两次 Google 索引补全，避免 Actor 计算资源被连续消耗",
+  },
+  "Bright Data": {
+    provider: "Bright Data", intervalMs: 12 * HOUR, dailyLimit: 2, unitsPerRun: 1,
+    scheduleLabel: "每 12 小时", quotaLabel: "2 个 SERP 批次 / 日站内安全预算",
+    rationale: "作为第二搜索索引补收未被其他来源发现的公开社媒页面",
+  },
 };
 
 export function quotaDay(now = new Date()) { return now.toISOString().slice(0, 10); }

@@ -627,6 +627,10 @@ export async function loadDashboardData(userId = "") {
   const mediaCloudConfigured = Boolean(env.MEDIACLOUD_API_KEY || storedCredentials.has("Media Cloud"));
   const newsDataConfigured = Boolean(env.NEWSDATA_API_KEY || storedCredentials.has("NewsData.io"));
   const worldNewsConfigured = Boolean(env.WORLD_NEWS_API_KEY || storedCredentials.has("World News API"));
+  const scrapeCreatorsConfigured = Boolean(env.SCRAPECREATORS_API_KEY || storedCredentials.has("ScrapeCreators"));
+  const braveSearchConfigured = Boolean(env.BRAVE_SEARCH_API_KEY || storedCredentials.has("Brave Search"));
+  const apifyConfigured = Boolean(env.APIFY_API_TOKEN || storedCredentials.has("Apify"));
+  const brightDataConfigured = Boolean(env.BRIGHTDATA_API_KEY || storedCredentials.has("Bright Data"));
   const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
@@ -802,11 +806,18 @@ export async function loadDashboardData(userId = "") {
       archivedTotal: mentionRows.length,
     },
     connectors: [
-      { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt },
+      { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt,
+        quotaUsed: newsQuotaByProvider.get("NewsAPI.ai")?.used ?? 0, quotaLimit: newsQuotaByProvider.get("NewsAPI.ai")?.limit ?? 48,
+        quotaRemaining: newsQuotaByProvider.get("NewsAPI.ai")?.remaining ?? 48, quotaResetAt: newsQuotaByProvider.get("NewsAPI.ai")?.resetAt ?? "",
+        scheduleLabel: newsQuotaByProvider.get("NewsAPI.ai")?.scheduleLabel ?? "每 6 小时" },
       ...[
         { id: "mediacloud", provider: "Media Cloud", configured: mediaCloudConfigured, envConfigured: Boolean(env.MEDIACLOUD_API_KEY), name: "Media Cloud 全球新闻库" },
         { id: "newsdata", provider: "NewsData.io", configured: newsDataConfigured, envConfigured: Boolean(env.NEWSDATA_API_KEY), name: "NewsData.io 多语言发现" },
         { id: "worldnews", provider: "World News API", configured: worldNewsConfigured, envConfigured: Boolean(env.WORLD_NEWS_API_KEY), name: "World News API 全球补全" },
+        { id: "scrapecreators", provider: "ScrapeCreators", configured: scrapeCreatorsConfigured, envConfigured: Boolean(env.SCRAPECREATORS_API_KEY), name: "ScrapeCreators 平台关键词发现" },
+        { id: "brave-search", provider: "Brave Search", configured: braveSearchConfigured, envConfigured: Boolean(env.BRAVE_SEARCH_API_KEY), name: "Brave 社交网页补漏" },
+        { id: "apify", provider: "Apify", configured: apifyConfigured, envConfigured: Boolean(env.APIFY_API_TOKEN), name: "Apify Google 索引补全" },
+        { id: "bright-data", provider: "Bright Data", configured: brightDataConfigured, envConfigured: Boolean(env.BRIGHTDATA_API_KEY), name: "Bright Data SERP 补全" },
       ].map((item) => {
         const quota = newsQuotaByProvider.get(item.provider)!;
         const health = healthByName.get(item.provider);

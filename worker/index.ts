@@ -12,6 +12,11 @@ interface Env {
   MEDIACLOUD_API_KEY?: string;
   NEWSDATA_API_KEY?: string;
   WORLD_NEWS_API_KEY?: string;
+  SCRAPECREATORS_API_KEY?: string;
+  BRAVE_SEARCH_API_KEY?: string;
+  APIFY_API_TOKEN?: string;
+  BRIGHTDATA_API_KEY?: string;
+  BRIGHTDATA_SERP_ZONE?: string;
   MONID_API_KEY?: string;
   CREDENTIALS_ENCRYPTION_KEY?: string;
   AZURE_TRANSLATOR_KEY?: string;

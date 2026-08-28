@@ -561,3 +561,25 @@ test("English mode contains no Chinese fallback and translates workspace content
   assert.match(report, /localizedReportWords/);
   assert.match(commentsRoute, /m\.translation_en/);
 });
+
+test("independent social discovery APIs share the brand scope, exclusion, archive, and comment pipeline", async () => {
+  const [providers, sync, credentials, budgets, repository, page] = await Promise.all([
+    source("db/providers.ts"), source("db/news-sync.ts"), source("db/credentials.ts"),
+    source("db/news-provider-budget.ts"), source("db/repository.ts"), source("app/page.tsx"),
+  ]);
+  for (const provider of ["ScrapeCreators", "Brave Search", "Apify", "Bright Data"]) {
+    assert.match(credentials, new RegExp(provider));
+    assert.match(budgets, new RegExp(provider));
+    assert.match(repository, new RegExp(provider));
+    assert.match(page, new RegExp(provider));
+  }
+  assert.match(providers, /fetchScrapeCreators/);
+  assert.match(providers, /fetchBraveSocialSearch/);
+  assert.match(providers, /fetchApifySocialSearch/);
+  assert.match(providers, /fetchBrightDataSocialSearch/);
+  assert.match(providers, /third_party_social_search/);
+  assert.match(sync, /brandScopeDecision/);
+  assert.match(sync, /命中排除词/);
+  assert.match(sync, /upsertSocialMetrics/);
+  assert.match(sync, /queueSocialCommentTarget/);
+});
