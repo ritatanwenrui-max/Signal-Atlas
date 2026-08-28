@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 
 export type UiLanguage = "zh" | "en";
 
@@ -532,6 +532,7 @@ const DYNAMIC_CACHE_KEY = "somnia-media-dynamic-en-us";
 const DYNAMIC_ENGLISH = new Map<string, string>();
 const DYNAMIC_PENDING = new Set<string>();
 const NON_ENGLISH_SCRIPT = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|\p{Script=Thai}|\p{Script=Cyrillic}|\p{Script=Arabic}|\p{Script=Hebrew}|\p{Script=Devanagari}/u;
+const TRANSLATION_UNAVAILABLE = "Translation is temporarily unavailable.";
 let dynamicLoaded = false;
 let dynamicTimer: number | undefined;
 let dynamicInFlight = false;
@@ -558,9 +559,9 @@ async function flushDynamicTranslations() {
   try {
     const response = await fetch("/api/ui-translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ texts }) });
     const payload = await response.json().catch(() => ({})) as { translations?: Record<string, string> };
-    for (const text of texts) DYNAMIC_ENGLISH.set(text, payload.translations?.[text] || "Translation is temporarily unavailable.");
+    for (const text of texts) DYNAMIC_ENGLISH.set(text, payload.translations?.[text] || TRANSLATION_UNAVAILABLE);
   } catch {
-    for (const text of texts) DYNAMIC_ENGLISH.set(text, "Translation is temporarily unavailable.");
+    for (const text of texts) DYNAMIC_ENGLISH.set(text, TRANSLATION_UNAVAILABLE);
   } finally {
     dynamicInFlight = false;
     saveDynamicTranslations();
@@ -630,6 +631,79 @@ export function translateUiText(value: string) {
   return `${leading}${translated}${trailing}`;
 }
 
+type BatchTranslationState = {
+  values: Record<string, string>;
+  loading: boolean;
+  failed: number;
+};
+
+function usableAmericanEnglish(translated: string | undefined) {
+  const value = translated?.trim() ?? "";
+  return Boolean(value && value !== TRANSLATION_UNAVAILABLE && value !== "Translating into American English…" && !NON_ENGLISH_SCRIPT.test(value));
+}
+
+/**
+ * Data-derived labels need their own translation lifecycle. The caller places
+ * them inside a data-no-ui-translate container so the global UI translator
+ * cannot replace every word-cloud term with a duplicate loading placeholder.
+ */
+export function useAmericanEnglishBatch(sources: string[], language: UiLanguage) {
+  const sourceKey = JSON.stringify([...new Set(sources.map((item) => item.trim()).filter(Boolean))]);
+  const [state, setState] = useState<BatchTranslationState>({ values: {}, loading: false, failed: 0 });
+
+  useEffect(() => {
+    const items = JSON.parse(sourceKey) as string[];
+    if (language !== "en") {
+      setState({ values: Object.fromEntries(items.map((item) => [item, item])), loading: false, failed: 0 });
+      return;
+    }
+
+    loadDynamicTranslations();
+    const initial = Object.fromEntries(items.flatMap((item) => {
+      const cached = DYNAMIC_ENGLISH.get(item);
+      if (usableAmericanEnglish(cached)) return [[item, cached!]];
+      return /^[\x20-\x7E]+$/.test(item) ? [[item, item]] : [];
+    }));
+    const pending = items.filter((item) => !usableAmericanEnglish(DYNAMIC_ENGLISH.get(item)));
+    setState({ values: initial, loading: pending.length > 0, failed: 0 });
+    if (!pending.length) return;
+
+    let cancelled = false;
+    void (async () => {
+      const translated = { ...initial };
+      let failed = 0;
+      for (let index = 0; index < pending.length; index += 16) {
+        const texts = pending.slice(index, index + 16);
+        try {
+          const response = await fetch("/api/ui-translate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ texts }),
+          });
+          if (!response.ok) throw new Error(`Translation HTTP ${response.status}`);
+          const payload = await response.json() as { translations?: Record<string, string> };
+          for (const text of texts) {
+            const value = payload.translations?.[text]?.trim();
+            if (usableAmericanEnglish(value)) {
+              translated[text] = value!;
+              DYNAMIC_ENGLISH.set(text, value!);
+            } else failed += 1;
+          }
+          if (!cancelled) setState({ values: { ...translated }, loading: index + 16 < pending.length, failed });
+        } catch {
+          failed += texts.length;
+        }
+      }
+      saveDynamicTranslations();
+      if (!cancelled) setState({ values: translated, loading: false, failed });
+    })();
+
+    return () => { cancelled = true; };
+  }, [language, sourceKey]);
+
+  return state;
+}
+
 function shouldSkip(node: Text) {
   const parent = node.parentElement;
   return Boolean(parent?.closest("[data-no-ui-translate], script, style"));
@@ -654,6 +728,7 @@ function applyLanguage(root: ParentNode, language: UiLanguage) {
   }
 
   root.querySelectorAll?.<HTMLElement>("[placeholder], [aria-label], [title]").forEach((element) => {
+    if (element.closest("[data-no-ui-translate]")) return;
     const saved = ORIGINAL_ATTRIBUTES.get(element) ?? new Map<string, string>();
     for (const attribute of ["placeholder", "aria-label", "title"]) {
       const current = element.getAttribute(attribute);

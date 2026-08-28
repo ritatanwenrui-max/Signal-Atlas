@@ -1,7 +1,7 @@
 "use client";
 
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
-import { getUiLocale, type UiLanguage } from "./ui-language";
+import { getUiLocale, type UiLanguage, useAmericanEnglishBatch } from "./ui-language";
 
 type Mention = {
   id: number; title: string; url: string; source: string; platform: string; source_country: string; sentiment: string;
@@ -246,6 +246,11 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const audienceMixedPct = pct(comments.summary.mixed, commentTotal);
   const audienceNeutralPct = pct(comments.summary.neutral, commentTotal);
   const reportWords = report.words.length ? report.words : analytics.words.slice(0, 24);
+  const reportTermTranslation = useAmericanEnglishBatch(reportWords.map((item) => item.word), uiLanguage);
+  const localizedReportWords = reportWords.flatMap((item) => {
+    const word = reportTermTranslation.values[item.word];
+    return word ? [{ ...item, word }] : [];
+  });
   const reportPages = 5 + Number(includeEvents) + Number(includeComments) + Number(includeAppendix);
   const volumeChange = rangeDays ? changeRate(report.total, previousMentions.length) : 0;
   const totalEngagement = scopedMentions.reduce((sum, item) => sum + Number(item.engagement || 0), 0) + comments.summary.likes + comments.summary.replies;
@@ -288,6 +293,22 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
   const actionSummary = aiBriefInScope && aiBrief?.recommended_actions?.length
     ? aiBrief.recommended_actions.join("；")
     : deterministicActionSummary;
+  const volumeConclusion = report.timeline.length
+    ? `本期声量最高的日期是 ${report.timeline.reduce((best, item) => item.total > best.total ? item : best, report.timeline[0]).date}；${topPlatform?.label ?? "主要渠道"}贡献 ${pct(topPlatform?.value ?? 0, report.total)}% 的内容。`
+    : "当前筛选条件下尚无可绘制的趋势数据。";
+  const eventConclusion = topEvent
+    ? `本期最大事件包含 ${topEvent.items.length} 个传播节点，最早来源为${topEvent.originCountry}的${topEvent.originSource}，随后覆盖 ${topEvent.countries.length} 个地区。`
+    : "本期尚未形成满足聚类条件的传播事件。";
+  const contentConclusion = `本期 ${report.total} 条内容中，${report.sentiment.positive} 条正面、${report.sentiment.negative} 条负面、${report.sentiment.mixed} 条态度混合。${topEmotion ? `最常见的具体表达是“${topEmotion.label}”，出现 ${topEmotion.value} 次。` : "具体情绪样本仍不足。"}`;
+  const regionConclusion = topCountry
+    ? `${topCountry.country}是本期报道最集中的地区，占全部内容的 ${pct(topCountry.count, report.total)}%。${topAudienceRegion ? `${topAudienceRegion.region}归档了 ${topAudienceRegion.total} 条评论，其中 ${topAudienceRegion.positive} 条正面、${topAudienceRegion.negative} 条负面，主要讨论“${topAudienceRegion.topTopic || "待归纳"}”。` : "评论地区样本不足，暂不能比较不同文化地区的反应。"}`
+    : "当前缺少可确认的媒体发布地区。";
+  const reportCopyTranslation = useAmericanEnglishBatch([
+    executiveSummary, interpretation, actionSummary, volumeConclusion, eventConclusion, contentConclusion, regionConclusion,
+  ], uiLanguage);
+  const reportCopy = (source: string) => uiLanguage === "zh"
+    ? source
+    : reportCopyTranslation.values[source] ?? (reportCopyTranslation.loading ? "Translating report insight…" : "This insight could not be translated.");
 
   async function exportPdf() {
     const root = reportRef.current; if (!root || exporting) return;
@@ -324,8 +345,8 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
     <div className="report-dashboard">
       <section className={`surface report-executive ${statusTone}`}>
         <div className="report-executive-heading"><div><p className="eyebrow">EXECUTIVE SUMMARY</p><h2>本期综合判断</h2></div><div className={`report-status ${statusTone}`}><span>当前状态</span><strong>{riskStatus}</strong></div></div>
-        <p className="report-lead">{executiveSummary}</p>
-        <div className="report-judgement-grid"><article><span>数据解释</span><p>{interpretation}</p></article><article><span>建议动作</span><p>{actionSummary}</p></article></div>
+        <p className="report-lead" data-no-ui-translate>{reportCopy(executiveSummary)}</p>
+        <div className="report-judgement-grid"><article><span>数据解释</span><p data-no-ui-translate>{reportCopy(interpretation)}</p></article><article><span>建议动作</span><p data-no-ui-translate>{reportCopy(actionSummary)}</p></article></div>
         <footer><span>{period} · {scopeLabel}</span><span>{aiBriefInScope ? `LLM 辅助研判 · ${aiBrief?.model ?? "重点复核"}` : "规则与统计研判"} · 数据生成于 {generatedAt}</span></footer>
       </section>
 
@@ -340,7 +361,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
       <section className="surface report-dashboard-section">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">VOLUME & CHANNELS</p><h3>舆情趋势与渠道结构</h3></div><a href="/archive">查看新闻档案 →</a></div>
-        <p className="report-inline-conclusion">{report.timeline.length ? `本期声量最高的日期是 ${report.timeline.reduce((best, item) => item.total > best.total ? item : best, report.timeline[0]).date}；${topPlatform?.label ?? "主要渠道"}贡献 ${pct(topPlatform?.value ?? 0, report.total)}% 的内容。` : "当前筛选条件下尚无可绘制的趋势数据。"}</p>
+        <p className="report-inline-conclusion" data-no-ui-translate>{reportCopy(volumeConclusion)}</p>
         <div className="report-dashboard-two-column trend">
           <div><h4>每日内容量与负面内容</h4><div className="insight-trend-chart">{report.timeline.slice(-18).map((day) => <article key={day.date}><div><i style={{ height: `${Math.max(5, day.total / maxDay * 100)}%` }}><b style={{ height: `${pct(day.negative, day.total)}%` }} /></i></div><span>{day.date.slice(5)}</span><small>{day.total}</small></article>)}{!report.timeline.length && <p>暂无趋势数据</p>}</div><div className="insight-chart-legend"><span><i />全部内容</span><span><i className="negative" />其中负面</span></div></div>
           <div className="dashboard-bars"><h4>平台构成</h4><BarRows items={report.platforms.slice(0, 7)} max={maxPlatform} /></div>
@@ -349,14 +370,14 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
       <section className="surface report-dashboard-section">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">EVENT PROPAGATION</p><h3>重点事件与传播</h3></div><a href="/propagation">查看传播链路 →</a></div>
-        <p className="report-inline-conclusion">{topEvent ? `本期最大事件包含 ${topEvent.items.length} 个传播节点，最早来源为${topEvent.originCountry}的${topEvent.originSource}，随后覆盖 ${topEvent.countries.length} 个地区。` : "本期尚未形成满足聚类条件的传播事件。"}</p>
+        <p className="report-inline-conclusion" data-no-ui-translate>{reportCopy(eventConclusion)}</p>
         {topEvent ? <div className="dashboard-event-route">{topEvent.items.slice(0, 6).map((item, index) => <div key={item.id}><article style={{ "--channel": platformColors[item.platform] ?? "#aab0a4" } as CSSProperties}><span>{item.platform}</span><strong>{item.source}</strong><small>{item.source_country} · {fullDate(item.published_at)}</small></article>{index < Math.min(5, topEvent.items.length - 1) && <b>→</b>}</div>)}</div> : <div className="report-dashboard-empty">等待形成传播事件</div>}
         <div className="dashboard-event-table"><header><span>事件</span><span>首发来源</span><span>地区</span><span>节点</span><span>风险</span></header>{report.clusters.slice(0, 5).map((cluster) => <article key={cluster.key}><strong>{reportMentionTitle(cluster.items[0], uiLanguage)}</strong><span>{cluster.originSource}</span><span>{cluster.countries.length}</span><b>{cluster.items.length}</b><em>{cluster.risk}</em></article>)}</div>
       </section>
 
       <section className="surface report-dashboard-section report-audience-focus">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">AUDIENCE INTELLIGENCE</p><h3>受众在关注什么，以及哪些观点正在获得响应</h3></div><a href="/comments">查看全部评论与人工标注 →</a></div>
-        <p className="report-inline-conclusion">{interpretation}</p>
+        <p className="report-inline-conclusion" data-no-ui-translate>{reportCopy(interpretation)}</p>
         {commentTotal ? <>
           <div className="report-audience-proof-grid">
             {(audienceInsights.length ? audienceInsights : [{ title: "评论结构", finding: `${audiencePositivePct}% 正面、${audienceNegativePct}% 负面、${audienceMixedPct}% 态度混合`, evidence: `依据 ${commentTotal} 条已取得正文的公开评论。`, action: "继续扩大评论采集覆盖后再判断趋势。", tone: "neutral" as const }]).slice(0, 4).map((item) => <article key={item.title} className={item.tone}><span>{item.title}</span><h4>{item.finding}</h4><p><b>证据</b>{item.evidence}</p><small><b>建议</b>{item.action}</small></article>)}
@@ -371,13 +392,13 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
 
       <section className="surface report-dashboard-section">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">CONTENT INTELLIGENCE</p><h3>媒体与原帖如何描述品牌</h3></div><a href="/analytics">查看内容舆情 →</a></div>
-        <p className="report-inline-conclusion">本期 {report.total} 条内容中，{report.sentiment.positive} 条正面、{report.sentiment.negative} 条负面、{report.sentiment.mixed} 条态度混合。{topEmotion ? `最常见的具体表达是“${topEmotion.label}”，出现 ${topEmotion.value} 次。` : "具体情绪样本仍不足。"}</p>
-        <div className="report-content-summary-grid"><div className="dashboard-sentiment-block"><div className="dashboard-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div>{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></div><div className="dashboard-topic-cloud">{reportWords.slice(0, 20).map((item, index) => <span key={item.word} className={index < 4 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 13}px` }}>{item.word}</span>)}{!reportWords.length && <small>暂无有效议题词</small>}</div></div>
+        <p className="report-inline-conclusion" data-no-ui-translate>{reportCopy(contentConclusion)}</p>
+        <div className="report-content-summary-grid"><div className="dashboard-sentiment-block"><div className="dashboard-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div>{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></div><div className="dashboard-topic-cloud" data-no-ui-translate>{localizedReportWords.slice(0, 20).map((item, index) => <span key={`${item.word}-${item.count}`} className={index < 4 ? "hot" : ""} style={{ fontSize: `${12 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 13}px` }}>{item.word}</span>)}{reportTermTranslation.loading && <small className="word-cloud-translation-state">Translating analysis terms…</small>}{!reportWords.length && <small>{uiLanguage === "en" ? "No recurring terms yet." : "暂无有效议题词"}</small>}</div></div>
       </section>
 
       <section className="surface report-dashboard-section">
         <div className="report-dashboard-section-head"><div><p className="eyebrow">GEOGRAPHIC INTELLIGENCE</p><h3>地区声量与市场差异</h3></div><a href="/overview">返回情报总览 →</a></div>
-        <p className="report-inline-conclusion">{topCountry ? `${topCountry.country}是本期报道最集中的地区，占全部内容的 ${pct(topCountry.count, report.total)}%。${topAudienceRegion ? `${topAudienceRegion.region}归档了 ${topAudienceRegion.total} 条评论，其中 ${topAudienceRegion.positive} 条正面、${topAudienceRegion.negative} 条负面，主要讨论“${topAudienceRegion.topTopic || "待归纳"}”。` : "评论地区样本不足，暂不能比较不同文化地区的反应。"}` : "当前缺少可确认的媒体发布地区。"}</p>
+        <p className="report-inline-conclusion" data-no-ui-translate>{reportCopy(regionConclusion)}</p>
         <div className="dashboard-geo-grid"><div><ReportMap countries={report.countries} countryCodes={countryCodes} /><div className="report-map-legend"><span>内容较少</span><i /><i /><i /><i /><i /><span>内容最多</span></div></div><div className="dashboard-region-table"><header><span>地区</span><span>内容</span><span>风险</span><span>正面 / 负面</span></header>{report.countries.slice(0, 9).map((item) => <article key={item.country}><strong>{item.country}</strong><span>{item.count}</span><span>{item.risk}</span><b>{item.positive} / {item.negative}</b></article>)}</div></div>
       </section>
 
@@ -387,8 +408,8 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       </div>
 
       <section className="surface report-dashboard-section report-ready-copy">
-        <div className="report-dashboard-section-head"><div><p className="eyebrow">WEEKLY / MONTHLY BRIEF</p><h3>可直接参考的周报／月报文字</h3></div><button type="button" onClick={() => void navigator.clipboard?.writeText(`${executiveSummary}\n\n${interpretation}\n\n${actionSummary}`)}>复制文字</button></div>
-        <p>{executiveSummary}</p><p>{interpretation}</p><p>{actionSummary}</p>
+        <div className="report-dashboard-section-head"><div><p className="eyebrow">WEEKLY / MONTHLY BRIEF</p><h3>可直接参考的周报／月报文字</h3></div><button type="button" onClick={() => void navigator.clipboard?.writeText(`${reportCopy(executiveSummary)}\n\n${reportCopy(interpretation)}\n\n${reportCopy(actionSummary)}`)}>复制文字</button></div>
+        <p data-no-ui-translate>{reportCopy(executiveSummary)}</p><p data-no-ui-translate>{reportCopy(interpretation)}</p><p data-no-ui-translate>{reportCopy(actionSummary)}</p>
       </section>
 
       <section className="surface report-data-quality"><div><p className="eyebrow">DATA QUALITY</p><h3>数据完整度与判断边界</h3></div><p>当前评论采集覆盖率为 <strong>{comments.summary.coverage}%</strong>。共归档 {commentArchivedTotal} 条评论，其中人工标记为“无实意”的 {comments.summary.meaningless ?? 0} 条仅保留在档案中，不参与情绪、议题、词频和地区态度分析。地区表示媒体发布地或带置信度的语言文化区推断，不等同于评论者真实国籍。</p><span>{comments.summary.collected ?? commentArchivedTotal} / {comments.summary.reported ?? commentArchivedTotal} 条评论已归档</span></section>
@@ -427,7 +448,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
       <section className="report-sheet">
         <ReportHeader section="04 / 情绪与议题" brand={brand.name} period={period} />
         <div className="report-page-body"><div className="report-title-row"><div><p>SENTIMENT & THEMES</p><h2>报道情绪、具体意图与高频议题</h2></div><span>机器研判需结合原文复核</span></div>
-          <div className="report-sentiment-grid"><section><h3>情绪结构</h3><div className="report-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div className="report-sentiment-legend">{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></section><section><h3>具体情绪与行动意图</h3><BarRows items={report.emotions.slice(0, 9)} max={maxEmotion} tone="emotion" /></section><section><h3>高频议题</h3><div className="report-word-cloud">{reportWords.map((item, index) => <span key={item.word} className={index < 5 ? "hot" : ""} style={{ fontSize: `${13 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 20}px` }}>{item.word}<sup>{item.count}</sup></span>)}{!reportWords.length && <p>本期暂无可统计的有效议题词</p>}</div></section></div>
+          <div className="report-sentiment-grid"><section><h3>情绪结构</h3><div className="report-donut" style={{ "--positive": pct(report.sentiment.positive, report.total), "--neutral": pct(report.sentiment.neutral, report.total), "--negative": pct(report.sentiment.negative, report.total) } as CSSProperties}><div><strong>{report.total}</strong><span>条内容</span></div></div><div className="report-sentiment-legend">{[["正面", report.sentiment.positive], ["中性", report.sentiment.neutral], ["负面", report.sentiment.negative], ["混合", report.sentiment.mixed]].map(([label, value]) => <article key={String(label)}><i style={{ background: sentimentColors[String(label)] }} /><span>{label}</span><strong>{Number(value)} · {pct(Number(value), report.total)}%</strong></article>)}</div></section><section><h3>具体情绪与行动意图</h3><BarRows items={report.emotions.slice(0, 9)} max={maxEmotion} tone="emotion" /></section><section><h3>高频议题</h3><div className="report-word-cloud" data-no-ui-translate>{localizedReportWords.map((item, index) => <span key={`${item.word}-${item.count}`} className={index < 5 ? "hot" : ""} style={{ fontSize: `${13 + item.count / Math.max(1, reportWords[0]?.count ?? 1) * 20}px` }}>{item.word}<sup>{item.count}</sup></span>)}{reportTermTranslation.loading && <small className="word-cloud-translation-state">Translating analysis terms…</small>}{!reportWords.length && <p>{uiLanguage === "en" ? "There are no recurring topic terms in this period." : "本期暂无可统计的有效议题词"}</p>}</div></section></div>
           <div className="report-method-note"><strong>判读口径</strong><span>极性用于快速筛查；“担忧、质疑、期待、好奇、购买意向、嘲讽”等具体情绪和行动意图更适合支持公关决策。词频已过滤中英文常见虚词与品牌名。</span></div>
         </div><ReportFooter page={5} generatedAt={generatedAt} />
       </section>

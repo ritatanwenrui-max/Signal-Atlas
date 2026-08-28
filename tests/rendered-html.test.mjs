@@ -537,12 +537,18 @@ test("English mode contains no Chinese fallback and translates workspace content
   assert.match(uiLanguage, /Translating into American English/);
   assert.match(uiLanguage, /Translation is temporarily unavailable/);
   assert.match(uiLanguage, /fetch\("\/api\/ui-translate"/);
+  assert.match(uiLanguage, /useAmericanEnglishBatch/);
+  assert.match(uiLanguage, /data-no-ui-translate container/);
   assert.doesNotMatch(uiLanguage, /closest\("\[data-no-ui-translate\], \.english-translation/);
   assert.match(route, /translateTextToAmericanEnglish/);
   assert.match(route, /locale: "en-US"/);
   assert.match(translation, /target_lang: "EN-US"/);
   assert.match(page, /translatedMentionCopy\(item, uiLanguage\)/);
   assert.match(page, /translatedCommentCopy\(comment, uiLanguage\)/);
+  assert.match(page, /word-cloud" data-no-ui-translate/);
+  assert.match(page, /Translating analysis terms/);
   assert.match(report, /reportCommentText\(item, uiLanguage\)/);
+  assert.match(report, /report-inline-conclusion" data-no-ui-translate/);
+  assert.match(report, /localizedReportWords/);
   assert.match(commentsRoute, /m\.translation_en/);
 });
