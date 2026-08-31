@@ -1,4 +1,5 @@
 import { loadConnectorCredential } from "./credentials";
+import { findOverlappingEventKey } from "./event-detection";
 
 type SearchConsoleRow = { keys?: string[]; clicks?: number; impressions?: number; ctr?: number; position?: number };
 type SearchConsoleResponse = { rows?: SearchConsoleRow[]; metadata?: { first_incomplete_date?: string } };
@@ -165,23 +166,17 @@ export function detectSearchEventWindows(rows: DailySignal[]) {
 
 async function rebuildEventWindows(db: D1Database, brandId: number, rows: DailySignal[]) {
   const windows = detectSearchEventWindows(rows);
-  await db.prepare("DELETE FROM search_event_windows WHERE brand_id = ? AND trigger_source = 'gsc'").bind(brandId).run();
   for (const window of windows) {
+    const overlappingKey = await findOverlappingEventKey(db, brandId, window.startDate, window.endDate);
+    const eventKey = overlappingKey || window.eventKey;
     await db.prepare(`INSERT INTO search_event_windows
       (brand_id, event_key, peak_date, start_date, end_date, peak_clicks, peak_impressions, baseline_clicks, spike_ratio, trigger_source, status, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'gsc', ?, ?)
       ON CONFLICT(brand_id, event_key) DO UPDATE SET start_date = excluded.start_date, end_date = excluded.end_date,
         peak_clicks = excluded.peak_clicks, peak_impressions = excluded.peak_impressions, baseline_clicks = excluded.baseline_clicks,
         spike_ratio = excluded.spike_ratio, trigger_source = 'gsc', status = excluded.status, updated_at = excluded.updated_at`)
-      .bind(brandId, window.eventKey, window.peakDate, window.startDate, window.endDate, window.peakClicks, window.peakImpressions,
+      .bind(brandId, eventKey, window.peakDate, window.startDate, window.endDate, window.peakClicks, window.peakImpressions,
         window.baselineClicks, window.spikeRatio, window.status, new Date().toISOString()).run();
-    await db.prepare(`UPDATE event_origins SET event_key = ?, updated_at = ? WHERE brand_id = ? AND event_key IN (
-      SELECT event_key FROM search_event_windows WHERE brand_id = ? AND trigger_source = 'manual'
-        AND date(start_date) <= date(?) AND date(end_date) >= date(?)
-    )`).bind(window.eventKey, new Date().toISOString(), brandId, brandId, window.endDate, window.startDate).run();
-    await db.prepare(`DELETE FROM search_event_windows WHERE brand_id = ? AND trigger_source = 'manual'
-      AND event_key != ? AND date(start_date) <= date(?) AND date(end_date) >= date(?)`)
-      .bind(brandId, window.eventKey, window.endDate, window.startDate).run();
   }
   return windows;
 }

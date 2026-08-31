@@ -63,10 +63,10 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.doesNotMatch(page, /硅姬|矽姬/);
 });
 
-test("search-demand events begin at a clear rise while propagation keeps news-similarity evidence", async () => {
-  const [page, searchConsole, repository, route, migration] = await Promise.all([
-    source("app/page.tsx"), source("db/search-console.ts"), source("db/repository.ts"),
-    source("app/api/data/route.ts"), source("drizzle/0023_curly_skreet.sql"),
+test("automatic events preserve every rise while propagation keeps news-similarity evidence", async () => {
+  const [page, searchConsole, eventDetection, newsSync, repository, route, migration] = await Promise.all([
+    source("app/page.tsx"), source("db/search-console.ts"), source("db/event-detection.ts"),
+    source("db/news-sync.ts"), source("db/repository.ts"), source("app/api/data/route.ts"), source("drizzle/0023_curly_skreet.sql"),
   ]);
   assert.match(searchConsole, /const obviousRise/);
   assert.match(searchConsole, /const statisticalThreshold = baseline \+ Math\.max\(8, deviation \* 3\)/);
@@ -76,9 +76,15 @@ test("search-demand events begin at a clear rise while propagation keeps news-si
   assert.match(searchConsole, /status: stillElevated \? "active" : "confirmed"/);
   assert.match(searchConsole, /www\.googleapis\.com\/webmasters\/v3\/sites/);
   assert.match(searchConsole, /webmasters\.readonly/);
+  assert.doesNotMatch(searchConsole, /DELETE FROM search_event_windows WHERE brand_id = \? AND trigger_source = 'gsc'/);
+  assert.match(eventDetection, /detectMediaEventWindows/);
+  assert.match(eventDetection, /trigger_source, status, updated_at/);
+  assert.match(eventDetection, /'social_spike'/);
+  assert.match(newsSync, /captureViralSocialEvents/);
+  assert.match(newsSync, /syncMediaEventWindows/);
   assert.match(repository, /status IN \('active', 'confirmed'\)/);
-  assert.match(page, /明显持续攀升的第一天即为事件开始/);
-  assert.match(page, /最高点只记录峰值/);
+  assert.match(page, /明显攀升的第一天建立新事件/);
+  assert.match(page, /已确认事件只追加，不会被后来的峰值覆盖/);
   assert.match(page, /existing text-similarity cluster decides which coverage belongs to it/);
   assert.match(page, /data\.propagationEdges\.filter/);
   assert.match(page, /inferredEdges = selectedEdges\.filter\(\(edge\) => edge\.id > 0\)/);

@@ -12,6 +12,7 @@ import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost } from "./o
 import { buildDiscoveryTerms, buildHashtagTerms, queryCountForPlatform } from "./search-strategy";
 import { NEWS_PROVIDER_PLANS, reserveNewsProviderQuota } from "./news-provider-budget";
 import { syncSearchConsoleSignals } from "./search-console";
+import { captureViralSocialEvents, syncMediaEventWindows } from "./event-detection";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -442,6 +443,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       await backfillMediaSources(db, brandId);
       await rebuildStoryClusters(db, brandId, terms);
       await rebuildPropagationEdges(db, brandId, terms);
+      await syncMediaEventWindows(db, brandId);
     }
     const commentRefresh = audienceEnabled ? await refreshPublicCommentAnalyses(db, brandId, terms) : { analyzedComments: 0 };
     const translationBefore = audienceEnabled ? await runTranslationCycle(db, brandId, credentialOwnerId)
@@ -534,6 +536,10 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const retryTimes = deferred.flatMap((provider) => health.get(provider.name)?.retry_after ? [health.get(provider.name)!.retry_after] : []);
       const settled = await Promise.allSettled(ready.map((provider) => provider.load()));
       const discoveryCandidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+      const eventCandidates = discoveryCandidates.filter((candidate) =>
+        comesFromOfficialAccount(candidate, scopeBrand.official_accounts, [scopeBrand.name])
+        || brandScopeDecision(candidate, terms, scopeBrand).accepted);
+      await captureViralSocialEvents(db, brandId, eventCandidates, scopeBrand);
       let rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
       const attemptedAt = new Date().toISOString();
       for (let index = 0; index < settled.length; index += 1) {
@@ -632,6 +638,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       if (mode !== "reddit" || inserted > 0) {
         await rebuildStoryClusters(db, brandId, terms);
         await rebuildPropagationEdges(db, brandId, terms);
+        await syncMediaEventWindows(db, brandId);
       }
       const translationAfter = inserted > 0 && mode === "full" ? await runTranslationCycle(db, brandId, credentialOwnerId)
         : { queued: 0, translated: 0, skipped: 0, errors: 0 };
