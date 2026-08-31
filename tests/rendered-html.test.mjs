@@ -619,3 +619,23 @@ test("independent social discovery APIs share the brand scope, exclusion, archiv
   assert.match(sync, /upsertSocialMetrics/);
   assert.match(sync, /queueSocialCommentTarget/);
 });
+
+test("additional global news connectors are replaceable, quota-aware, and honest about batch-only sources", async () => {
+  const [providers, sync, credentials, budgets, repository, page] = await Promise.all([
+    source("db/providers.ts"), source("db/news-sync.ts"), source("db/credentials.ts"),
+    source("db/news-provider-budget.ts"), source("db/repository.ts"), source("app/page.tsx"),
+  ]);
+  for (const provider of ["The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon"]) {
+    assert.match(credentials, new RegExp(provider.replace(".", "\\.")));
+    assert.match(budgets, new RegExp(provider.replace(".", "\\.")));
+    assert.match(repository, new RegExp(provider.replace(".", "\\.")));
+    assert.match(page, new RegExp(provider.replace(".", "\\.")));
+  }
+  for (const fetcher of ["fetchTheNewsApi", "fetchGNews", "fetchNewsApiOrg", "fetchMediastack", "fetchGuardian", "fetchMastodon", "fetchBlueskySearch", "fetchHackerNews"]) {
+    assert.match(providers, new RegExp(fetcher));
+    assert.match(sync, new RegExp(fetcher));
+  }
+  assert.match(repository, /Common Crawl CC-NEWS/);
+  assert.match(repository, /当前不会计入自动巡检结果/);
+  assert.match(page, /免费层有发布时间延迟且禁止商业使用/);
+});

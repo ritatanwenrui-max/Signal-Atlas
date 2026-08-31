@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 const supportedProviders = new Set([
   "NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
   "ScrapeCreators", "Brave Search", "Apify", "Bright Data",
+  "The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon",
   "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory", "OpenAI LLM",
 ]);
 
@@ -53,6 +54,13 @@ export async function loadConnectorCredential(db: D1Database, provider: string, 
     : provider === "Apify" ? env.APIFY_API_TOKEN
     : provider === "Bright Data" && env.BRIGHTDATA_API_KEY
       ? JSON.stringify({ token: env.BRIGHTDATA_API_KEY, zone: env.BRIGHTDATA_SERP_ZONE || "" })
+    : provider === "The News API" ? env.THE_NEWS_API_KEY
+    : provider === "GNews" ? env.GNEWS_API_KEY
+    : provider === "NewsAPI.org" ? env.NEWSAPI_ORG_KEY
+    : provider === "mediastack" ? env.MEDIASTACK_API_KEY
+    : provider === "Guardian Open Platform" ? env.GUARDIAN_API_KEY
+    : provider === "Mastodon" && env.MASTODON_INSTANCE
+      ? JSON.stringify({ instance: env.MASTODON_INSTANCE, token: env.MASTODON_ACCESS_TOKEN || "" })
     : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY
     : provider === "Azure Translator" && env.AZURE_TRANSLATOR_KEY
       ? JSON.stringify({ key: env.AZURE_TRANSLATOR_KEY, region: env.AZURE_TRANSLATOR_REGION || "", endpoint: env.AZURE_TRANSLATOR_ENDPOINT || "" })

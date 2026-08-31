@@ -572,6 +572,172 @@ export async function fetchWorldNews(terms: string[], credential?: string): Prom
   }));
 }
 
+function plainProviderText(value: unknown) {
+  return String(value ?? "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+}
+
+function lastMonthDate() { return new Date(Date.now() - 31 * 86400_000).toISOString().slice(0, 10); }
+
+export async function fetchTheNewsApi(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.THE_NEWS_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://api.thenewsapi.com/v1/news/all");
+  endpoint.searchParams.set("api_token", apiKey); endpoint.searchParams.set("search", compactBooleanQuery(terms, 180));
+  endpoint.searchParams.set("published_after", lastMonthDate()); endpoint.searchParams.set("sort", "published_at");
+  endpoint.searchParams.set("limit", "50");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("The News API", response.status, retryAfterMs(response), `The News API HTTP ${response.status}`);
+  const payload = await response.json() as { data?: Array<Record<string, unknown>>; error?: { message?: string } };
+  if (payload.error) throw new Error(`The News API: ${payload.error.message || "接口返回错误"}`);
+  return (payload.data ?? []).flatMap((item) => {
+    const url = stringAt(item, ["url"]); const title = plainProviderText(item.title);
+    if (!url || !title) return [];
+    const locale = stringAt(item, ["locale"]); const language = stringAt(item, ["language"]);
+    return [{ title, url, source: sourceNameFromUrl(url, stringAt(item, ["source"])), platform: "网页新闻" as const,
+      sourceCountry: countryCodes[locale.toUpperCase()] ?? "地区待确认", language: (languageNames[language] ?? language) || "语言待确认",
+      publishedAt: isoDate(stringAt(item, ["published_at"])), engagement: 0,
+      discussionText: [stringAt(item, ["description"]), stringAt(item, ["snippet"]), stringAt(item, ["keywords"])].join(" "),
+      commentsAnalyzed: 0, parentUrl: "", relation: "", author: "", provider: "The News API", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchGNews(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.GNEWS_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://gnews.io/api/v4/search");
+  endpoint.searchParams.set("apikey", apiKey); endpoint.searchParams.set("q", compactBooleanQuery(terms, 190));
+  endpoint.searchParams.set("from", `${lastMonthDate()}T00:00:00Z`); endpoint.searchParams.set("sortby", "publishedAt"); endpoint.searchParams.set("max", "10");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("GNews", response.status, retryAfterMs(response), `GNews HTTP ${response.status}`);
+  const payload = await response.json() as { articles?: Array<Record<string, unknown>>; errors?: unknown };
+  if (payload.errors) throw new Error(`GNews: ${JSON.stringify(payload.errors).slice(0, 300)}`);
+  return (payload.articles ?? []).flatMap((item) => {
+    const url = stringAt(item, ["url"]); const title = plainProviderText(item.title); if (!url || !title) return [];
+    return [{ title, url, source: sourceNameFromUrl(url, stringAt(item, ["source.name", "source.url"])), platform: "网页新闻" as const,
+      sourceCountry: "地区待确认", language: "语言待确认", publishedAt: isoDate(stringAt(item, ["publishedAt"])), engagement: 0,
+      discussionText: [stringAt(item, ["description"]), stringAt(item, ["content"])].join(" "), commentsAnalyzed: 0,
+      parentUrl: "", relation: "", author: "", provider: "GNews", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchNewsApiOrg(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.NEWSAPI_ORG_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://newsapi.org/v2/everything");
+  endpoint.searchParams.set("apiKey", apiKey); endpoint.searchParams.set("q", compactBooleanQuery(terms, 480));
+  endpoint.searchParams.set("from", lastMonthDate()); endpoint.searchParams.set("sortBy", "publishedAt"); endpoint.searchParams.set("pageSize", "100");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json", "User-Agent": "SignalAtlas/2.0" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("NewsAPI.org", response.status, retryAfterMs(response), `NewsAPI.org HTTP ${response.status}`);
+  const payload = await response.json() as { status?: string; message?: string; articles?: Array<Record<string, unknown>> };
+  if (payload.status === "error") throw new Error(`NewsAPI.org: ${payload.message || "接口返回错误"}`);
+  return (payload.articles ?? []).flatMap((item) => {
+    const url = stringAt(item, ["url"]); const title = plainProviderText(item.title); if (!url || !title) return [];
+    return [{ title, url, source: sourceNameFromUrl(url, stringAt(item, ["source.name"])), platform: "网页新闻" as const,
+      sourceCountry: "地区待确认", language: "语言待确认", publishedAt: isoDate(stringAt(item, ["publishedAt"])), engagement: 0,
+      discussionText: [stringAt(item, ["description"]), stringAt(item, ["content"])].join(" "), commentsAnalyzed: 0,
+      parentUrl: "", relation: "", author: stringAt(item, ["author"]), provider: "NewsAPI.org", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchMediastack(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.MEDIASTACK_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://api.mediastack.com/v1/news");
+  endpoint.searchParams.set("access_key", apiKey); endpoint.searchParams.set("keywords", terms.slice(0, 8).join(","));
+  endpoint.searchParams.set("date", `${lastMonthDate()},${new Date().toISOString().slice(0, 10)}`); endpoint.searchParams.set("sort", "published_desc"); endpoint.searchParams.set("limit", "100");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("mediastack", response.status, retryAfterMs(response), `mediastack HTTP ${response.status}`);
+  const payload = await response.json() as { data?: Array<Record<string, unknown>>; error?: { message?: string } };
+  if (payload.error) throw new Error(`mediastack: ${payload.error.message || "接口返回错误"}`);
+  return (payload.data ?? []).flatMap((item) => {
+    const url = stringAt(item, ["url"]); const title = plainProviderText(item.title); if (!url || !title) return [];
+    const country = stringAt(item, ["country"]); const language = stringAt(item, ["language"]);
+    return [{ title, url, source: sourceNameFromUrl(url, stringAt(item, ["source"])), platform: "网页新闻" as const,
+      sourceCountry: (countryCodes[country.toUpperCase()] ?? countryNames[country] ?? country) || "地区待确认",
+      language: (languageNames[language] ?? language) || "语言待确认", publishedAt: isoDate(stringAt(item, ["published_at"])), engagement: 0,
+      discussionText: [stringAt(item, ["description"]), stringAt(item, ["category"])].join(" "), commentsAnalyzed: 0,
+      parentUrl: "", relation: "", author: stringAt(item, ["author"]), provider: "mediastack", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchGuardian(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.GUARDIAN_API_KEY;
+  if (!apiKey) return [];
+  const endpoint = new URL("https://content.guardianapis.com/search");
+  endpoint.searchParams.set("api-key", apiKey); endpoint.searchParams.set("q", compactBooleanQuery(terms, 180));
+  endpoint.searchParams.set("from-date", lastMonthDate()); endpoint.searchParams.set("order-by", "newest"); endpoint.searchParams.set("page-size", "50");
+  endpoint.searchParams.set("show-fields", "headline,trailText,byline");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("Guardian Open Platform", response.status, retryAfterMs(response), `Guardian HTTP ${response.status}`);
+  const payload = await response.json() as { response?: { status?: string; message?: string; results?: Array<Record<string, unknown>> } };
+  if (payload.response?.status && payload.response.status !== "ok") throw new Error(`Guardian: ${payload.response.message || "接口返回错误"}`);
+  return (payload.response?.results ?? []).flatMap((item) => {
+    const url = stringAt(item, ["webUrl"]); const title = plainProviderText(valueAt(item, ["fields.headline"]) ?? item.webTitle); if (!url || !title) return [];
+    return [{ title, url, source: "The Guardian", platform: "网页新闻" as const, sourceCountry: "英国", language: "英文",
+      publishedAt: isoDate(stringAt(item, ["webPublicationDate"])), engagement: 0,
+      discussionText: plainProviderText(valueAt(item, ["fields.trailText"])), commentsAnalyzed: 0, parentUrl: "", relation: "",
+      author: stringAt(item, ["fields.byline"]), provider: "Guardian Open Platform", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchBlueskySearch(terms: string[]): Promise<MonitoringCandidate[]> {
+  const endpoint = new URL("https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts");
+  endpoint.searchParams.set("q", compactBooleanQuery(terms, 180)); endpoint.searchParams.set("limit", "25"); endpoint.searchParams.set("sort", "latest");
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("Bluesky Search", response.status, retryAfterMs(response), `Bluesky HTTP ${response.status}`);
+  const payload = await response.json() as { posts?: Array<Record<string, unknown>> };
+  return (payload.posts ?? []).flatMap((item) => {
+    const uri = stringAt(item, ["uri"]); const handle = stringAt(item, ["author.handle"]); const text = plainProviderText(valueAt(item, ["record.text"]));
+    const rkey = uri.split("/").at(-1) ?? ""; if (!handle || !rkey || !text) return [];
+    return [{ title: text.slice(0, 500), url: `https://bsky.app/profile/${handle}/post/${rkey}`, source: `Bluesky · @${handle}`,
+      platform: "网页新闻" as const, sourceCountry: "地区待确认", language: "语言待确认",
+      publishedAt: isoDate(stringAt(item, ["record.createdAt", "indexedAt"])),
+      engagement: numberFrom(valueAt(item, ["likeCount"])) + numberFrom(valueAt(item, ["replyCount"])) + numberFrom(valueAt(item, ["repostCount"])) + numberFrom(valueAt(item, ["quoteCount"])),
+      discussionText: text, commentsAnalyzed: 0, parentUrl: "", relation: "社区讨论", author: stringAt(item, ["author.displayName"]) || handle,
+      provider: "Bluesky Search", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchHackerNews(terms: string[]): Promise<MonitoringCandidate[]> {
+  const endpoint = new URL("https://hn.algolia.com/api/v1/search_by_date");
+  endpoint.searchParams.set("query", terms.slice(0, 6).join(" ")); endpoint.searchParams.set("tags", "story"); endpoint.searchParams.set("hitsPerPage", "50");
+  endpoint.searchParams.set("numericFilters", `created_at_i>${Math.floor((Date.now() - 31 * 86400_000) / 1000)}`);
+  const response = await fetch(endpoint, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("Hacker News", response.status, retryAfterMs(response), `Hacker News HTTP ${response.status}`);
+  const payload = await response.json() as { hits?: Array<Record<string, unknown>> };
+  return (payload.hits ?? []).flatMap((item) => {
+    const objectId = stringAt(item, ["objectID"]); const title = plainProviderText(item.title); if (!objectId || !title) return [];
+    const url = stringAt(item, ["url"]) || `https://news.ycombinator.com/item?id=${objectId}`;
+    return [{ title, url, source: "Hacker News", platform: "网页新闻" as const, sourceCountry: "美国", language: "英文",
+      publishedAt: isoDate(stringAt(item, ["created_at"])), engagement: numberFrom(item.points) + numberFrom(item.num_comments),
+      discussionText: plainProviderText(valueAt(item, ["story_text"])), commentsAnalyzed: 0, parentUrl: "", relation: "技术社区讨论",
+      author: stringAt(item, ["author"]), provider: "Hacker News", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchMastodon(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  if (!credential) return [];
+  let instance = ""; let token = "";
+  try { const parsed = JSON.parse(credential) as { instance?: string; token?: string }; instance = parsed.instance?.trim() ?? ""; token = parsed.token?.trim() ?? ""; }
+  catch { instance = credential.trim(); }
+  const base = new URL(instance); const endpoint = new URL("/api/v2/search", base);
+  endpoint.searchParams.set("q", terms.slice(0, 6).join(" OR ")); endpoint.searchParams.set("type", "statuses"); endpoint.searchParams.set("limit", "40");
+  const headers: Record<string, string> = { Accept: "application/json" }; if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("Mastodon", response.status, retryAfterMs(response), `Mastodon HTTP ${response.status}`);
+  const payload = await response.json() as { statuses?: Array<Record<string, unknown>> };
+  return (payload.statuses ?? []).flatMap((item) => {
+    const url = stringAt(item, ["url"]); const text = plainProviderText(item.content); if (!url || !text) return [];
+    const account = stringAt(item, ["account.acct", "account.username"]); const language = stringAt(item, ["language"]);
+    return [{ title: text.slice(0, 500), url, source: account ? `Mastodon · @${account}` : base.hostname, platform: "网页新闻" as const,
+      sourceCountry: "地区待确认", language: (languageNames[language] ?? language) || "语言待确认", publishedAt: isoDate(stringAt(item, ["created_at"])),
+      engagement: numberFrom(item.favourites_count) + numberFrom(item.reblogs_count) + numberFrom(item.replies_count), discussionText: text,
+      commentsAnalyzed: 0, parentUrl: stringAt(item, ["reblog.url"]), relation: item.reblog ? "转嘟" : "社区讨论",
+      author: stringAt(item, ["account.display_name"]) || account, provider: "Mastodon", discoveredVia: "global_discovery" as const }];
+  });
+}
+
 export async function fetchGdelt(query: string): Promise<MonitoringCandidate[]> {
   const endpoint = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
   endpoint.searchParams.set("query", `(${query})`);

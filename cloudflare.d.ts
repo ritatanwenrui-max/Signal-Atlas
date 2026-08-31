@@ -38,6 +38,13 @@ declare module "cloudflare:workers" {
     APIFY_API_TOKEN?: string;
     BRIGHTDATA_API_KEY?: string;
     BRIGHTDATA_SERP_ZONE?: string;
+    THE_NEWS_API_KEY?: string;
+    GNEWS_API_KEY?: string;
+    NEWSAPI_ORG_KEY?: string;
+    MEDIASTACK_API_KEY?: string;
+    GUARDIAN_API_KEY?: string;
+    MASTODON_INSTANCE?: string;
+    MASTODON_ACCESS_TOKEN?: string;
     GOOGLE_SEARCH_CONSOLE_CREDENTIALS?: string;
     MONID_API_KEY?: string;
     CREDENTIALS_ENCRYPTION_KEY?: string;

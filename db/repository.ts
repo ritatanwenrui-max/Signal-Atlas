@@ -688,6 +688,12 @@ export async function loadDashboardData(userId = "") {
   const braveSearchConfigured = Boolean(env.BRAVE_SEARCH_API_KEY || storedCredentials.has("Brave Search"));
   const apifyConfigured = Boolean(env.APIFY_API_TOKEN || storedCredentials.has("Apify"));
   const brightDataConfigured = Boolean(env.BRIGHTDATA_API_KEY || storedCredentials.has("Bright Data"));
+  const theNewsApiConfigured = Boolean(env.THE_NEWS_API_KEY || storedCredentials.has("The News API"));
+  const gnewsConfigured = Boolean(env.GNEWS_API_KEY || storedCredentials.has("GNews"));
+  const newsApiOrgConfigured = Boolean(env.NEWSAPI_ORG_KEY || storedCredentials.has("NewsAPI.org"));
+  const mediastackConfigured = Boolean(env.MEDIASTACK_API_KEY || storedCredentials.has("mediastack"));
+  const guardianConfigured = Boolean(env.GUARDIAN_API_KEY || storedCredentials.has("Guardian Open Platform"));
+  const mastodonConfigured = Boolean(env.MASTODON_INSTANCE || storedCredentials.has("Mastodon"));
   const searchConsoleConfigured = Boolean(env.GOOGLE_SEARCH_CONSOLE_CREDENTIALS || storedCredentials.has("Google Search Console"));
   const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
@@ -886,6 +892,12 @@ export async function loadDashboardData(userId = "") {
         { id: "brave-search", provider: "Brave Search", configured: braveSearchConfigured, envConfigured: Boolean(env.BRAVE_SEARCH_API_KEY), name: "Brave 社交网页补漏" },
         { id: "apify", provider: "Apify", configured: apifyConfigured, envConfigured: Boolean(env.APIFY_API_TOKEN), name: "Apify Google 索引补全" },
         { id: "bright-data", provider: "Bright Data", configured: brightDataConfigured, envConfigured: Boolean(env.BRIGHTDATA_API_KEY), name: "Bright Data SERP 补全" },
+        { id: "the-news-api", provider: "The News API", configured: theNewsApiConfigured, envConfigured: Boolean(env.THE_NEWS_API_KEY), name: "The News API 全球新闻补全" },
+        { id: "gnews", provider: "GNews", configured: gnewsConfigured, envConfigured: Boolean(env.GNEWS_API_KEY), name: "GNews 多语言新闻搜索" },
+        { id: "newsapi-org", provider: "NewsAPI.org", configured: newsApiOrgConfigured, envConfigured: Boolean(env.NEWSAPI_ORG_KEY), name: "NewsAPI.org 新闻搜索" },
+        { id: "mediastack", provider: "mediastack", configured: mediastackConfigured, envConfigured: Boolean(env.MEDIASTACK_API_KEY), name: "mediastack 全球新闻补档" },
+        { id: "guardian", provider: "Guardian Open Platform", configured: guardianConfigured, envConfigured: Boolean(env.GUARDIAN_API_KEY), name: "Guardian Open Platform" },
+        { id: "mastodon", provider: "Mastodon", configured: mastodonConfigured, envConfigured: Boolean(env.MASTODON_INSTANCE), name: "Mastodon 联邦搜索" },
       ].map((item) => {
         const quota = newsQuotaByProvider.get(item.provider)!;
         const health = healthByName.get(item.provider);
@@ -901,6 +913,20 @@ export async function loadDashboardData(userId = "") {
             : `${quota.scheduleLabel}自动更新 · 今日 ${quota.used}/${quota.limit} · 剩余 ${quota.remaining} · ${quota.rationale}`,
         };
       }),
+      ...["Bluesky Search", "Hacker News"].map((provider) => {
+        const quota = newsQuotaByProvider.get(provider)!;
+        const health = healthByName.get(provider);
+        const limited = Boolean((health?.retry_after && new Date(health.retry_after).getTime() > Date.now()) || quota.remaining <= 0);
+        return {
+          id: provider === "Bluesky Search" ? "bluesky-public" : "hacker-news-public", provider, configurable: false, configured: true,
+          name: provider === "Bluesky Search" ? "Bluesky 公开帖子搜索" : "Hacker News 技术社区搜索",
+          status: (limited ? "limited" : "online") as "limited" | "online", retryAt: quota.remaining <= 0 ? quota.resetAt : health?.retry_after ?? "",
+          quotaUsed: quota.used, quotaLimit: quota.limit, quotaRemaining: quota.remaining, quotaResetAt: quota.resetAt, scheduleLabel: quota.scheduleLabel,
+          detail: `${quota.scheduleLabel}自动更新 · 免注册、免密钥 · 今日 ${quota.used}/${quota.limit} · ${quota.rationale}`,
+        };
+      }),
+      { id: "common-crawl", name: "Common Crawl CC-NEWS 批量档案", status: "approval", stateLabel: "批处理待部署",
+        detail: "免密钥 WARC 档案源；不适合即时关键词查询。需先配置对象存储与分阶段解析作业，当前不会计入自动巡检结果。" },
       { id: "crawler", name: "免费媒体追踪", status: crawlerOnline ? "online" : "limited", detail: `${sourceRows.length} 个媒体来源 · RSS / Atom / 新闻 Sitemap · robots.txt 合规` },
       { id: "llm-openai", provider: "OpenAI LLM", configurable: true, configured: llmConfigured,
         lastFour: storedCredentials.get("OpenAI LLM")?.last_four ?? (env.OPENAI_API_KEY ? "环境密钥" : ""), name: "混合智能分析",

@@ -4,7 +4,7 @@ import { backfillMediaSources, crawlMediaSources, registerMediaSources } from ".
 import { refreshPublicCommentAnalyses } from "./comments";
 import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
-import { fetchApifySocialSearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchGdelt, fetchMediaCloud, fetchNewsData, fetchScrapeCreators, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { fetchApifySocialSearch, fetchBlueskySearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchGdelt, fetchGNews, fetchGuardian, fetchHackerNews, fetchMastodon, fetchMediaCloud, fetchMediastack, fetchNewsApiOrg, fetchNewsData, fetchScrapeCreators, fetchTheNewsApi, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
 import { runHybridAnalysisCycle } from "./llm-analysis";
@@ -479,7 +479,8 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         .bind(`${brandId}:%`).all<ProviderHealth>();
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
       const [newsApiKey, mediaCloudApiKey, newsDataApiKey, worldNewsApiKey, scrapeCreatorsApiKey, braveSearchApiKey,
-        apifyApiToken, brightDataCredential, xBearerToken, youtubeApiKey] = await Promise.all([
+        apifyApiToken, brightDataCredential, xBearerToken, youtubeApiKey, theNewsApiKey, gnewsApiKey, newsApiOrgKey,
+        mediastackApiKey, guardianApiKey, mastodonCredential] = await Promise.all([
         loadConnectorCredential(db, "NewsAPI.ai", credentialOwnerId),
         loadConnectorCredential(db, "Media Cloud", credentialOwnerId),
         loadConnectorCredential(db, "NewsData.io", credentialOwnerId),
@@ -489,6 +490,9 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         loadConnectorCredential(db, "Apify", credentialOwnerId),
         loadConnectorCredential(db, "Bright Data", credentialOwnerId),
         loadConnectorCredential(db, "X", credentialOwnerId), loadConnectorCredential(db, "YouTube", credentialOwnerId),
+        loadConnectorCredential(db, "The News API", credentialOwnerId), loadConnectorCredential(db, "GNews", credentialOwnerId),
+        loadConnectorCredential(db, "NewsAPI.org", credentialOwnerId), loadConnectorCredential(db, "mediastack", credentialOwnerId),
+        loadConnectorCredential(db, "Guardian Open Platform", credentialOwnerId), loadConnectorCredential(db, "Mastodon", credentialOwnerId),
       ]);
       const monidApiKey = earlyMonidApiKey;
       const eventRegistryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, NEWS_PROVIDER_PLANS["NewsAPI.ai"].intervalMs);
@@ -499,6 +503,14 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const braveSearchDue = force || isDue(health.get("Brave Search")?.last_success_at, NEWS_PROVIDER_PLANS["Brave Search"].intervalMs);
       const apifyDue = force || isDue(health.get("Apify")?.last_success_at, NEWS_PROVIDER_PLANS.Apify.intervalMs);
       const brightDataDue = force || isDue(health.get("Bright Data")?.last_success_at, NEWS_PROVIDER_PLANS["Bright Data"].intervalMs);
+      const theNewsApiDue = force || isDue(health.get("The News API")?.last_success_at, NEWS_PROVIDER_PLANS["The News API"].intervalMs);
+      const gnewsDue = force || isDue(health.get("GNews")?.last_success_at, NEWS_PROVIDER_PLANS.GNews.intervalMs);
+      const newsApiOrgDue = force || isDue(health.get("NewsAPI.org")?.last_success_at, NEWS_PROVIDER_PLANS["NewsAPI.org"].intervalMs);
+      const mediastackDue = force || isDue(health.get("mediastack")?.last_success_at, NEWS_PROVIDER_PLANS.mediastack.intervalMs);
+      const guardianDue = force || isDue(health.get("Guardian Open Platform")?.last_success_at, NEWS_PROVIDER_PLANS["Guardian Open Platform"].intervalMs);
+      const mastodonDue = force || isDue(health.get("Mastodon")?.last_success_at, NEWS_PROVIDER_PLANS.Mastodon.intervalMs);
+      const blueskyDue = force || isDue(health.get("Bluesky Search")?.last_success_at, NEWS_PROVIDER_PLANS["Bluesky Search"].intervalMs);
+      const hackerNewsDue = force || isDue(health.get("Hacker News")?.last_success_at, NEWS_PROVIDER_PLANS["Hacker News"].intervalMs);
       const gdeltDue = isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
       const monidPlatforms: MonidSearchPlatform[] = mode === "reddit" ? ["Reddit"]
         : mode === "discovery" ? ["Instagram", "X", "YouTube", "TikTok", "Facebook"]
@@ -520,6 +532,22 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
           load: quotaProtectedTask(db, credentialOwnerId, "Apify", () => fetchApifySocialSearch(discoveryTerms, apifyApiToken)) }] : []),
         ...(mode !== "reddit" && brightDataDue && brightDataCredential ? [{ name: "Bright Data",
           load: quotaProtectedTask(db, credentialOwnerId, "Bright Data", () => fetchBrightDataSocialSearch(discoveryTerms, brightDataCredential)) }] : []),
+        ...(mode !== "reddit" && theNewsApiDue && theNewsApiKey ? [{ name: "The News API",
+          load: quotaProtectedTask(db, credentialOwnerId, "The News API", () => fetchTheNewsApi(discoveryTerms, theNewsApiKey)) }] : []),
+        ...(mode !== "reddit" && gnewsDue && gnewsApiKey ? [{ name: "GNews",
+          load: quotaProtectedTask(db, credentialOwnerId, "GNews", () => fetchGNews(discoveryTerms, gnewsApiKey)) }] : []),
+        ...(mode !== "reddit" && newsApiOrgDue && newsApiOrgKey ? [{ name: "NewsAPI.org",
+          load: quotaProtectedTask(db, credentialOwnerId, "NewsAPI.org", () => fetchNewsApiOrg(discoveryTerms, newsApiOrgKey)) }] : []),
+        ...(mode !== "reddit" && mediastackDue && mediastackApiKey ? [{ name: "mediastack",
+          load: quotaProtectedTask(db, credentialOwnerId, "mediastack", () => fetchMediastack(discoveryTerms, mediastackApiKey)) }] : []),
+        ...(mode !== "reddit" && guardianDue && guardianApiKey ? [{ name: "Guardian Open Platform",
+          load: quotaProtectedTask(db, credentialOwnerId, "Guardian Open Platform", () => fetchGuardian(discoveryTerms, guardianApiKey)) }] : []),
+        ...(mode !== "reddit" && mastodonDue && mastodonCredential ? [{ name: "Mastodon",
+          load: quotaProtectedTask(db, credentialOwnerId, "Mastodon", () => fetchMastodon(discoveryTerms, mastodonCredential)) }] : []),
+        ...(mode !== "reddit" && blueskyDue ? [{ name: "Bluesky Search",
+          load: quotaProtectedTask(db, credentialOwnerId, "Bluesky Search", () => fetchBlueskySearch(discoveryTerms)) }] : []),
+        ...(mode !== "reddit" && hackerNewsDue ? [{ name: "Hacker News",
+          load: quotaProtectedTask(db, credentialOwnerId, "Hacker News", () => fetchHackerNews(discoveryTerms)) }] : []),
         ...(mode !== "reddit" && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
         ...(monidApiKey ? [{ name: mode === "reddit" ? "Monid / Reddit" : "Monid social coordinator",
           load: () => collectMonidSocial(db, brandId, discoveryTerms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full", hashtagTerms }) }] : []),
@@ -536,8 +564,10 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const retryTimes = deferred.flatMap((provider) => health.get(provider.name)?.retry_after ? [health.get(provider.name)!.retry_after] : []);
       const settled = await Promise.allSettled(ready.map((provider) => provider.load()));
       const discoveryCandidates = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+      const configuredBrandName = String((brand as Record<string, unknown>).name ?? "");
+      const configuredOfficialAccounts = String((brand as Record<string, unknown>).official_accounts ?? "");
       const eventCandidates = discoveryCandidates.filter((candidate) =>
-        comesFromOfficialAccount(candidate, scopeBrand.official_accounts, [scopeBrand.name])
+        comesFromOfficialAccount(candidate, configuredOfficialAccounts, [configuredBrandName])
         || brandScopeDecision(candidate, terms, scopeBrand).accepted);
       await captureViralSocialEvents(db, brandId, eventCandidates, scopeBrand);
       let rateLimited = deferred.some((provider) => health.get(provider.name)?.status === "limited");
@@ -653,7 +683,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const platformStates = monidApiKey ? await Promise.all(monidPlatforms.map((platform) => getMonidPlatformState(db, brandId, platform))) : [];
       const stateByPlatform = new Map(platformStates.map((item) => [item.platform, item]));
       const defaultProviders: Record<string, string> = {
-        "网页新闻": ready.filter((item) => ["NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
+        "网页新闻": ready.filter((item) => ["NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon", "Bluesky Search", "Hacker News", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
         Instagram: ["Monid / Instagram", scrapeCreatorsApiKey ? "ScrapeCreators" : "", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),
         X: [xBearerToken ? "X API" : "", "Monid / X", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),
         YouTube: [youtubeApiKey ? "YouTube API" : "", "Monid / YouTube", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),

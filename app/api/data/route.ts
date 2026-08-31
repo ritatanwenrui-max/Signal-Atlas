@@ -33,6 +33,17 @@ function validateTranslationCredential(provider: string, credential: string) {
   }
 }
 
+function validateMastodonCredential(provider: string, credential: string) {
+  if (provider !== "Mastodon") return "";
+  try {
+    const parsed = JSON.parse(credential) as { instance?: string; token?: string };
+    const instance = new URL(String(parsed.instance ?? ""));
+    if (instance.protocol !== "https:") return "Mastodon 实例必须使用 HTTPS";
+    if (!String(parsed.token ?? "").trim()) return "Mastodon 只读 Access Token 不能为空";
+    return "";
+  } catch { return "请填写有效的 Mastodon 实例地址和只读 Access Token"; }
+}
+
 export async function GET() {
   const user = await getChatGPTUser();
   if (user) {
@@ -111,6 +122,8 @@ export async function POST(request: Request) {
     const credential = String(payload.credential ?? "");
     const translationCredentialError = validateTranslationCredential(provider, credential);
     if (translationCredentialError) return Response.json({ error: translationCredentialError }, { status: 400 });
+    const mastodonCredentialError = validateMastodonCredential(provider, credential);
+    if (mastodonCredentialError) return Response.json({ error: mastodonCredentialError }, { status: 400 });
     if (provider === "Monid / Instagram") {
       try {
         await verifyMonidApiKey(credential.trim());
