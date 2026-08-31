@@ -117,27 +117,33 @@ function addDays(date: string, offset: number) {
 export function detectSearchEventWindows(rows: DailySignal[]) {
   const ordered = [...rows].sort((a, b) => a.date.localeCompare(b.date));
   const windows: Array<{ eventKey: string; peakDate: string; startDate: string; endDate: string; peakClicks: number; peakImpressions: number; baselineClicks: number; spikeRatio: number; triggerSource: string; status: string }> = [];
-  const starts: Array<{ index: number; baseline: number }> = [];
+  const starts: Array<{ index: number; baseline: number; deviation: number }> = [];
   for (let index = 7; index < ordered.length; index += 1) {
     const history = ordered.slice(Math.max(0, index - 21), index).map((row) => row.clicks);
     const baseline = Math.max(1, median(history));
+    const deviation = median(history.map((value) => Math.abs(value - baseline)));
     const current = ordered[index];
     const previous = ordered[index - 1]?.clicks ?? baseline;
-    const obviousRise = current.clicks >= 50 && current.clicks / baseline >= 2 && current.clicks >= Math.max(previous * 1.35, baseline * 2);
+    const relativeThreshold = baseline < 10 ? 2.5 : 1.8;
+    const statisticalThreshold = baseline + Math.max(8, deviation * 3);
+    const obviousRise = current.clicks >= statisticalThreshold && current.clicks / baseline >= relativeThreshold
+      && current.clicks >= Math.max(previous * 1.3, baseline * relativeThreshold);
     if (!obviousRise) continue;
 
     let start = index;
-    while (start > 0 && index - start < 3 && ordered[start - 1].clicks >= Math.max(30, baseline * 1.45)
+    const risingFloor = Math.max(5, baseline * 1.35, baseline + Math.max(4, deviation * 1.5));
+    while (start > 0 && index - start < 3 && ordered[start - 1].clicks >= risingFloor
       && ordered[start - 1].clicks < ordered[start].clicks) start -= 1;
     const previousStart = starts.at(-1);
     if (previousStart && start - previousStart.index <= 3) continue;
-    starts.push({ index: start, baseline });
+    starts.push({ index: start, baseline, deviation });
   }
 
   for (let candidateIndex = 0; candidateIndex < starts.length; candidateIndex += 1) {
     const startCandidate = starts[candidateIndex];
     const nextStart = starts[candidateIndex + 1]?.index ?? ordered.length;
-    const continuationThreshold = Math.max(30, startCandidate.baseline * 1.35);
+    const continuationThreshold = Math.max(5, startCandidate.baseline * 1.35,
+      startCandidate.baseline + Math.max(4, startCandidate.deviation * 1.5));
     let end = startCandidate.index;
     let quietDays = 0;
     for (let cursor = startCandidate.index + 1; cursor < nextStart; cursor += 1) {

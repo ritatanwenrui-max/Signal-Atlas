@@ -69,7 +69,8 @@ test("search-demand events begin at a clear rise while propagation keeps news-si
     source("app/api/data/route.ts"), source("drizzle/0023_curly_skreet.sql"),
   ]);
   assert.match(searchConsole, /const obviousRise/);
-  assert.match(searchConsole, /current\.clicks >= Math\.max\(previous \* 1\.35, baseline \* 2\)/);
+  assert.match(searchConsole, /const statisticalThreshold = baseline \+ Math\.max\(8, deviation \* 3\)/);
+  assert.match(searchConsole, /current\.clicks >= Math\.max\(previous \* 1\.3, baseline \* relativeThreshold\)/);
   assert.match(searchConsole, /startDate: ordered\[startCandidate\.index\]\.date/);
   assert.match(searchConsole, /peakDate: peak\.date/);
   assert.match(searchConsole, /status: stillElevated \? "active" : "confirmed"/);
