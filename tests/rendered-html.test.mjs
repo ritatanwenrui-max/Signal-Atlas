@@ -42,6 +42,11 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /并列事件对比/);
   assert.match(page, /高度转载率/);
   assert.match(page, /同一事件扩散路径/);
+  assert.match(page, /适合窗口/);
+  assert.match(page, /全屏查看/);
+  assert.match(page, /changeNetworkZoom/);
+  assert.match(page, /networkViewportRef/);
+  assert.match(page, /width="116" height="48"/);
   assert.match(page, /起点：\$\{cluster\.originSource\}/);
   assert.match(page, /Starting point: \$\{cluster\.originSource\}/);
   assert.doesNotMatch(page, /cluster\.countries\.join\(" → "\)/);
