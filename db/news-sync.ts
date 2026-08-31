@@ -11,6 +11,7 @@ import { runHybridAnalysisCycle } from "./llm-analysis";
 import { comesFromOfficialAccount, isUnattributedSyntheticSocialPost } from "./official-accounts";
 import { buildDiscoveryTerms, buildHashtagTerms, queryCountForPlatform } from "./search-strategy";
 import { NEWS_PROVIDER_PLANS, reserveNewsProviderQuota } from "./news-provider-budget";
+import { syncSearchConsoleSignals } from "./search-console";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -433,8 +434,10 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
   try {
     const maintenanceEnabled = mode === "full" || mode === "maintenance";
     const audienceEnabled = mode === "full" || mode === "audience";
+    let searchConsole = { configured: false, updated: 0, events: 0 } as Awaited<ReturnType<typeof syncSearchConsoleSignals>>;
     if (maintenanceEnabled) {
       // Archive repair is separated from external provider work so an interrupted provider call cannot roll it back.
+      searchConsole = await syncSearchConsoleSignals(db, brandId, credentialOwnerId, String(brand.website ?? ""), force);
       await enrichHistoricalMentions(db, brandId);
       await backfillMediaSources(db, brandId);
       await rebuildStoryClusters(db, brandId, terms);
@@ -450,7 +453,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
     const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
-    if (mode === "maintenance") return { skipped: false, phase: mode, inserted: 0, found: 0 };
+    if (mode === "maintenance") return { skipped: false, phase: mode, inserted: 0, found: 0, searchConsole };
     if (mode === "audience") {
       if (earlyMonidApiKey) await collectMonidSocial(db, brandId, terms, earlyMonidApiKey, { force, platforms: [], includeComments: true });
       return { skipped: false, phase: mode, inserted: 0, found: 0, commentRefresh, translation: translationBefore,

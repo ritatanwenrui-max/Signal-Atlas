@@ -38,6 +38,7 @@ declare module "cloudflare:workers" {
     APIFY_API_TOKEN?: string;
     BRIGHTDATA_API_KEY?: string;
     BRIGHTDATA_SERP_ZONE?: string;
+    GOOGLE_SEARCH_CONSOLE_CREDENTIALS?: string;
     MONID_API_KEY?: string;
     CREDENTIALS_ENCRYPTION_KEY?: string;
     AZURE_TRANSLATOR_KEY?: string;

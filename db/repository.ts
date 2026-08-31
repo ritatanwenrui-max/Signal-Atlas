@@ -143,6 +143,53 @@ const tables = [
     recorded_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS search_demand_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    signal_date TEXT NOT NULL,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    impressions INTEGER NOT NULL DEFAULT 0,
+    ctr_micros INTEGER NOT NULL DEFAULT 0,
+    position_millis INTEGER NOT NULL DEFAULT 0,
+    complete INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'gsc',
+    collected_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(brand_id, signal_date)
+  )`,
+  `CREATE TABLE IF NOT EXISTS search_event_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    event_key TEXT NOT NULL,
+    peak_date TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    peak_clicks INTEGER NOT NULL DEFAULT 0,
+    peak_impressions INTEGER NOT NULL DEFAULT 0,
+    baseline_clicks INTEGER NOT NULL DEFAULT 0,
+    spike_ratio INTEGER NOT NULL DEFAULT 0,
+    trigger_source TEXT NOT NULL DEFAULT 'gsc',
+    status TEXT NOT NULL DEFAULT 'confirmed',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(brand_id, event_key)
+  )`,
+  `CREATE TABLE IF NOT EXISTS event_origins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER NOT NULL DEFAULT 0,
+    event_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'X',
+    source TEXT NOT NULL,
+    source_country TEXT NOT NULL DEFAULT '全球',
+    published_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(brand_id, url)
+  )`,
   `CREATE TABLE IF NOT EXISTS tracked_entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     brand_id INTEGER NOT NULL DEFAULT 0,
@@ -432,6 +479,9 @@ const indexes = [
   "CREATE INDEX IF NOT EXISTS idx_mentions_brand_translation ON mentions(brand_id, translation_status)",
   "CREATE INDEX IF NOT EXISTS idx_alerts_brand_ack_severity ON alerts(brand_id, acknowledged, severity)",
   "CREATE INDEX IF NOT EXISTS idx_traffic_brand_country_recorded ON traffic_signals(brand_id, country, recorded_at)",
+  "CREATE INDEX IF NOT EXISTS idx_search_demand_brand_date ON search_demand_signals(brand_id, signal_date)",
+  "CREATE INDEX IF NOT EXISTS idx_search_events_brand_peak ON search_event_windows(brand_id, peak_date)",
+  "CREATE INDEX IF NOT EXISTS idx_event_origins_brand_event ON event_origins(brand_id, event_key, active)",
   "CREATE INDEX IF NOT EXISTS idx_sync_runs_brand_started ON sync_runs(brand_id, started_at)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_diagnostics_run_platform ON collection_diagnostics(sync_run_id, platform)",
   "CREATE INDEX IF NOT EXISTS idx_collection_diagnostics_brand_completed ON collection_diagnostics(brand_id, completed_at)",
@@ -563,7 +613,7 @@ export async function loadDashboardData(userId = "") {
   const workspaceId = Number(workspace?.id ?? brand?.workspace_id ?? 0);
   const credentialOwnerId = String(workspace?.credential_owner_user_id ?? userId);
   const healthPrefix = `${brandId}:%`;
-  const [mentions, traffic, entities, alerts, syncRuns, collectionDiagnostics, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow, syncPipeline, redditSyncPipeline] = await Promise.all([
+  const [mentions, traffic, entities, alerts, syncRuns, collectionDiagnostics, providerHealth, mediaSources, propagationEdges, credentialRows, monidJobs, monidQueueStats, llmStats, llmBriefRow, syncPipeline, redditSyncPipeline, searchDemandSignals, searchEventWindows, eventOrigins] = await Promise.all([
     db.prepare(`SELECT mentions.*, social_post_metrics.post_id AS social_post_id,
       social_post_metrics.author_id AS social_author_id, social_post_metrics.author_username AS social_author_username,
       social_post_metrics.author_name AS social_author_name, social_post_metrics.follower_count AS social_follower_count,
@@ -616,6 +666,13 @@ export async function loadDashboardData(userId = "") {
       FROM sync_pipeline_jobs WHERE brand_id = ? AND task_type = 'main' ORDER BY created_at DESC LIMIT 1`).bind(brandId).first<Record<string, unknown>>(),
     db.prepare(`SELECT id, task_type, stage, status, attempts, max_attempts, next_retry_at, last_error, created_at, updated_at, completed_at
       FROM sync_pipeline_jobs WHERE brand_id = ? AND task_type = 'reddit' ORDER BY created_at DESC LIMIT 1`).bind(brandId).first<Record<string, unknown>>(),
+    db.prepare(`SELECT signal_date, clicks, impressions, ctr_micros, position_millis, complete, source, collected_at
+      FROM search_demand_signals WHERE brand_id = ? ORDER BY signal_date ASC LIMIT 180`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT id, event_key, peak_date, start_date, end_date, peak_clicks, peak_impressions, baseline_clicks,
+      spike_ratio, trigger_source, status, updated_at FROM search_event_windows WHERE brand_id = ? AND status IN ('active', 'confirmed')
+      ORDER BY peak_date DESC LIMIT 50`).bind(brandId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT id, event_key, title, url, platform, source, source_country, published_at, note, active
+      FROM event_origins WHERE brand_id = ? AND active = 1 ORDER BY published_at ASC`).bind(brandId).all<Record<string, unknown>>(),
   ]);
   const healthByName = new Map(providerHealth.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
   const gdeltHealth = healthByName.get("GDELT");
@@ -631,6 +688,7 @@ export async function loadDashboardData(userId = "") {
   const braveSearchConfigured = Boolean(env.BRAVE_SEARCH_API_KEY || storedCredentials.has("Brave Search"));
   const apifyConfigured = Boolean(env.APIFY_API_TOKEN || storedCredentials.has("Apify"));
   const brightDataConfigured = Boolean(env.BRIGHTDATA_API_KEY || storedCredentials.has("Bright Data"));
+  const searchConsoleConfigured = Boolean(env.GOOGLE_SEARCH_CONSOLE_CREDENTIALS || storedCredentials.has("Google Search Console"));
   const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
   const xConfigured = Boolean(env.X_BEARER_TOKEN || storedCredentials.has("X"));
   const youtubeConfigured = Boolean(env.YOUTUBE_API_KEY || storedCredentials.has("YouTube"));
@@ -774,6 +832,11 @@ export async function loadDashboardData(userId = "") {
     alerts: alerts.results,
     syncRuns: syncRuns.results,
     collectionDiagnostics: collectionDiagnostics.results,
+    searchDemandSignals: searchDemandSignals.results,
+    searchEvents: searchEventWindows.results.map((event) => ({
+      ...event,
+      origin: eventOrigins.results.find((origin) => String(origin.event_key) === String(event.event_key)) ?? null,
+    })),
     syncPipeline: syncPipeline ?? null,
     redditSyncPipeline: redditSyncPipeline ?? null,
     brand,
@@ -806,6 +869,11 @@ export async function loadDashboardData(userId = "") {
       archivedTotal: mentionRows.length,
     },
     connectors: [
+      { id: "google-search-console", provider: "Google Search Console", configurable: true, configured: searchConsoleConfigured,
+        lastFour: storedCredentials.get("Google Search Console")?.last_four ?? (env.GOOGLE_SEARCH_CONSOLE_CREDENTIALS ? "环境密钥" : ""),
+        name: "Google Search Console 搜索需求", status: searchConsoleConfigured ? "online" : "credentials",
+        detail: searchConsoleConfigured ? `${searchEventWindows.results.length} 个搜索攀升事件 · 每 6 小时更新点击与曝光曲线`
+          : "连接官网 Search Console；搜索需求明显持续攀升时建立事件窗口" },
       { id: "news", provider: "NewsAPI.ai", configurable: true, configured: newsApiConfigured, lastFour: storedCredentials.get("NewsAPI.ai")?.last_four ?? (env.NEWSAPI_AI_KEY ? "环境密钥" : ""), name: "全球发现引擎", status: newsLimited ? "limited" : "online", detail: newsDetail, retryAt,
         quotaUsed: newsQuotaByProvider.get("NewsAPI.ai")?.used ?? 0, quotaLimit: newsQuotaByProvider.get("NewsAPI.ai")?.limit ?? 48,
         quotaRemaining: newsQuotaByProvider.get("NewsAPI.ai")?.remaining ?? 48, quotaResetAt: newsQuotaByProvider.get("NewsAPI.ai")?.resetAt ?? "",

@@ -291,7 +291,7 @@ export default function ReportView({ brand, workspaceName, mentions, analytics, 
     ? `建议首先核验“${report.highRisk[0].title}”及其传播来源，同时关注${topCountry?.country ?? "主要市场"}是否出现连续转载或高互动负面评论。`
     : topAudienceRegion
       ? `建议继续跟踪${topAudienceRegion.region}的“${topAudienceRegion.topTopic || "主要讨论"}”反馈，并把高接受度观点转化为下一阶段的传播素材。`
-      : `建议继续观察${topCountry?.country ?? "核心市场"}和${topPlatform?.label ?? "主要渠道"}的声量变化，在形成异常峰值时回到事件传播页核验来源。`;
+      : `建议继续观察${topCountry?.country ?? "核心市场"}和${topPlatform?.label ?? "主要渠道"}的声量变化，在搜索需求开始明显攀升时回到事件传播页核验首发来源与相似内容链路。`;
   const aiBriefInScope = range === "30" && platformFilter === "全部平台" && countryFilter === "全部地区" && aiBrief?.version === "audience-evidence-v2" && Boolean(aiBrief?.executive_summary);
   const executiveSummary = aiBriefInScope ? String(aiBrief?.executive_summary) : deterministicExecutiveSummary;
   const interpretation = aiBriefInScope

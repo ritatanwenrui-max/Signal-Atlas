@@ -5,6 +5,7 @@ import { verifyMonidApiKey } from "../../../db/monid";
 import { runTranslationCycle } from "../../../db/translation";
 import { verifyOpenAIApiKey } from "../../../db/llm-analysis";
 import { analyzeCommentText } from "../../../db/text-analysis";
+import { syncSearchConsoleSignals, verifySearchConsoleCredential } from "../../../db/search-console";
 import { inferLanguage, inferSourceCountry } from "../../../db/providers";
 import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
@@ -126,9 +127,20 @@ export async function POST(request: Request) {
         return Response.json({ error: message }, { status: 400 });
       }
     }
+    if (provider === "Google Search Console") {
+      try {
+        await verifySearchConsoleCredential(credential.trim(), String(existingBrand?.website ?? ""));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Google Search Console 授权验证失败";
+        return Response.json({ error: message }, { status: 400 });
+      }
+    }
     await saveConnectorCredential(db, String(workspace.credential_owner_user_id), provider, credential, String(payload.lastFour ?? ""));
     if (["Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory"].includes(provider) && existingBrand?.id) {
       await runTranslationCycle(db, Number(existingBrand.id), String(workspace.credential_owner_user_id));
+    }
+    if (provider === "Google Search Console" && existingBrand?.id) {
+      await syncSearchConsoleSignals(db, Number(existingBrand.id), String(workspace.credential_owner_user_id), String(existingBrand.website ?? ""), true);
     }
   } else if (action === "deleteConnectorCredential") {
     await requireWorkspaceAccess(db, user.userId, "manage");
@@ -200,6 +212,37 @@ export async function POST(request: Request) {
         content_country = CASE WHEN content_country IN ('', '地区未披露', '地区待确认', '华语地区') OR content_country = source_country THEN ? ELSE content_country END,
         source_country = ?, language = ?, location_confidence = 100, location_method = '人工校正'
         WHERE id = ? AND brand_id = ?`).bind(country, country, language, mentionId, brandId).run();
+    } else if (action === "createEventOrigin") {
+      const title = String(payload.title ?? "").trim();
+      const url = String(payload.url ?? "").trim();
+      const eventDate = String(payload.eventDate ?? "").slice(0, 10);
+      const publishedAt = String(payload.publishedAt ?? "");
+      if (!title || !url || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) || !publishedAt) {
+        return Response.json({ error: "攀升开始日期、首发时间、标题和原文链接为必填项" }, { status: 400 });
+      }
+      const linkedWindow = await db.prepare(`SELECT event_key FROM search_event_windows WHERE brand_id = ?
+        AND (date(?) BETWEEN date(start_date) AND date(end_date) OR date(?) BETWEEN date(start_date) AND date(end_date))
+        ORDER BY CASE trigger_source WHEN 'gsc' THEN 0 ELSE 1 END, ABS(julianday(peak_date) - julianday(?)) ASC LIMIT 1`)
+        .bind(brandId, eventDate, publishedAt.slice(0, 10), eventDate).first<{ event_key: string }>();
+      const eventKey = linkedWindow?.event_key ?? `search-event-${eventDate}`;
+      if (!linkedWindow) {
+        const eventStart = new Date(`${eventDate}T12:00:00Z`);
+        const shift = (days: number) => new Date(eventStart.getTime() + days * 86400_000).toISOString().slice(0, 10);
+        await db.prepare(`INSERT INTO search_event_windows
+          (brand_id, event_key, peak_date, start_date, end_date, peak_clicks, peak_impressions, baseline_clicks, spike_ratio, trigger_source, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 'manual', 'confirmed', ?)
+          ON CONFLICT(brand_id, event_key) DO UPDATE SET start_date = excluded.start_date, end_date = excluded.end_date,
+            trigger_source = 'manual', status = 'confirmed', updated_at = excluded.updated_at`)
+          .bind(brandId, eventKey, eventDate, eventDate, shift(7), new Date().toISOString()).run();
+      }
+      await db.prepare(`INSERT INTO event_origins
+        (brand_id, event_key, title, url, platform, source, source_country, published_at, note, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(brand_id, url) DO UPDATE SET event_key = excluded.event_key, title = excluded.title,
+          platform = excluded.platform, source = excluded.source, source_country = excluded.source_country,
+          published_at = excluded.published_at, note = excluded.note, active = 1, updated_at = excluded.updated_at`)
+        .bind(brandId, eventKey, title, url, String(payload.platform ?? "X"), String(payload.source ?? "官方账号"),
+          String(payload.sourceCountry ?? "全球"), publishedAt, String(payload.note ?? ""), new Date().toISOString()).run();
     } else if (action === "createTraffic") {
       const visitors = Math.max(0, Number(payload.visitors ?? 0));
       const baseline = Math.max(1, Number(payload.baseline ?? 1));

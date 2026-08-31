@@ -38,7 +38,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /getElementById\(mapId\)/);
   assert.match(page, /高频议题词云/);
   assert.match(page, /情绪结构/);
-  assert.match(page, /事件爆发曲线/);
+  assert.match(page, /传播节点爆发曲线/);
   assert.match(page, /并列事件对比/);
   assert.match(page, /高度转载率/);
   assert.match(page, /同一事件扩散路径/);
@@ -61,6 +61,30 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /60 \* 60 \* 1000/);
   assert.match(page, /<strong>Somnia Lab<\/strong><small>GLOBAL MEDIA INTELLIGENCE<\/small>/);
   assert.doesNotMatch(page, /硅姬|矽姬/);
+});
+
+test("search-demand events begin at a clear rise while propagation keeps news-similarity evidence", async () => {
+  const [page, searchConsole, repository, route, migration] = await Promise.all([
+    source("app/page.tsx"), source("db/search-console.ts"), source("db/repository.ts"),
+    source("app/api/data/route.ts"), source("drizzle/0023_curly_skreet.sql"),
+  ]);
+  assert.match(searchConsole, /const obviousRise/);
+  assert.match(searchConsole, /current\.clicks >= Math\.max\(previous \* 1\.35, baseline \* 2\)/);
+  assert.match(searchConsole, /startDate: ordered\[startCandidate\.index\]\.date/);
+  assert.match(searchConsole, /peakDate: peak\.date/);
+  assert.match(searchConsole, /status: stillElevated \? "active" : "confirmed"/);
+  assert.match(searchConsole, /www\.googleapis\.com\/webmasters\/v3\/sites/);
+  assert.match(searchConsole, /webmasters\.readonly/);
+  assert.match(repository, /status IN \('active', 'confirmed'\)/);
+  assert.match(page, /明显持续攀升的第一天即为事件开始/);
+  assert.match(page, /最高点只记录峰值/);
+  assert.match(page, /existing text-similarity cluster decides which coverage belongs to it/);
+  assert.match(page, /data\.propagationEdges\.filter/);
+  assert.match(page, /inferredEdges = selectedEdges\.filter\(\(edge\) => edge\.id > 0\)/);
+  assert.match(route, /action === "createEventOrigin"/);
+  assert.match(migration, /CREATE TABLE `search_demand_signals`/);
+  assert.match(migration, /CREATE TABLE `search_event_windows`/);
+  assert.match(migration, /CREATE TABLE `event_origins`/);
 });
 
 test("every sidebar feature has a durable URL with refresh and browser history support", async () => {

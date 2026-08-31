@@ -162,6 +162,13 @@
       "when": 1787905529152,
       "tag": "0022_wooden_peter_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1788143893686,
+      "tag": "0023_curly_skreet",
+      "breakpoints": true
     }
   ]
 }

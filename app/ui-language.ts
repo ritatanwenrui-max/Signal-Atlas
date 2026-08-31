@@ -93,7 +93,7 @@ const ENGLISH: Record<string, string> = {
   "历史新闻档案": "Lifetime media archive",
   "持续累积，不覆盖旧记录": "Continuously accumulated; old records are preserved",
   "有史以来全部记录": "All records since monitoring began",
-  "连续 96 小时无新增则切分事件": "An event closes after 96 hours without new coverage",
+  "搜索需求明显攀升时开始识别": "Detection starts when search demand begins a clear rise",
   "国家 / 地区": "Countries / regions",
   "由来源元数据、域名、媒体及语言推断": "Inferred from source metadata, domain, publisher and language",
   "跨境传播边": "Cross-border propagation links",
@@ -157,9 +157,42 @@ const ENGLISH: Record<string, string> = {
   "人工保存后优先级最高，自动巡检不会覆盖这次校正。": "Manual corrections have the highest priority and will not be overwritten by automatic scans.",
   "保存校正": "Save correction",
   "传播事件": "Propagation events",
+  "正式事件": "Confirmed events",
+  "官网搜索需求明显持续攀升的第一天即为事件开始；最高点只记录峰值。窗口内仍由原有新闻相似度与发布时间逻辑筛选同一事件内容并推断传播边。": "An event begins on the first day official-site search demand shows a clear, sustained rise. The later high point is recorded only as the peak. Within that window, the existing news-similarity and publication-time logic still selects related coverage and infers propagation links.",
+  "设定事件起点": "Set event origin",
+  "Search Console 用于识别搜索需求从哪一天开始明显攀升；事件内容与扩散方向仍由发布时间、标题正文相似度、关键数字、跨语言主题指纹和显式引用共同判断。": "Search Console identifies the day search demand begins a clear rise. Event content and propagation direction are still determined by publication time, title and body similarity, key figures, cross-language topic fingerprints, and explicit citations.",
+  "事件时间证据": "Event timing evidence",
+  "攀升开始": "Rise started",
+  "最高点": "Peak",
+  "观察至": "Observed through",
+  "最高点点击": "Peak clicks",
+  "最高点曝光": "Peak impressions",
+  "相对基线": "vs. baseline",
+  "待回填": "Pending data",
+  "已确认": "Confirmed",
+  "攀升开始日期已人工确认；连接 Google Search Console 后自动回填每日点击、曝光、基线与最高点。": "The rise-start date has been manually confirmed. Connect Google Search Console to populate daily clicks, impressions, the baseline, and the peak automatically.",
+  "事件窗口": "Event window",
+  "从明显攀升首日开始": "Starts on the first clear rising day",
+  "传播节点峰值": "Propagation node peak",
+  "至少需要 2 个传播节点": "At least two propagation nodes are required",
+  "新闻相似度证据评分": "News-similarity evidence score",
+  "传播跨度": "Propagation span",
+  "首发起点至最后节点": "Origin to final node",
+  "当前没有检测到搜索需求明显攀升的传播事件。连接 Search Console，或先人工登记已知的攀升开始日期与首发起点。": "No propagation event with a clear rise in search demand has been detected. Connect Search Console or manually record a known rise-start date and origin.",
+  "登记攀升开始与首发起点": "Record rise start and publication origin",
+  "这里登记搜索需求开始明显攀升的日期与可核验的首发内容。官方账号帖子只进入传播图，不会重新出现在外部新闻档案中。": "Record the date search demand began a clear rise and the verifiable originating publication. Official-account posts appear only in the propagation graph and are not added back to the external media archive.",
+  "明显攀升开始日期 *": "Clear rise start date *",
+  "首发发布时间 *": "Origin publication time *",
+  "首发平台": "Origin platform",
+  "账号 / 来源 *": "Account / source *",
+  "事件标题 *": "Event title *",
+  "首发原文链接 *": "Origin URL *",
+  "起点说明": "Origin rationale",
+  "保存事件起点": "Save event origin",
   "同一事件扩散路径": "Propagation path for the same event",
   "从左到右按发布时间排列；方块颜色代表发布渠道，点击节点查看证据。": "Ordered left to right by publication time. Node colors represent channels; select a node to inspect evidence.",
-  "同一事件由连续爆发时间、品牌实体、标题正文、关键数字和跨语言主题指纹共同判断；连续 96 小时没有新增报道会强制结束上一事件，避免跨越长空窗期误合并。": "Events are identified using burst timing, brand entities, title and body similarity, key numbers and cross-language topic fingerprints. An event closes after 96 hours without new coverage to avoid merging across long gaps.",
+  "事件时间由两层证据共同确定。Google Search Console 的搜索需求一旦明显脱离近期基线并持续攀升，第一天就视为事件开始；后来的最高点只记录这次事件何时达到最大关注度，不会被误当成起点。系统随后在这个时间窗口内继续使用原有的新闻相似度方法，比较标题、正文、人物、产品、地点、关键事实、相同段落和引用来源，只把内容高度相关的报道与帖子纳入同一传播图。": "Event timing uses two layers of evidence. Once Google Search Console demand clearly departs from its recent baseline and continues rising, the first day is treated as the event start. The later high point records only when attention peaked and is never mistaken for the origin. Within that window, the existing news-similarity method compares titles, bodies, people, products, locations, key facts, shared passages, and cited sources, adding only closely related coverage to the same propagation graph.",
+  "传播起点优先采用能够核验的官方原帖、明确引用来源或最早公开报道。传播链路只能从较早发布的内容指向较晚发布的内容。直接引用、链接或明显文本复制属于高置信关系；时间明确且内容高度相似但没有直接引用时属于中置信；只有时间和话题接近时属于低置信。搜索曲线负责回答“事件何时开始受到关注”，文本相似度负责回答“哪些内容属于该事件以及如何传播”，两者不会互相替代。": "The origin prioritizes a verifiable official post, an explicitly cited source, or the earliest public report. Propagation can only point from earlier to later content. Direct citations, links, or obvious copying are high-confidence relationships; clear timing with strong textual similarity but no direct citation is medium confidence; timing and topic proximity alone is low confidence. The search curve answers when attention began rising, while text similarity answers which content belongs to the event and how it spread. Neither replaces the other.",
   "最早信源": "Earliest source",
   "同地区": "Same region",
   "跨地区": "Cross-region",
@@ -666,23 +699,25 @@ export function useAmericanEnglishBatch(sources: string[], language: UiLanguage)
 
   useEffect(() => {
     const items = JSON.parse(sourceKey) as string[];
-    if (language !== "en") {
-      setState({ values: Object.fromEntries(items.map((item) => [item, item])), loading: false, failed: 0 });
-      return;
-    }
-
-    loadDynamicTranslations();
-    const initial = Object.fromEntries(items.flatMap((item) => {
-      const cached = DYNAMIC_ENGLISH.get(item);
-      if (usableAmericanEnglish(cached)) return [[item, cached!]];
-      return /^[\x20-\x7E]+$/.test(item) ? [[item, item]] : [];
-    }));
-    const pending = items.filter((item) => !usableAmericanEnglish(DYNAMIC_ENGLISH.get(item)));
-    setState({ values: initial, loading: pending.length > 0, failed: 0 });
-    if (!pending.length) return;
-
     let cancelled = false;
     void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      if (language !== "en") {
+        setState({ values: Object.fromEntries(items.map((item) => [item, item])), loading: false, failed: 0 });
+        return;
+      }
+
+      loadDynamicTranslations();
+      const initial = Object.fromEntries(items.flatMap((item) => {
+        const cached = DYNAMIC_ENGLISH.get(item);
+        if (usableAmericanEnglish(cached)) return [[item, cached!]];
+        return /^[\x20-\x7E]+$/.test(item) ? [[item, item]] : [];
+      }));
+      const pending = items.filter((item) => !usableAmericanEnglish(DYNAMIC_ENGLISH.get(item)));
+      setState({ values: initial, loading: pending.length > 0, failed: 0 });
+      if (!pending.length) return;
+
       const translated = { ...initial };
       let failed = 0;
       for (let index = 0; index < pending.length; index += 16) {

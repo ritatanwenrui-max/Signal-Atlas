@@ -123,6 +123,61 @@ export const trafficSignals = sqliteTable("traffic_signals", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("idx_traffic_brand_country_recorded").on(table.brandId, table.country, table.recordedAt)]);
 
+export const searchDemandSignals = sqliteTable("search_demand_signals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
+  signalDate: text("signal_date").notNull(),
+  clicks: integer("clicks").notNull().default(0),
+  impressions: integer("impressions").notNull().default(0),
+  ctrMicros: integer("ctr_micros").notNull().default(0),
+  positionMillis: integer("position_millis").notNull().default(0),
+  complete: integer("complete", { mode: "boolean" }).notNull().default(true),
+  source: text("source").notNull().default("gsc"),
+  collectedAt: text("collected_at").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_search_demand_brand_date").on(table.brandId, table.signalDate),
+]);
+
+export const searchEventWindows = sqliteTable("search_event_windows", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
+  eventKey: text("event_key").notNull(),
+  peakDate: text("peak_date").notNull(),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  peakClicks: integer("peak_clicks").notNull().default(0),
+  peakImpressions: integer("peak_impressions").notNull().default(0),
+  baselineClicks: integer("baseline_clicks").notNull().default(0),
+  spikeRatio: integer("spike_ratio").notNull().default(0),
+  triggerSource: text("trigger_source").notNull().default("gsc"),
+  status: text("status").notNull().default("confirmed"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_search_events_brand_key").on(table.brandId, table.eventKey),
+  index("idx_search_events_brand_peak").on(table.brandId, table.peakDate),
+]);
+
+export const eventOrigins = sqliteTable("event_origins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brandId: integer("brand_id").notNull().default(0),
+  eventKey: text("event_key").notNull(),
+  title: text("title").notNull(),
+  url: text("url").notNull(),
+  platform: text("platform").notNull().default("X"),
+  source: text("source").notNull(),
+  sourceCountry: text("source_country").notNull().default("全球"),
+  publishedAt: text("published_at").notNull(),
+  note: text("note").notNull().default(""),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_event_origins_brand_url").on(table.brandId, table.url),
+  index("idx_event_origins_brand_event").on(table.brandId, table.eventKey, table.active),
+]);
+
 export const trackedEntities = sqliteTable("tracked_entities", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   brandId: integer("brand_id").notNull().default(0),
