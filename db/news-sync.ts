@@ -4,7 +4,7 @@ import { backfillMediaSources, crawlMediaSources, registerMediaSources } from ".
 import { refreshPublicCommentAnalyses } from "./comments";
 import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
-import { fetchApifySocialSearch, fetchBlueskySearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchGdelt, fetchGNews, fetchGuardian, fetchHackerNews, fetchMastodon, fetchMediaCloud, fetchMediastack, fetchNewsApiOrg, fetchNewsData, fetchScrapeCreators, fetchTheNewsApi, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
+import { fetchApifySocialSearch, fetchBlueskySearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchForemBlogs, fetchGdelt, fetchGNews, fetchGuardian, fetchHackerNews, fetchMastodon, fetchMediaCloud, fetchMediastack, fetchNewsApiOrg, fetchNewsData, fetchScrapeCreators, fetchTheNewsApi, fetchTumblrBlogs, fetchWordPressBlogs, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
 import { runTranslationCycle } from "./translation";
 import { runHybridAnalysisCycle } from "./llm-analysis";
@@ -234,7 +234,7 @@ function analyzeText(text: string, terms: string[]) {
 }
 
 function impactFor(candidate: MonitoringCandidate) {
-  const base = candidate.platform === "网页新闻" ? 62 : candidate.platform === "YouTube" ? 58 : 48;
+  const base = candidate.platform === "网页新闻" ? 62 : candidate.platform === "博客" ? 56 : candidate.platform === "YouTube" ? 58 : 48;
   return Math.min(98, base + Math.round(Math.log10(candidate.engagement + 1) * 12));
 }
 
@@ -480,7 +480,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const health = new Map(healthRows.results.map((item) => [item.provider.replace(/^\d+:/, ""), item]));
       const [newsApiKey, mediaCloudApiKey, newsDataApiKey, worldNewsApiKey, scrapeCreatorsApiKey, braveSearchApiKey,
         apifyApiToken, brightDataCredential, xBearerToken, youtubeApiKey, theNewsApiKey, gnewsApiKey, newsApiOrgKey,
-        mediastackApiKey, guardianApiKey, mastodonCredential] = await Promise.all([
+        mediastackApiKey, guardianApiKey, mastodonCredential, tumblrApiKey] = await Promise.all([
         loadConnectorCredential(db, "NewsAPI.ai", credentialOwnerId),
         loadConnectorCredential(db, "Media Cloud", credentialOwnerId),
         loadConnectorCredential(db, "NewsData.io", credentialOwnerId),
@@ -493,6 +493,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         loadConnectorCredential(db, "The News API", credentialOwnerId), loadConnectorCredential(db, "GNews", credentialOwnerId),
         loadConnectorCredential(db, "NewsAPI.org", credentialOwnerId), loadConnectorCredential(db, "mediastack", credentialOwnerId),
         loadConnectorCredential(db, "Guardian Open Platform", credentialOwnerId), loadConnectorCredential(db, "Mastodon", credentialOwnerId),
+        loadConnectorCredential(db, "Tumblr Tagged", credentialOwnerId),
       ]);
       const monidApiKey = earlyMonidApiKey;
       const eventRegistryDue = force || isDue(health.get("NewsAPI.ai")?.last_success_at, NEWS_PROVIDER_PLANS["NewsAPI.ai"].intervalMs);
@@ -511,6 +512,9 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const mastodonDue = force || isDue(health.get("Mastodon")?.last_success_at, NEWS_PROVIDER_PLANS.Mastodon.intervalMs);
       const blueskyDue = force || isDue(health.get("Bluesky Search")?.last_success_at, NEWS_PROVIDER_PLANS["Bluesky Search"].intervalMs);
       const hackerNewsDue = force || isDue(health.get("Hacker News")?.last_success_at, NEWS_PROVIDER_PLANS["Hacker News"].intervalMs);
+      const wordpressDue = force || isDue(health.get("WordPress.com Reader")?.last_success_at, NEWS_PROVIDER_PLANS["WordPress.com Reader"].intervalMs);
+      const foremDue = force || isDue(health.get("DEV / Forem Blogs")?.last_success_at, NEWS_PROVIDER_PLANS["DEV / Forem Blogs"].intervalMs);
+      const tumblrDue = force || isDue(health.get("Tumblr Tagged")?.last_success_at, NEWS_PROVIDER_PLANS["Tumblr Tagged"].intervalMs);
       const gdeltDue = isDue(health.get("GDELT")?.last_success_at, ONE_DAY);
       const monidPlatforms: MonidSearchPlatform[] = mode === "reddit" ? ["Reddit"]
         : mode === "discovery" ? ["Instagram", "X", "YouTube", "TikTok", "Facebook"]
@@ -548,6 +552,12 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
           load: quotaProtectedTask(db, credentialOwnerId, "Bluesky Search", () => fetchBlueskySearch(discoveryTerms)) }] : []),
         ...(mode !== "reddit" && hackerNewsDue ? [{ name: "Hacker News",
           load: quotaProtectedTask(db, credentialOwnerId, "Hacker News", () => fetchHackerNews(discoveryTerms)) }] : []),
+        ...(mode !== "reddit" && wordpressDue ? [{ name: "WordPress.com Reader",
+          load: quotaProtectedTask(db, credentialOwnerId, "WordPress.com Reader", () => fetchWordPressBlogs(discoveryTerms)) }] : []),
+        ...(mode !== "reddit" && foremDue ? [{ name: "DEV / Forem Blogs",
+          load: quotaProtectedTask(db, credentialOwnerId, "DEV / Forem Blogs", () => fetchForemBlogs(discoveryTerms)) }] : []),
+        ...(mode !== "reddit" && tumblrDue && tumblrApiKey ? [{ name: "Tumblr Tagged",
+          load: quotaProtectedTask(db, credentialOwnerId, "Tumblr Tagged", () => fetchTumblrBlogs(discoveryTerms, tumblrApiKey)) }] : []),
         ...(mode !== "reddit" && gdeltDue ? [{ name: "GDELT", load: () => fetchGdelt(query) }] : []),
         ...(monidApiKey ? [{ name: mode === "reddit" ? "Monid / Reddit" : "Monid social coordinator",
           load: () => collectMonidSocial(db, brandId, discoveryTerms, monidApiKey, { force, platforms: monidPlatforms, includeComments: mode === "full", hashtagTerms }) }] : []),
@@ -589,7 +599,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       }
 
       const diagnostics = new Map<string, DiagnosticBucket>();
-      for (const platform of mode === "reddit" ? ["Reddit"] : ["网页新闻", "Instagram", "X", "YouTube", "TikTok", "Facebook"]) {
+      for (const platform of mode === "reddit" ? ["Reddit"] : ["网页新闻", "博客", "Instagram", "X", "YouTube", "TikTok", "Facebook"]) {
         diagnosticBucket(diagnostics, platform, queryCountForPlatform(platform, discoveryTerms, hashtagTerms));
       }
       const applyScope = (candidate: MonitoringCandidate) => {
@@ -684,6 +694,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       const stateByPlatform = new Map(platformStates.map((item) => [item.platform, item]));
       const defaultProviders: Record<string, string> = {
         "网页新闻": ready.filter((item) => ["NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon", "Bluesky Search", "Hacker News", "GDELT"].includes(item.name)).map((item) => item.name).join(" + ") || "免费媒体追踪",
+        "博客": ready.filter((item) => ["WordPress.com Reader", "DEV / Forem Blogs", "Tumblr Tagged"].includes(item.name)).map((item) => item.name).join(" + ") || "公开博客索引",
         Instagram: ["Monid / Instagram", scrapeCreatorsApiKey ? "ScrapeCreators" : "", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),
         X: [xBearerToken ? "X API" : "", "Monid / X", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),
         YouTube: [youtubeApiKey ? "YouTube API" : "", "Monid / YouTube", braveSearchApiKey ? "Brave Search" : "", apifyApiToken ? "Apify" : "", brightDataCredential ? "Bright Data" : ""].filter(Boolean).join(" + "),
@@ -696,6 +707,7 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
         const pendingCount = Number(platformState?.pending ?? 0);
         const platformErrors = errors.filter((message) => bucket.platform === "网页新闻"
           ? /NewsAPI\.ai|Media Cloud|NewsData\.io|World News API|GDELT|crawler/i.test(message)
+          : bucket.platform === "博客" ? /WordPress\.com Reader|DEV \/ Forem Blogs|Tumblr Tagged/i.test(message)
           : message.toLocaleLowerCase().includes(bucket.platform.toLocaleLowerCase()) || /ScrapeCreators|Brave Search|Apify|Bright Data/i.test(message));
         if (platformState?.lastError && !platformErrors.includes(platformState.lastError)) platformErrors.push(platformState.lastError);
         const platformUnhealthy = Boolean(platformState && ["limited", "error", "blocked"].includes(platformState.status));

@@ -693,6 +693,7 @@ export async function loadDashboardData(userId = "") {
   const newsApiOrgConfigured = Boolean(env.NEWSAPI_ORG_KEY || storedCredentials.has("NewsAPI.org"));
   const mediastackConfigured = Boolean(env.MEDIASTACK_API_KEY || storedCredentials.has("mediastack"));
   const guardianConfigured = Boolean(env.GUARDIAN_API_KEY || storedCredentials.has("Guardian Open Platform"));
+  const tumblrConfigured = Boolean(env.TUMBLR_API_KEY || storedCredentials.has("Tumblr Tagged"));
   const mastodonConfigured = Boolean(env.MASTODON_INSTANCE || storedCredentials.has("Mastodon"));
   const searchConsoleConfigured = Boolean(env.GOOGLE_SEARCH_CONSOLE_CREDENTIALS || storedCredentials.has("Google Search Console"));
   const monidConfigured = Boolean(env.MONID_API_KEY || storedCredentials.has("Monid / Instagram"));
@@ -897,6 +898,7 @@ export async function loadDashboardData(userId = "") {
         { id: "newsapi-org", provider: "NewsAPI.org", configured: newsApiOrgConfigured, envConfigured: Boolean(env.NEWSAPI_ORG_KEY), name: "NewsAPI.org 新闻搜索" },
         { id: "mediastack", provider: "mediastack", configured: mediastackConfigured, envConfigured: Boolean(env.MEDIASTACK_API_KEY), name: "mediastack 全球新闻补档" },
         { id: "guardian", provider: "Guardian Open Platform", configured: guardianConfigured, envConfigured: Boolean(env.GUARDIAN_API_KEY), name: "Guardian Open Platform" },
+        { id: "tumblr", provider: "Tumblr Tagged", configured: tumblrConfigured, envConfigured: Boolean(env.TUMBLR_API_KEY), name: "Tumblr 多语言博客标签搜索" },
         { id: "mastodon", provider: "Mastodon", configured: mastodonConfigured, envConfigured: Boolean(env.MASTODON_INSTANCE), name: "Mastodon 联邦搜索" },
       ].map((item) => {
         const quota = newsQuotaByProvider.get(item.provider)!;
@@ -913,13 +915,17 @@ export async function loadDashboardData(userId = "") {
             : `${quota.scheduleLabel}自动更新 · 今日 ${quota.used}/${quota.limit} · 剩余 ${quota.remaining} · ${quota.rationale}`,
         };
       }),
-      ...["Bluesky Search", "Hacker News"].map((provider) => {
-        const quota = newsQuotaByProvider.get(provider)!;
-        const health = healthByName.get(provider);
+      ...[
+        { provider: "Bluesky Search", id: "bluesky-public", name: "Bluesky 公开帖子搜索" },
+        { provider: "Hacker News", id: "hacker-news-public", name: "Hacker News 技术社区搜索" },
+        { provider: "WordPress.com Reader", id: "wordpress-reader", name: "WordPress.com 全球博客标签" },
+        { provider: "DEV / Forem Blogs", id: "forem-blogs", name: "DEV / Forem 公开博客关键词搜索" },
+      ].map((item) => {
+        const quota = newsQuotaByProvider.get(item.provider)!;
+        const health = healthByName.get(item.provider);
         const limited = Boolean((health?.retry_after && new Date(health.retry_after).getTime() > Date.now()) || quota.remaining <= 0);
         return {
-          id: provider === "Bluesky Search" ? "bluesky-public" : "hacker-news-public", provider, configurable: false, configured: true,
-          name: provider === "Bluesky Search" ? "Bluesky 公开帖子搜索" : "Hacker News 技术社区搜索",
+          id: item.id, provider: item.provider, configurable: false, configured: true, name: item.name,
           status: (limited ? "limited" : "online") as "limited" | "online", retryAt: quota.remaining <= 0 ? quota.resetAt : health?.retry_after ?? "",
           quotaUsed: quota.used, quotaLimit: quota.limit, quotaRemaining: quota.remaining, quotaResetAt: quota.resetAt, scheduleLabel: quota.scheduleLabel,
           detail: `${quota.scheduleLabel}自动更新 · 免注册、免密钥 · 今日 ${quota.used}/${quota.limit} · ${quota.rationale}`,

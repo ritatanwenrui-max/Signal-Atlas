@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 const supportedProviders = new Set([
   "NewsAPI.ai", "Media Cloud", "NewsData.io", "World News API", "Monid / Instagram", "X", "YouTube", "Meta / Instagram", "TikTok",
   "ScrapeCreators", "Brave Search", "Apify", "Bright Data",
-  "The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon",
+  "The News API", "GNews", "NewsAPI.org", "mediastack", "Guardian Open Platform", "Mastodon", "Tumblr Tagged",
   "Azure Translator", "DeepL API Free", "LibreTranslate", "MyMemory", "OpenAI LLM",
 ]);
 
@@ -59,6 +59,7 @@ export async function loadConnectorCredential(db: D1Database, provider: string, 
     : provider === "NewsAPI.org" ? env.NEWSAPI_ORG_KEY
     : provider === "mediastack" ? env.MEDIASTACK_API_KEY
     : provider === "Guardian Open Platform" ? env.GUARDIAN_API_KEY
+    : provider === "Tumblr Tagged" ? env.TUMBLR_API_KEY
     : provider === "Mastodon" && env.MASTODON_INSTANCE
       ? JSON.stringify({ instance: env.MASTODON_INSTANCE, token: env.MASTODON_ACCESS_TOKEN || "" })
     : provider === "X" ? env.X_BEARER_TOKEN : provider === "YouTube" ? env.YOUTUBE_API_KEY

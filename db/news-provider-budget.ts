@@ -91,6 +91,21 @@ export const NEWS_PROVIDER_PLANS: Record<string, NewsProviderPlan> = {
     scheduleLabel: "每 6 小时", quotaLabel: "12 次公开搜索 / 日站内安全预算",
     rationale: "公开免密钥搜索；用于补充技术社区中的品牌讨论",
   },
+  "WordPress.com Reader": {
+    provider: "WordPress.com Reader", intervalMs: 6 * HOUR, dailyLimit: 12, unitsPerRun: 3,
+    scheduleLabel: "每 6 小时", quotaLabel: "12 次标签检索 / 日站内安全预算",
+    rationale: "免注册、免密钥；每轮检索最多 3 个品牌与产品标签，覆盖公开 WordPress.com 与已连接 Jetpack 博客",
+  },
+  "DEV / Forem Blogs": {
+    provider: "DEV / Forem Blogs", intervalMs: 6 * HOUR, dailyLimit: 4, unitsPerRun: 1,
+    scheduleLabel: "每 6 小时", quotaLabel: "4 次关键词检索 / 日站内安全预算",
+    rationale: "公开免密钥关键词搜索；补充 DEV 与 Forem 技术博客、开发者文章和产品讨论",
+  },
+  "Tumblr Tagged": {
+    provider: "Tumblr Tagged", intervalMs: 6 * HOUR, dailyLimit: 12, unitsPerRun: 3,
+    scheduleLabel: "每 6 小时", quotaLabel: "12 次标签检索 / 日站内安全预算",
+    rationale: "免费开发者密钥；每轮最多检索 3 个标签，补充多语言创作者博客与转载内容",
+  },
 };
 
 export function quotaDay(now = new Date()) { return now.toISOString().slice(0, 10); }

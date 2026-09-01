@@ -43,6 +43,7 @@ declare module "cloudflare:workers" {
     NEWSAPI_ORG_KEY?: string;
     MEDIASTACK_API_KEY?: string;
     GUARDIAN_API_KEY?: string;
+    TUMBLR_API_KEY?: string;
     MASTODON_INSTANCE?: string;
     MASTODON_ACCESS_TOKEN?: string;
     GOOGLE_SEARCH_CONSOLE_CREDENTIALS?: string;

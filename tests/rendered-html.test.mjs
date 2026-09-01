@@ -11,7 +11,7 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /新闻档案/);
   assert.match(page, /有史以来全部记录/);
   assert.match(page, /导出 CSV/);
-  assert.match(page, /const platformCatalog = \["网页新闻", "Instagram", "Facebook", "TikTok", "X", "YouTube", "Reddit"\]/);
+  assert.match(page, /const platformCatalog = \["网页新闻", "博客", "Instagram", "Facebook", "TikTok", "X", "YouTube", "Reddit"\]/);
   assert.match(page, /platformCounts\[item\] \?\? 0/);
   assert.match(page, /配置监测品牌/);
   assert.match(page, /监测概览/);
@@ -149,6 +149,29 @@ test("hybrid collection discovers globally and continuously follows free media s
   assert.match(repository, /CREATE TABLE IF NOT EXISTS media_sources/);
   assert.match(repository, /CREATE TABLE IF NOT EXISTS propagation_edges/);
   assert.match(repository, /每 6 小时发现/);
+});
+
+test("global blog discovery uses public multilingual indexes and a replaceable Tumblr key", async () => {
+  const [providers, sync, budget, repository, credentials, page] = await Promise.all([
+    source("db/providers.ts"), source("db/news-sync.ts"), source("db/news-provider-budget.ts"),
+    source("db/repository.ts"), source("db/credentials.ts"), source("app/page.tsx"),
+  ]);
+  assert.match(providers, /public-api\.wordpress\.com\/rest\/v1\.1\/read\/tags/);
+  assert.match(providers, /dev\.to\/api\/articles\/search/);
+  assert.match(providers, /api\.tumblr\.com\/v2\/tagged/);
+  assert.match(providers, /platform: "博客"/);
+  assert.match(sync, /fetchWordPressBlogs/);
+  assert.match(sync, /fetchForemBlogs/);
+  assert.match(sync, /fetchTumblrBlogs/);
+  assert.match(sync, /"博客": ready\.filter/);
+  assert.match(budget, /"WordPress\.com Reader"/);
+  assert.match(budget, /"DEV \/ Forem Blogs"/);
+  assert.match(budget, /"Tumblr Tagged"/);
+  assert.match(repository, /WordPress\.com 全球博客标签/);
+  assert.match(repository, /Tumblr 多语言博客标签搜索/);
+  assert.match(credentials, /"Tumblr Tagged"/);
+  assert.match(page, /新闻与博客发现/);
+  assert.match(page, /tumblr\.com\/oauth\/apps/);
 });
 
 test("archive discovery expands queries and explains every candidate disposition", async () => {

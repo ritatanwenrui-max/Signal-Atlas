@@ -4,7 +4,7 @@ export type MonitoringCandidate = {
   title: string;
   url: string;
   source: string;
-  platform: "网页新闻" | "Instagram" | "Facebook" | "TikTok" | "X" | "YouTube" | "Reddit";
+  platform: "网页新闻" | "博客" | "Instagram" | "Facebook" | "TikTok" | "X" | "YouTube" | "Reddit";
   sourceCountry: string;
   language: string;
   publishedAt: string;
@@ -678,6 +678,78 @@ export async function fetchGuardian(terms: string[], credential?: string): Promi
       publishedAt: isoDate(stringAt(item, ["webPublicationDate"])), engagement: 0,
       discussionText: plainProviderText(valueAt(item, ["fields.trailText"])), commentsAnalyzed: 0, parentUrl: "", relation: "",
       author: stringAt(item, ["fields.byline"]), provider: "Guardian Open Platform", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchWordPressBlogs(terms: string[]): Promise<MonitoringCandidate[]> {
+  const requests = [...new Set(terms.map((term) => term.trim()).filter(Boolean))].slice(0, 3).map(async (term) => {
+    const endpoint = new URL(`https://public-api.wordpress.com/rest/v1.1/read/tags/${encodeURIComponent(term)}/posts`);
+    endpoint.searchParams.set("number", "40"); endpoint.searchParams.set("order", "DESC"); endpoint.searchParams.set("after", `${lastMonthDate()}T00:00:00Z`);
+    const response = await fetch(endpoint, { headers: { Accept: "application/json", "User-Agent": "SignalAtlas/2.0" }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new ProviderRequestError("WordPress.com Reader", response.status, retryAfterMs(response), `WordPress.com HTTP ${response.status}`);
+    const payload = await response.json() as { posts?: Array<Record<string, unknown>> };
+    return payload.posts ?? [];
+  });
+  const posts = (await Promise.all(requests)).flat();
+  const seen = new Set<string>();
+  return posts.flatMap((item) => {
+    const url = stringAt(item, ["URL", "short_URL"]); const title = plainProviderText(item.title); if (!url || !title || seen.has(url)) return [];
+    seen.add(url);
+    const siteName = stringAt(item, ["site.name", "site.title"]); const language = stringAt(item, ["site.lang", "lang"]);
+    return [{ title, url, source: sourceNameFromUrl(url, siteName), platform: "博客" as const,
+      sourceCountry: "地区待确认", language: (languageNames[language] ?? language) || "语言待确认",
+      publishedAt: isoDate(stringAt(item, ["date", "modified"])),
+      engagement: numberFrom(item.like_count) + numberFrom(item.comment_count),
+      discussionText: [plainProviderText(item.excerpt), plainProviderText(item.content)].join(" ").slice(0, 4_000),
+      commentsAnalyzed: 0, parentUrl: "", relation: "博客提及", author: stringAt(item, ["author.name", "author.nice_name"]),
+      provider: "WordPress.com Reader", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchForemBlogs(terms: string[]): Promise<MonitoringCandidate[]> {
+  const endpoint = new URL("https://dev.to/api/articles/search");
+  endpoint.searchParams.set("q", compactBooleanQuery(terms, 180)); endpoint.searchParams.set("per_page", "50"); endpoint.searchParams.set("page", "1");
+  const response = await fetch(endpoint, { headers: { Accept: "application/vnd.forem.api-v1+json", "User-Agent": "SignalAtlas/2.0" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new ProviderRequestError("DEV / Forem Blogs", response.status, retryAfterMs(response), `DEV / Forem HTTP ${response.status}`);
+  const payload = await response.json() as Array<Record<string, unknown>> | { results?: Array<Record<string, unknown>>; articles?: Array<Record<string, unknown>> };
+  const articles = Array.isArray(payload) ? payload : payload.results ?? payload.articles ?? [];
+  return articles.flatMap((item) => {
+    const url = stringAt(item, ["url", "canonical_url"]); const title = plainProviderText(item.title); if (!url || !title) return [];
+    return [{ title, url, source: stringAt(item, ["organization.name"]) || "DEV Community", platform: "博客" as const,
+      sourceCountry: "地区待确认", language: "语言待确认", publishedAt: isoDate(stringAt(item, ["published_at", "published_timestamp", "created_at"])),
+      engagement: numberFrom(item.public_reactions_count) + numberFrom(item.comments_count),
+      discussionText: [plainProviderText(item.description), plainProviderText(item.body_html), stringAt(item, ["tag_list"])].join(" ").slice(0, 4_000),
+      commentsAnalyzed: 0, parentUrl: "", relation: "技术博客提及", author: stringAt(item, ["user.name", "user.username"]),
+      provider: "DEV / Forem Blogs", discoveredVia: "global_discovery" as const }];
+  });
+}
+
+export async function fetchTumblrBlogs(terms: string[], credential?: string): Promise<MonitoringCandidate[]> {
+  const apiKey = credential ?? env.TUMBLR_API_KEY;
+  if (!apiKey) return [];
+  const requests = [...new Set(terms.map((term) => term.trim()).filter(Boolean))].slice(0, 3).map(async (term) => {
+    const endpoint = new URL("https://api.tumblr.com/v2/tagged");
+    endpoint.searchParams.set("api_key", apiKey); endpoint.searchParams.set("tag", term); endpoint.searchParams.set("limit", "20"); endpoint.searchParams.set("filter", "text");
+    const response = await fetch(endpoint, { headers: { Accept: "application/json", "User-Agent": "SignalAtlas/2.0" }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new ProviderRequestError("Tumblr Tagged", response.status, retryAfterMs(response), `Tumblr HTTP ${response.status}`);
+    const payload = await response.json() as { response?: Array<Record<string, unknown>>; meta?: { status?: number; msg?: string } };
+    if (payload.meta?.status && payload.meta.status >= 400) throw new Error(`Tumblr: ${payload.meta.msg || "接口返回错误"}`);
+    return payload.response ?? [];
+  });
+  const posts = (await Promise.all(requests)).flat();
+  const seen = new Set<string>();
+  return posts.flatMap((item) => {
+    const url = stringAt(item, ["post_url"]); if (!url || seen.has(url)) return [];
+    const content = Array.isArray(item.content) ? (item.content as Array<Record<string, unknown>>).map((block) => stringAt(block, ["text", "media.url"])).join(" ") : "";
+    const body = [stringAt(item, ["title", "summary"]), plainProviderText(item.body), plainProviderText(item.caption), content].filter(Boolean).join(" ").trim();
+    const title = plainProviderText(valueAt(item, ["title", "summary"])) || body.slice(0, 500); if (!title) return [];
+    seen.add(url);
+    const blogName = stringAt(item, ["blog_name", "blog.name"]);
+    return [{ title, url, source: blogName ? `Tumblr · ${blogName}` : "Tumblr", platform: "博客" as const,
+      sourceCountry: "地区待确认", language: "语言待确认", publishedAt: dateAt(item),
+      engagement: numberFrom(item.note_count), discussionText: body.slice(0, 4_000), commentsAnalyzed: 0,
+      parentUrl: stringAt(item, ["reblogged_from_url", "reblog.parent_blog.post_url"]), relation: item.reblogged_from_url ? "转载博客" : "博客提及",
+      author: blogName, provider: "Tumblr Tagged", discoveredVia: "global_discovery" as const }];
   });
 }
 
