@@ -510,6 +510,9 @@ function resolvedInstagramPost(output: unknown) {
       caption,
       comments,
       likes: optionalNumber(row, ["like_count", "likes_count", "likes"]),
+      shares: optionalNumber(row, ["share_count", "shares_count", "reshare_count", "reshareCount"]),
+      views: optionalNumber(row, ["video_view_count", "view_count", "views_count", "views"]),
+      plays: optionalNumber(row, ["play_count", "video_play_count", "plays_count", "plays"]),
       username: firstText(row, ["user.username", "owner.username", "username"]),
       authorId: firstText(row, ["user.pk", "user.id", "owner.pk", "owner.id"]),
     };
@@ -767,8 +770,9 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
     await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
       last_error = '指定帖子 URL 已提交，但暂未解析出 Instagram Media ID；30 分钟后自动重试', updated_at = ?
       WHERE brand_id = ? AND mention_id = ?`).bind(now, brandId, descriptor.mentionId).run();
-    return;
+    return null;
   }
+  const engagement = [details.likes, details.comments, details.shares].filter((value) => value >= 0).reduce((sum, value) => sum + value, 0);
   await db.batch([
     db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?),
       status = CASE WHEN manual_requested = 1 THEN 'queued' ELSE 'metadata_complete' END,
@@ -776,10 +780,11 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
       last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
       .bind(details.mediaId, Math.max(0, details.comments), now, brandId, descriptor.mentionId),
     db.prepare(`UPDATE social_post_metrics SET post_id = ?, comments = MAX(comments, ?), likes = MAX(likes, ?),
+      shares = MAX(shares, ?), views = MAX(views, ?), plays = MAX(plays, ?),
       author_id = CASE WHEN ? != '' THEN ? ELSE author_id END,
       author_username = CASE WHEN ? != '' THEN ? ELSE author_username END, metrics_updated_at = ?
       WHERE brand_id = ? AND mention_id = ?`)
-      .bind(details.mediaId, Math.max(0, details.comments), Math.max(0, details.likes), details.authorId, details.authorId,
+      .bind(details.mediaId, details.comments, details.likes, details.shares, details.views, details.plays, details.authorId, details.authorId,
         details.username, details.username, now, brandId, descriptor.mentionId),
     db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' AND title LIKE '指定帖子%' THEN ? ELSE title END,
       source = CASE WHEN ? != '' THEN '@' || ? ELSE source END,
@@ -793,13 +798,14 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
       translation_attempts = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN 0 ELSE translation_attempts END,
       translation_next_retry_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_next_retry_at END,
       translated_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translated_at END,
-      capture_status = 'completed', capture_error = '', capture_updated_at = ?
+      engagement = MAX(engagement, ?), capture_status = 'completed', capture_error = '', capture_updated_at = ?
       WHERE brand_id = ? AND id = ?`)
       .bind(details.caption, details.caption.slice(0, 180), details.username, details.username, details.username, details.username,
         details.caption, details.caption.slice(0, 600), details.caption, details.caption, details.caption, details.caption,
-        details.caption, details.caption, details.caption, details.caption, now,
+        details.caption, details.caption, details.caption, details.caption, engagement, now,
         brandId, descriptor.mentionId),
   ]);
+  return details;
 }
 
 async function processRedditDetails(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
@@ -889,7 +895,8 @@ async function processJob(db: D1Database, brandId: number, apiKey: string, job: 
     return [];
   }
   if (job.stage === "resolve_post") {
-    await processResolvedPost(db, brandId, job, output);
+    const details = await processResolvedPost(db, brandId, job, output);
+    if (details?.username) await startProfileEnrichment(db, brandId, apiKey, [details.username]);
     await updateJob(db, job, run);
     return [];
   }

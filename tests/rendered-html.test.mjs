@@ -333,7 +333,7 @@ test("Monid searches six social platforms and archives public comments and repli
   assert.match(monid, /"retrying" \| "blocked" \| "unavailable" \| "error"/);
   assert.match(sync, /collectMonidSocial/);
   assert.match(sync, /upsertSocialMetrics/);
-  assert.doesNotMatch(sync, /queueSocialCommentTarget/);
+  assert.doesNotMatch(sync, /queueSocialCommentTarget[^\n]+manualRequested: true/);
   assert.match(monid, /manual_requested = 1/);
   assert.match(commentsRoute, /manualRequested: true/);
   assert.match(schema, /socialPostMetrics/);
@@ -485,7 +485,14 @@ test("manual archive links capture public engagement while comment sentiment rem
   assert.match(commentsRoute, /manualRequested: true/);
   assert.match(monid, /target\.manual_requested = 1/);
   assert.match(monid, /target\.metadata_requested = 1/);
+  assert.match(monid, /shares = MAX\(shares, \?\), views = MAX\(views, \?\), plays = MAX\(plays, \?\)/);
+  assert.match(monid, /startProfileEnrichment\(db, brandId, apiKey, \[details\.username\]\)/);
   assert.doesNotMatch(sync, /refreshPublicCommentAnalyses/);
+  assert.match(sync, /refreshManualLinkCaptures/);
+  assert.match(sync, /mention\.discovered_via = 'manual'/);
+  assert.match(sync, /social \? SIX_HOURS : ONE_DAY/);
+  assert.match(sync, /metadataRequested: true, manualRequested: false/);
+  assert.match(sync, /platforms: \[\], includeComments: false/);
   assert.match(schema, /manualRequested/);
   assert.match(repository, /ALTER TABLE social_comment_targets ADD COLUMN manual_requested/);
   assert.match(page, /采集并分析评论/);
@@ -665,7 +672,7 @@ test("independent social discovery APIs share the brand scope, exclusion, archiv
   assert.match(sync, /brandScopeDecision/);
   assert.match(sync, /命中排除词/);
   assert.match(sync, /upsertSocialMetrics/);
-  assert.doesNotMatch(sync, /queueSocialCommentTarget/);
+  assert.doesNotMatch(sync, /queueSocialCommentTarget[^\n]+manualRequested: true/);
 });
 
 test("additional global news connectors are replaceable, quota-aware, and honest about batch-only sources", async () => {

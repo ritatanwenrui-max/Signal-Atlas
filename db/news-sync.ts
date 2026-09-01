@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
-import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
+import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchApifySocialSearch, fetchBlueskySearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchForemBlogs, fetchGdelt, fetchGNews, fetchGuardian, fetchHackerNews, fetchMastodon, fetchMediaCloud, fetchMediastack, fetchNewsApiOrg, fetchNewsData, fetchScrapeCreators, fetchTheNewsApi, fetchTumblrBlogs, fetchWordPressBlogs, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
@@ -12,6 +12,8 @@ import { buildDiscoveryTerms, buildHashtagTerms, queryCountForPlatform } from ".
 import { NEWS_PROVIDER_PLANS, reserveNewsProviderQuota } from "./news-provider-budget";
 import { syncSearchConsoleSignals } from "./search-console";
 import { captureViralSocialEvents, syncMediaEventWindows } from "./event-detection";
+import { captureManualPublicLink } from "./manual-capture";
+import { socialPostDescriptor } from "./social-links";
 
 type TrackedEntity = { type: string; value: string; active: number };
 type SyncRun = { id: number; status: string; started_at: string };
@@ -295,6 +297,54 @@ function isDue(lastSuccessAt: string | undefined, interval: number) {
   return !lastSuccessAt || Date.now() - new Date(lastSuccessAt).getTime() >= interval;
 }
 
+type ManualCaptureRow = {
+  id: number; url: string; platform: string; capture_status: string; capture_updated_at: string;
+  comments: number | null;
+};
+
+function manualCaptureDue(row: ManualCaptureRow, social: boolean) {
+  if (!row.capture_status || !row.capture_updated_at) return true;
+  const age = Date.now() - new Date(row.capture_updated_at).getTime();
+  if (!Number.isFinite(age)) return true;
+  if (["queued", "running"].includes(row.capture_status)) return age >= 30 * 60_000;
+  if (row.capture_status === "failed") return age >= ONE_DAY;
+  return age >= (social ? SIX_HOURS : ONE_DAY);
+}
+
+async function refreshManualLinkCaptures(db: D1Database, brandId: number, exactSocialEnabled: boolean) {
+  const rows = await db.prepare(`SELECT mention.id, mention.url, mention.platform, mention.capture_status, mention.capture_updated_at,
+      metrics.comments
+    FROM mentions mention LEFT JOIN social_post_metrics metrics ON metrics.mention_id = mention.id
+    WHERE mention.brand_id = ? AND mention.discovered_via = 'manual' AND mention.url LIKE 'http%'
+    ORDER BY mention.id DESC LIMIT 80`).bind(brandId).all<ManualCaptureRow>();
+  const due = rows.results.filter((row) => manualCaptureDue(row, Boolean(socialPostDescriptor(row.url)))).slice(0, 10);
+  let queued = 0;
+  let captured = 0;
+  for (const row of due) {
+    const descriptor = socialPostDescriptor(row.url);
+    if (descriptor && exactSocialEnabled && ["Instagram", "Reddit"].includes(descriptor.platform)) {
+      const now = new Date().toISOString();
+      await db.prepare(`INSERT INTO social_post_metrics
+        (mention_id, brand_id, platform, post_id, likes, comments, shares, views, plays, matched_terms, metrics_updated_at)
+        VALUES (?, ?, ?, ?, -1, -1, -1, -1, -1, '[]', ?)
+        ON CONFLICT(mention_id) DO UPDATE SET platform = excluded.platform,
+          post_id = CASE WHEN excluded.post_id != '' THEN excluded.post_id ELSE social_post_metrics.post_id END,
+          metrics_updated_at = excluded.metrics_updated_at`)
+        .bind(row.id, brandId, descriptor.platform, descriptor.postId, now).run();
+      await queueSocialCommentTarget(db, brandId, row.id, descriptor.platform, descriptor.postId, row.url,
+        Math.max(0, Number(row.comments ?? 0)), { metadataRequested: true, manualRequested: false });
+      await db.prepare(`UPDATE mentions SET capture_status = 'queued',
+        capture_error = '正在自动补全指定帖子的点赞、评论、转发和播放数据', capture_updated_at = ?
+        WHERE brand_id = ? AND id = ?`).bind(now, brandId, row.id).run();
+      queued += 1;
+    } else {
+      await captureManualPublicLink(db, brandId, row.id, row.url, descriptor?.platform ?? row.platform, descriptor?.postId ?? "");
+      captured += 1;
+    }
+  }
+  return { checked: due.length, queued, captured };
+}
+
 function quotaProtectedTask(db: D1Database, credentialOwnerId: string, provider: string, load: () => Promise<MonitoringCandidate[]>) {
   return async () => {
     const reservation = await reserveNewsProviderQuota(db, credentialOwnerId, provider);
@@ -432,10 +482,16 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
   try {
     const maintenanceEnabled = mode === "full" || mode === "maintenance";
     const audienceEnabled = mode === "full" || mode === "audience";
+    const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
+    let manualCapture = { checked: 0, queued: 0, captured: 0 };
     let searchConsole = { configured: false, updated: 0, events: 0 } as Awaited<ReturnType<typeof syncSearchConsoleSignals>>;
     if (maintenanceEnabled) {
       // Archive repair is separated from external provider work so an interrupted provider call cannot roll it back.
       searchConsole = await syncSearchConsoleSignals(db, brandId, credentialOwnerId, String(brand.website ?? ""), force);
+      manualCapture = await refreshManualLinkCaptures(db, brandId, Boolean(earlyMonidApiKey));
+      if (earlyMonidApiKey && manualCapture.queued > 0) {
+        await collectMonidSocial(db, brandId, [], earlyMonidApiKey, { platforms: [], includeComments: false });
+      }
       await enrichHistoricalMentions(db, brandId);
       await backfillMediaSources(db, brandId);
       await rebuildStoryClusters(db, brandId, terms);
@@ -450,10 +506,10 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       configured: true, queued: 0, analyzed: 0, skipped: 0, errors: 1, reportGenerated: false,
       error: error instanceof Error ? error.message : "混合智能分析暂未完成",
     })) : { configured: false, queued: 0, analyzed: 0, skipped: 0, errors: 0, reportGenerated: false };
-    const earlyMonidApiKey = await loadConnectorCredential(db, "Monid / Instagram", credentialOwnerId);
     const earlyMonidPending = earlyMonidApiKey ? await hasPendingMonidJobs(db, brandId) : false;
 
-    if (mode === "maintenance") return { skipped: false, phase: mode, inserted: 0, found: 0, searchConsole };
+    if (mode === "maintenance") return { skipped: false, phase: mode, inserted: 0, found: 0, searchConsole, manualCapture,
+      socialPending: await countPendingMonidJobs(db, brandId) };
     if (mode === "audience") {
       if (earlyMonidApiKey) await collectMonidSocial(db, brandId, terms, earlyMonidApiKey, { force, platforms: [], includeComments: true });
       return { skipped: false, phase: mode, inserted: 0, found: 0, commentRefresh, translation: translationBefore,
