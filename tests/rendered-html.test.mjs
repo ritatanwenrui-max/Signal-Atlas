@@ -485,11 +485,16 @@ test("manual archive links capture public engagement while comment sentiment rem
   assert.match(commentsRoute, /manualRequested: true/);
   assert.match(monid, /target\.manual_requested = 1/);
   assert.match(monid, /target\.metadata_requested = 1/);
+  assert.match(monid, /fetch_post_by_url_v2/);
+  assert.match(monid, /instagramPostUrl\(target\.post_url\)/);
+  assert.match(monid, /resolvedInstagramPost\(output, descriptor\.mediaId/);
   assert.match(monid, /shares = MAX\(shares, \?\), views = MAX\(views, \?\), plays = MAX\(plays, \?\)/);
   assert.match(monid, /startProfileEnrichment\(db, brandId, apiKey, \[details\.username\]\)/);
   assert.doesNotMatch(sync, /refreshPublicCommentAnalyses/);
   assert.match(sync, /refreshManualLinkCaptures/);
   assert.match(sync, /mention\.discovered_via = 'manual'/);
+  assert.match(sync, /target_status === "unavailable".*v2_failures/s);
+  assert.match(sync, /Number\(row\.v2_failures \?\? 0\) === 0/);
   assert.match(sync, /social \? SIX_HOURS : ONE_DAY/);
   assert.match(sync, /metadataRequested: true, manualRequested: false/);
   assert.match(sync, /platforms: \[\], includeComments: false/);

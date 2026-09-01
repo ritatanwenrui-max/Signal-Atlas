@@ -25,7 +25,8 @@ type ReplyTarget = { mention_id: number; platform: string; media_id: string; par
 const API_BASE = "https://api.monid.ai";
 const SEARCH_ENDPOINT = "/apify/instagram-hashtag-scraper";
 const PROFILE_ENDPOINT = "/apify/instagram-profile-scraper";
-const POST_BY_URL_ENDPOINT = "/api/v1/instagram/v1/fetch_post_by_url";
+const POST_BY_URL_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_by_url";
+const POST_BY_URL_V2_ENDPOINT = "/api/v1/instagram/v1/fetch_post_by_url_v2";
 const COMMENTS_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_post_comments";
 const COMMENTS_V1_ENDPOINT = "/api/v1/instagram/v1/fetch_post_comments_v2";
 const REPLIES_V2_ENDPOINT = "/api/v1/instagram/v2/fetch_comment_replies";
@@ -497,9 +498,14 @@ function redditCommentPage(output: unknown, postUrl: string, parentId = "") {
   return { comments, replyQueue, nextCursor };
 }
 
-function resolvedInstagramPost(output: unknown) {
+function instagramPostUrl(value: string) {
+  const match = value.match(/^https?:\/\/(?:www\.)?instagram\.com\/(p|reel|tv)\/([^/?#]+)/i);
+  return match ? `https://www.instagram.com/${match[1].toLowerCase()}/${match[2]}/` : value;
+}
+
+function resolvedInstagramPost(output: unknown, fallbackMediaId = "") {
   for (const row of walkObjects(output)) {
-    const mediaId = firstText(row, ["media_id", "mediaId", "pk", "id"]).match(/^\d{10,}/)?.[0] ?? "";
+    const mediaId = firstText(row, ["media_id", "mediaId", "pk", "id"]).match(/^\d{10,}/)?.[0] ?? fallbackMediaId;
     if (!mediaId) continue;
     const shortcode = firstText(row, ["code", "shortcode"]);
     const caption = firstText(row, ["caption.text", "caption", "text", "description"]);
@@ -764,7 +770,7 @@ async function processProfiles(db: D1Database, brandId: number, output: unknown)
 
 async function processResolvedPost(db: D1Database, brandId: number, job: MonidJob, output: unknown) {
   const descriptor = JSON.parse(job.terms || "{}") as CommentJobPayload;
-  const details = resolvedInstagramPost(output);
+  const details = resolvedInstagramPost(output, descriptor.mediaId || instagramPostUrl(descriptor.postUrl).match(/\/(?:p|reel|tv)\/([^/]+)/i)?.[1] || "");
   const now = new Date().toISOString();
   if (!details) {
     await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
@@ -1073,9 +1079,9 @@ async function startManualMetadataJobs(db: D1Database, brandId: number, apiKey: 
     const stage = target.platform === "Reddit" ? "reddit_details" : "resolve_post";
     const run = target.platform === "Reddit"
       ? await startQueryRun(apiKey, REDDIT_DETAILS_ENDPOINT, { post_id: target.media_id.startsWith("t3_") ? target.media_id : `t3_${target.media_id}`, need_format: true })
-      : await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+      : await startQueryRun(apiKey, POST_BY_URL_V2_ENDPOINT, { post_url: instagramPostUrl(target.post_url) });
     const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id,
-      postUrl: target.post_url, cursor: "", page: 1, commentAdapter: target.platform === "Reddit" ? "reddit" : "v1" };
+      postUrl: target.post_url, cursor: "", page: 1, commentAdapter: target.platform === "Reddit" ? "reddit" : "v2" };
     const job = await saveJob(db, brandId, run, stage, descriptor, target.mention_id);
     await db.prepare("UPDATE social_comment_targets SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ?")
       .bind(new Date().toISOString(), brandId, target.mention_id).run();
@@ -1118,7 +1124,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
     let stage: "resolve_post" | "reddit_details" | "post_comments" = "post_comments";
     if (target.platform === "Instagram" && commentAdapter === "v1" && !/^\d{10,}$/.test(target.media_id)) {
       stage = "resolve_post";
-      run = await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+      run = await startQueryRun(apiKey, POST_BY_URL_V1_ENDPOINT, { post_url: instagramPostUrl(target.post_url) });
     } else if (target.platform === "Reddit" && !target.reddit_details_complete) {
       stage = "reddit_details";
       run = await startQueryRun(apiKey, REDDIT_DETAILS_ENDPOINT, {

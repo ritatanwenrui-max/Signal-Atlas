@@ -299,13 +299,14 @@ function isDue(lastSuccessAt: string | undefined, interval: number) {
 
 type ManualCaptureRow = {
   id: number; url: string; platform: string; capture_status: string; capture_updated_at: string;
-  comments: number | null;
+  comments: number | null; target_status: string | null; v2_failures: number | null;
 };
 
 function manualCaptureDue(row: ManualCaptureRow, social: boolean) {
   if (!row.capture_status || !row.capture_updated_at) return true;
   const age = Date.now() - new Date(row.capture_updated_at).getTime();
   if (!Number.isFinite(age)) return true;
+  if (row.target_status === "unavailable" && Number(row.v2_failures ?? 0) === 0) return true;
   if (["queued", "running"].includes(row.capture_status)) return age >= 30 * 60_000;
   if (row.capture_status === "failed") return age >= ONE_DAY;
   return age >= (social ? SIX_HOURS : ONE_DAY);
@@ -313,8 +314,9 @@ function manualCaptureDue(row: ManualCaptureRow, social: boolean) {
 
 async function refreshManualLinkCaptures(db: D1Database, brandId: number, exactSocialEnabled: boolean) {
   const rows = await db.prepare(`SELECT mention.id, mention.url, mention.platform, mention.capture_status, mention.capture_updated_at,
-      metrics.comments
+      metrics.comments, target.status AS target_status, target.v2_failures
     FROM mentions mention LEFT JOIN social_post_metrics metrics ON metrics.mention_id = mention.id
+      LEFT JOIN social_comment_targets target ON target.mention_id = mention.id
     WHERE mention.brand_id = ? AND mention.discovered_via = 'manual' AND mention.url LIKE 'http%'
     ORDER BY mention.id DESC LIMIT 80`).bind(brandId).all<ManualCaptureRow>();
   const due = rows.results.filter((row) => manualCaptureDue(row, Boolean(socialPostDescriptor(row.url)))).slice(0, 10);
