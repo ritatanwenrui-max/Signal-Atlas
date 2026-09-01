@@ -1,12 +1,14 @@
 import { env } from "cloudflare:workers";
-import { deleteConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
+import { deleteConnectorCredential, loadConnectorCredential, saveConnectorCredential } from "../../../db/credentials";
 import { ensureDatabase, getActiveBrandForUser, loadDashboardData } from "../../../db/repository";
-import { verifyMonidApiKey } from "../../../db/monid";
+import { collectMonidSocial, queueSocialCommentTarget, verifyMonidApiKey } from "../../../db/monid";
+import { captureManualPublicLink } from "../../../db/manual-capture";
 import { runTranslationCycle } from "../../../db/translation";
 import { verifyOpenAIApiKey } from "../../../db/llm-analysis";
 import { analyzeCommentText } from "../../../db/text-analysis";
 import { syncSearchConsoleSignals, verifySearchConsoleCredential } from "../../../db/search-console";
 import { inferLanguage, inferSourceCountry } from "../../../db/providers";
+import { socialPostDescriptor } from "../../../db/social-links";
 import { inviteWorkspaceMembers, prepareWorkspaceForUser, removeWorkspaceMember, requireWorkspaceAccess } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
@@ -179,6 +181,8 @@ export async function POST(request: Request) {
       const risk = Number(payload.risk ?? 30);
       const impact = Number(payload.impact ?? 60);
       const url = String(payload.url ?? "#");
+      const descriptor = socialPostDescriptor(url);
+      const platform = descriptor?.platform ?? String(payload.platform ?? "网页新闻");
       const excerpt = String(payload.excerpt ?? payload.summary ?? "").trim();
       const analysis = analyzeCommentText(`${title} ${excerpt}`);
       const declaredLanguage = String(payload.language ?? "").trim();
@@ -190,22 +194,33 @@ export async function POST(request: Request) {
       const locationConfidence = declaredCountry ? 100 : inferredCountry.confidence;
       const result = await db.prepare(`INSERT INTO mentions
         (brand_id, title, url, source, platform, source_country, content_country, language, location_confidence, location_method, sentiment, emotion, risk, impact,
-         summary, excerpt, author, provider, discovered_via, cluster_key, parent_url, relation, engagement, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Manual', 'manual', ?, ?, ?, ?, ?)`)
-        .bind(brandId, title, url, source, String(payload.platform ?? "网页新闻"), country,
+         summary, excerpt, author, provider, discovered_via, capture_status, capture_updated_at, cluster_key, parent_url, relation, engagement, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Manual', 'manual', 'queued', ?, ?, ?, ?, ?, ?)`)
+        .bind(brandId, title, url, source, platform, country,
           String(payload.contentCountry ?? country), inferredLanguage.language, locationConfidence, locationMethod, analysis.sentiment, analysis.emotion, risk,
-          impact, excerpt || "人工补充内容，已进入统一分析流程。", excerpt, String(payload.author ?? ""), String(payload.clusterKey ?? `manual-${Date.now()}`),
+          impact, excerpt || "人工补充内容，已进入统一分析流程。", excerpt, String(payload.author ?? ""), new Date().toISOString(), String(payload.clusterKey ?? `manual-${Date.now()}`),
           String(payload.parentUrl ?? ""), String(payload.relation ?? ""), Math.max(0, Number(payload.engagement ?? 0)),
           String(payload.publishedAt ?? new Date().toISOString())).run();
-      const platform = String(payload.platform ?? "网页新闻");
-      if (platform !== "网页新闻") {
-        const metric = (key: string) => payload[key] === "" || payload[key] == null ? -1 : Math.max(0, Number(payload[key]));
-        await db.prepare(`INSERT INTO social_post_metrics
-          (mention_id, brand_id, platform, post_id, author_id, author_username, author_name, follower_count, likes, comments, shares, views, plays, matched_terms, metrics_updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)`)
-          .bind(result.meta.last_row_id, brandId, platform, String(payload.postId ?? ""), String(payload.authorId ?? ""),
-            String(payload.authorUsername ?? ""), String(payload.author ?? ""), metric("followerCount"), metric("likes"), metric("comments"),
-            metric("shares"), metric("views"), metric("plays"), new Date().toISOString()).run();
+      const mentionId = Number(result.meta.last_row_id);
+      const metric = (key: string) => payload[key] === "" || payload[key] == null ? -1 : Math.max(0, Number(payload[key]));
+      await db.prepare(`INSERT INTO social_post_metrics
+        (mention_id, brand_id, platform, post_id, author_id, author_username, author_name, follower_count, likes, comments, shares, views, plays, matched_terms, metrics_updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)`)
+        .bind(mentionId, brandId, platform, descriptor?.postId ?? String(payload.postId ?? ""), String(payload.authorId ?? ""),
+          String(payload.authorUsername ?? ""), String(payload.author ?? ""), metric("followerCount"), metric("likes"), metric("comments"),
+          metric("shares"), metric("views"), metric("plays"), new Date().toISOString()).run();
+      if (descriptor && ["Instagram", "Reddit"].includes(descriptor.platform)) {
+        await queueSocialCommentTarget(db, brandId, mentionId, descriptor.platform, descriptor.postId, url, Math.max(0, metric("comments")),
+          { metadataRequested: true, manualRequested: false });
+      }
+      await captureManualPublicLink(db, brandId, mentionId, url, platform, descriptor?.postId ?? "");
+      if (descriptor && ["Instagram", "Reddit"].includes(descriptor.platform)) {
+        const monidApiKey = await loadConnectorCredential(db, "Monid / Instagram", String(workspace.credential_owner_user_id));
+        if (monidApiKey) {
+          await db.prepare("UPDATE mentions SET capture_status = 'queued', capture_error = '正在通过精确帖子接口补全互动数据', capture_updated_at = ? WHERE brand_id = ? AND id = ?")
+            .bind(new Date().toISOString(), brandId, mentionId).run();
+          await collectMonidSocial(db, brandId, [], monidApiKey, { platforms: [], includeComments: false });
+        }
       }
       if (risk >= 70 || impact >= 90) await db.prepare("INSERT INTO alerts (brand_id, mention_id, title, severity, country, reason) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(brandId, result.meta.last_row_id, title, risk >= 80 ? "Critical" : "High", country, risk >= 70 ? `风险分 ${risk}，需要人工复核` : `影响力 ${impact}，传播潜力较高`).run();

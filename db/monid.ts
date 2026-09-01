@@ -19,7 +19,7 @@ type SocialComment = {
   id: string; parentId: string; text: string; authorId: string; authorUsername: string; authorName: string;
   verified: boolean; likes: number; replies: number; publishedAt: string; commentUrl: string;
 };
-type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit"; top_level_complete: number; reddit_details_complete: number };
+type CommentTarget = { mention_id: number; platform: string; media_id: string; post_url: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit"; top_level_complete: number; manual_requested: number; metadata_requested: number; reddit_details_complete: number };
 type ReplyTarget = { mention_id: number; platform: string; media_id: string; parent_comment_id: string; cursor: string; pages_fetched: number; adapter: "v2" | "v1" | "reddit" };
 
 const API_BASE = "https://api.monid.ai";
@@ -770,8 +770,10 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
     return;
   }
   await db.batch([
-    db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?), status = 'queued',
-      top_level_complete = 0, last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
+    db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?),
+      status = CASE WHEN manual_requested = 1 THEN 'queued' ELSE 'metadata_complete' END,
+      metadata_requested = 0, top_level_complete = CASE WHEN manual_requested = 1 THEN 0 ELSE 1 END,
+      last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
       .bind(details.mediaId, Math.max(0, details.comments), now, brandId, descriptor.mentionId),
     db.prepare(`UPDATE social_post_metrics SET post_id = ?, comments = MAX(comments, ?), likes = MAX(likes, ?),
       author_id = CASE WHEN ? != '' THEN ? ELSE author_id END,
@@ -790,11 +792,12 @@ async function processResolvedPost(db: D1Database, brandId: number, job: MonidJo
       translation_error = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_error END,
       translation_attempts = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN 0 ELSE translation_attempts END,
       translation_next_retry_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translation_next_retry_at END,
-      translated_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translated_at END
+      translated_at = CASE WHEN ? != '' AND (title LIKE '指定帖子%' OR excerpt = '') THEN '' ELSE translated_at END,
+      capture_status = 'completed', capture_error = '', capture_updated_at = ?
       WHERE brand_id = ? AND id = ?`)
       .bind(details.caption, details.caption.slice(0, 180), details.username, details.username, details.username, details.username,
         details.caption, details.caption.slice(0, 600), details.caption, details.caption, details.caption, details.caption,
-        details.caption, details.caption, details.caption, details.caption,
+        details.caption, details.caption, details.caption, details.caption, now,
         brandId, descriptor.mentionId),
   ]);
 }
@@ -815,18 +818,20 @@ async function processRedditDetails(db: D1Database, brandId: number, job: MonidJ
       .bind(details.postId, details.likes, details.comments, details.authorId, details.authorId,
         details.username, details.username, now, brandId, descriptor.mentionId),
     db.prepare(`UPDATE social_comment_targets SET media_id = ?, reported_count = MAX(reported_count, ?),
-      top_level_complete = CASE WHEN ? > reported_count THEN 0 ELSE top_level_complete END,
-      status = CASE WHEN ? > reported_count OR top_level_complete = 0 THEN 'queued' ELSE 'collecting' END,
+      top_level_complete = CASE WHEN manual_requested = 1 AND ? > reported_count THEN 0 WHEN manual_requested = 0 THEN 1 ELSE top_level_complete END,
+      status = CASE WHEN manual_requested = 0 THEN 'metadata_complete' WHEN ? > reported_count OR top_level_complete = 0 THEN 'queued' ELSE 'collecting' END,
+      metadata_requested = 0,
       last_error = '', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
       .bind(details.postId, details.comments, details.comments, details.comments, now, brandId, descriptor.mentionId),
     db.prepare(`UPDATE mentions SET title = CASE WHEN ? != '' THEN ? ELSE title END,
       excerpt = CASE WHEN ? != '' THEN ? ELSE excerpt END,
       source = CASE WHEN ? != '' THEN 'r/' || ? ELSE source END,
       author = CASE WHEN ? != '' THEN 'u/' || ? ELSE author END,
-      engagement = MAX(engagement, ?), provider = 'Monid · Apify + TikHub'
+      engagement = MAX(engagement, ?), provider = 'Monid · Apify + TikHub',
+      capture_status = 'completed', capture_error = '', capture_updated_at = ?
       WHERE brand_id = ? AND id = ?`)
       .bind(title, title, excerpt, excerpt, details.subreddit, details.subreddit,
-        details.username, details.username, engagement, brandId, descriptor.mentionId),
+        details.username, details.username, engagement, now, brandId, descriptor.mentionId),
   ]);
 }
 
@@ -965,8 +970,10 @@ async function markCommentJobError(db: D1Database, brandId: number, job: MonidJo
 export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count`)
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND (manual_requested = 1 OR metadata_requested = 1)
+        AND status IN ('queued','running','collecting','retrying')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
+        WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status IN ('queued','running','retrying')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0) > 0;
 }
@@ -974,8 +981,10 @@ export async function hasPendingMonidJobs(db: D1Database, brandId: number) {
 export async function countPendingMonidJobs(db: D1Database, brandId: number) {
   const row = await db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN (${PENDING_SQL})) +
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count`)
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND (manual_requested = 1 OR metadata_requested = 1)
+        AND status IN ('queued','running','collecting','retrying')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
+        WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status IN ('queued','running','retrying')) AS count`)
     .bind(brandId, brandId, brandId).first<{ count: number }>();
   return Number(row?.count ?? 0);
 }
@@ -1007,62 +1016,68 @@ export async function getMonidPlatformState(db: D1Database, brandId: number, pla
   };
 }
 
-export async function queueSocialCommentTarget(db: D1Database, brandId: number, mentionId: number, platform: string, rawMediaId: string, postUrlValue: string, reportedCount: number) {
+export async function queueSocialCommentTarget(db: D1Database, brandId: number, mentionId: number, platform: string, rawMediaId: string, postUrlValue: string, reportedCount: number,
+  options: { manualRequested?: boolean; metadataRequested?: boolean } = {}) {
   const mediaId = platform === "Instagram" ? rawMediaId.match(/^\d{10,}/)?.[0] ?? postUrlValue
     : platform === "Reddit" && rawMediaId ? (rawMediaId.startsWith("t3_") ? rawMediaId : `t3_${rawMediaId}`) : rawMediaId || postUrlValue;
   if (!mediaId) return;
   const count = Math.max(0, reportedCount);
   const now = new Date().toISOString();
   await db.prepare(`INSERT INTO social_comment_targets
-    (mention_id, brand_id, platform, media_id, post_url, reported_count, adapter, status, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+    (mention_id, brand_id, platform, media_id, post_url, reported_count, adapter, status, manual_requested, metadata_requested, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
     ON CONFLICT(mention_id) DO UPDATE SET media_id = excluded.media_id, post_url = excluded.post_url,
       top_level_complete = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 0 ELSE social_comment_targets.top_level_complete END,
-      status = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN 'queued' ELSE social_comment_targets.status END,
+      status = CASE WHEN excluded.manual_requested = 1 OR excluded.metadata_requested = 1
+        OR excluded.reported_count > social_comment_targets.reported_count THEN 'queued' ELSE social_comment_targets.status END,
       adapter = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.adapter ELSE social_comment_targets.adapter END,
       cursor = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN '' ELSE social_comment_targets.cursor END,
       reported_count = MAX(social_comment_targets.reported_count, excluded.reported_count),
-      updated_at = CASE WHEN excluded.reported_count > social_comment_targets.reported_count THEN excluded.updated_at ELSE social_comment_targets.updated_at END`)
-    .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, platform === "Reddit" ? "reddit" : "v2", now).run();
+      manual_requested = MAX(social_comment_targets.manual_requested, excluded.manual_requested),
+      metadata_requested = MAX(social_comment_targets.metadata_requested, excluded.metadata_requested),
+      updated_at = CASE WHEN excluded.manual_requested = 1 OR excluded.metadata_requested = 1
+        OR excluded.reported_count > social_comment_targets.reported_count THEN excluded.updated_at ELSE social_comment_targets.updated_at END`)
+    .bind(mentionId, brandId, platform, mediaId, postUrlValue, count, platform === "Reddit" ? "reddit" : "v2",
+      options.manualRequested ? 1 : 0, options.metadataRequested ? 1 : 0, now).run();
 }
 
 export async function queueInstagramCommentTarget(db: D1Database, brandId: number, mentionId: number, rawMediaId: string, postUrlValue: string, reportedCount: number) {
   return queueSocialCommentTarget(db, brandId, mentionId, "Instagram", rawMediaId, postUrlValue, reportedCount);
 }
 
-async function registerHistoricalCommentTargets(db: D1Database, brandId: number) {
-  await db.prepare(`UPDATE social_comment_targets SET status = 'review',
-    last_error = CASE WHEN last_error LIKE '达到 %失败上限:%' THEN last_error ELSE '达到 5 次失败上限：' || COALESCE(NULLIF(last_error, ''), '接口未返回可用评论') END,
-    updated_at = CURRENT_TIMESTAMP WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying','error','empty','unavailable','not_returned')
-      AND v2_failures + v1_failures >= ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
-  await db.prepare(`UPDATE social_comment_reply_queue SET status = 'review',
-    last_error = CASE WHEN last_error LIKE '达到 %失败上限:%' THEN last_error ELSE '达到 5 次失败上限：' || COALESCE(NULLIF(last_error, ''), '接口未返回可用回复') END,
-    updated_at = CURRENT_TIMESTAMP WHERE brand_id = ? AND status IN ('queued','running','retrying','error')
-      AND v2_failures + v1_failures >= ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
-  await db.prepare(`UPDATE social_comment_targets SET status = 'retrying',
-    last_error = CASE WHEN last_error = '' THEN '旧版采集失败，已进入新版退避重试队列' ELSE last_error END,
-    updated_at = datetime('now', '-31 minutes') WHERE brand_id = ? AND status = 'error' AND v2_failures + v1_failures < ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
-  await db.prepare(`UPDATE social_comment_targets SET status = 'retrying', top_level_complete = 0,
-    media_id = CASE WHEN platform = 'Instagram' THEN post_url ELSE media_id END,
-    last_error = '旧状态结论已撤销；正在通过指定帖子 URL 重新识别并采集', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND status IN ('empty','unavailable') AND v2_failures + v1_failures < ?`).bind(brandId, MAX_COMMENT_FAILURES).run();
-  await db.prepare(`UPDATE social_comment_targets SET status = 'queued', top_level_complete = 0, adapter = 'v2', cursor = '',
-    last_error = '旧版待核验状态已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND status = 'not_returned' AND v2_failures + v1_failures < ? AND datetime(updated_at) <= datetime('now', '-6 hours')`).bind(brandId, MAX_COMMENT_FAILURES).run();
-  await db.prepare(`UPDATE social_comment_reply_queue SET status = 'queued', adapter = 'v2', cursor = '',
-    last_error = '旧回复队列已进入 V2 → V1 双通道重新采集', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND status = 'complete' AND reported_count > collected_count AND v2_failures = 0`).bind(brandId).run();
-  const posts = await db.prepare(`SELECT metrics.mention_id, metrics.platform, metrics.post_id, metrics.comments, mentions.url
-    FROM social_post_metrics metrics JOIN mentions ON mentions.id = metrics.mention_id
-    WHERE metrics.brand_id = ? AND metrics.platform IN ('Instagram','X','YouTube','TikTok','Facebook','Reddit') AND metrics.post_id != ''`)
-    .bind(brandId).all<{ mention_id: number; platform: string; post_id: string; comments: number; url: string }>();
-  for (const post of posts.results) {
-    await queueSocialCommentTarget(db, brandId, post.mention_id, post.platform, post.post_id, post.url, Number(post.comments));
+async function startManualMetadataJobs(db: D1Database, brandId: number, apiKey: string) {
+  const active = await db.prepare(`SELECT COUNT(*) AS count FROM monid_jobs WHERE brand_id = ?
+    AND stage IN ('resolve_post','reddit_details') AND status IN (${PENDING_SQL})`).bind(brandId).first<{ count: number }>();
+  let available = Math.max(0, 3 - Number(active?.count ?? 0));
+  if (!available) return 0;
+  const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url,
+      target.cursor, target.pages_fetched, target.adapter, target.top_level_complete, target.manual_requested, target.metadata_requested,
+      EXISTS (SELECT 1 FROM monid_jobs detail_job WHERE detail_job.mention_id = target.mention_id
+        AND detail_job.stage = 'reddit_details' AND detail_job.status = 'COMPLETED') AS reddit_details_complete
+    FROM social_comment_targets target
+    WHERE target.brand_id = ? AND target.metadata_requested = 1 AND target.platform IN ('Instagram','Reddit')
+      AND target.status IN ('queued','retrying')
+      AND (target.status != 'retrying' OR datetime(target.updated_at) <= datetime('now', '-30 minutes'))
+      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = target.mention_id
+        AND job.stage IN ('resolve_post','reddit_details') AND job.status IN (${PENDING_SQL}))
+    ORDER BY target.updated_at ASC LIMIT ?`).bind(brandId, available).all<CommentTarget>();
+  let started = 0;
+  for (const target of targets.results) {
+    const stage = target.platform === "Reddit" ? "reddit_details" : "resolve_post";
+    const run = target.platform === "Reddit"
+      ? await startQueryRun(apiKey, REDDIT_DETAILS_ENDPOINT, { post_id: target.media_id.startsWith("t3_") ? target.media_id : `t3_${target.media_id}`, need_format: true })
+      : await startQueryRun(apiKey, POST_BY_URL_ENDPOINT, { post_url: target.post_url });
+    const descriptor: CommentJobPayload = { mentionId: target.mention_id, platform: target.platform, mediaId: target.media_id,
+      postUrl: target.post_url, cursor: "", page: 1, commentAdapter: target.platform === "Reddit" ? "reddit" : "v1" };
+    const job = await saveJob(db, brandId, run, stage, descriptor, target.mention_id);
+    await db.prepare("UPDATE social_comment_targets SET status = 'running', updated_at = ? WHERE brand_id = ? AND mention_id = ?")
+      .bind(new Date().toISOString(), brandId, target.mention_id).run();
+    if (run.status === "COMPLETED") await processJob(db, brandId, apiKey, job, run);
+    started += 1;
+    available -= 1;
+    if (!available) break;
   }
-  await db.prepare(`UPDATE social_comment_targets SET status = 'queued', updated_at = datetime('now', '-31 minutes')
-    WHERE brand_id = ? AND platform = 'Reddit' AND status IN ('complete','collecting','unavailable','empty','not_returned')
-      AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = social_comment_targets.mention_id
-        AND job.stage = 'reddit_details' AND job.status = 'COMPLETED')`).bind(brandId).run();
+  return started;
 }
 
 async function startCommentJobs(db: D1Database, brandId: number, apiKey: string) {
@@ -1073,11 +1088,11 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
   let startedCount = 0;
 
   const targets = await db.prepare(`SELECT target.mention_id, target.platform, target.media_id, target.post_url, target.cursor, target.pages_fetched,
-      target.adapter, target.top_level_complete,
+      target.adapter, target.top_level_complete, target.manual_requested, target.metadata_requested,
       EXISTS (SELECT 1 FROM monid_jobs detail_job WHERE detail_job.mention_id = target.mention_id
         AND detail_job.stage = 'reddit_details' AND detail_job.status = 'COMPLETED') AS reddit_details_complete
     FROM social_comment_targets target
-    WHERE target.brand_id = ? AND target.status IN ('queued','collecting','retrying')
+    WHERE target.brand_id = ? AND target.manual_requested = 1 AND target.status IN ('queued','collecting','retrying')
       AND (target.top_level_complete = 0 OR (target.platform = 'Reddit' AND NOT EXISTS
         (SELECT 1 FROM monid_jobs detail_job WHERE detail_job.mention_id = target.mention_id
           AND detail_job.stage = 'reddit_details' AND detail_job.status = 'COMPLETED')))
@@ -1135,7 +1150,7 @@ async function startCommentJobs(db: D1Database, brandId: number, apiKey: string)
 
   const replies = await db.prepare(`SELECT reply.mention_id, target.platform, reply.media_id, reply.parent_comment_id, reply.cursor, reply.pages_fetched, reply.adapter
     FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
-    WHERE reply.brand_id = ? AND reply.status IN ('queued','retrying')
+    WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status IN ('queued','retrying')
       AND (reply.status != 'retrying' OR datetime(reply.updated_at) <= datetime('now', '-30 minutes'))
       AND NOT EXISTS (SELECT 1 FROM monid_jobs job WHERE job.mention_id = reply.mention_id AND job.stage = 'comment_replies'
         AND job.status IN (${PENDING_SQL}) AND json_extract(job.terms, '$.commentId') = reply.parent_comment_id)
@@ -1176,9 +1191,8 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
   const candidates: MonitoringCandidate[] = [];
   const platforms = options.platforms ?? ["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"];
   const selectedStages = platforms.map(searchStage);
-  const allowedStages: MonidJobStage[] = [...selectedStages, ...(options.includeComments
-    ? ["profiles", "resolve_post", "reddit_details", "post_comments", "comment_replies"] as MonidJobStage[] : [])];
-  if (options.includeComments) await registerHistoricalCommentTargets(db, brandId);
+  const allowedStages: MonidJobStage[] = [...selectedStages, "resolve_post", "reddit_details",
+    ...(options.includeComments ? ["profiles", "post_comments", "comment_replies"] as MonidJobStage[] : [])];
 
   let pendingResults: MonidJob[] = [];
   if (allowedStages.length) {
@@ -1294,9 +1308,9 @@ export async function collectMonidSocial(db: D1Database, brandId: number, terms:
       } catch (error) { await markPlatformFailed(db, brandId, platform, error); }
     }
   }
-  // Keyword discovery keeps its own cadence even when the comment backlog is non-empty.
-  // Newly discovered post URLs are archived by the caller, queued as comment targets,
-  // resolved to platform post IDs, then analyzed after comment text is stored.
+  // Exact-link metadata capture is independent from comment collection. Comment bodies are
+  // only requested after a user explicitly enables them for a post.
+  await startManualMetadataJobs(db, brandId, apiKey);
   if (options.includeComments) await startCommentJobs(db, brandId, apiKey);
   return candidates;
 }

@@ -219,8 +219,8 @@ test("archive location inference is reviewable and Russia maps to the flat SVG",
 });
 
 test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated comments", async () => {
-  const [monid, page, comments, repository, newsSync, pipeline] = await Promise.all([
-    source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"), source("db/sync-pipeline.ts"),
+  const [monid, page, comments, repository, newsSync, pipeline, socialLinks] = await Promise.all([
+    source("db/monid.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"), source("db/repository.ts"), source("db/news-sync.ts"), source("db/sync-pipeline.ts"), source("db/social-links.ts"),
   ]);
   assert.match(monid, /\/trudax\/reddit-scraper-lite/);
   assert.match(monid, /\/api\/v1\/reddit\/app\/fetch_post_details/);
@@ -245,8 +245,9 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(monid, /redditCommentPage/);
   assert.match(page, /<option>Reddit<\/option>/);
   assert.doesNotMatch(page, /reddit-archive-status/);
-  assert.match(page, /关键词发现 · 详情补全 · 评论跟踪/);
-  assert.match(comments, /platform: "Reddit"/);
+  assert.match(page, /关键词发现 · 详情补全 · 评论按需采集/);
+  assert.match(comments, /socialPostDescriptor/);
+  assert.match(socialLinks, /platform: "Reddit"/);
   assert.match(repository, /"Reddit"\] as const/);
   assert.match(newsSync, /"Facebook", "Reddit"/);
   assert.match(monid, /platformHealthKey/);
@@ -268,7 +269,7 @@ test("Monid Reddit connector uses Apify discovery, TikHub details, and paginated
   assert.match(pipeline, /hasRunnableRedditDiscovery/);
   assert.match(pipeline, /force = 0/);
   assert.match(page, /新闻档案优先采集/);
-  assert.match(page, /受众舆情采集/);
+  assert.match(page, /按需评论任务与分析/);
   assert.match(page, /Reddit 独立任务/);
 });
 
@@ -332,7 +333,9 @@ test("Monid searches six social platforms and archives public comments and repli
   assert.match(monid, /"retrying" \| "blocked" \| "unavailable" \| "error"/);
   assert.match(sync, /collectMonidSocial/);
   assert.match(sync, /upsertSocialMetrics/);
-  assert.match(sync, /queueSocialCommentTarget/);
+  assert.doesNotMatch(sync, /queueSocialCommentTarget/);
+  assert.match(monid, /manual_requested = 1/);
+  assert.match(commentsRoute, /manualRequested: true/);
   assert.match(schema, /socialPostMetrics/);
   assert.match(schema, /socialAuthorSnapshots/);
   assert.match(schema, /monidJobs/);
@@ -348,11 +351,11 @@ test("Monid searches six social platforms and archives public comments and repli
   assert.match(commentsRoute, /riskComments/);
   assert.match(page, /评论舆情/);
   assert.match(page, /评论明细档案/);
-  assert.match(page, /帖子评论采集状态/);
+  assert.match(page, /手动评论任务状态/);
   assert.match(page, /comment-card-grid/);
-  assert.match(page, /关键词搜帖/);
-  assert.match(page, /归档帖子 URL/);
-  assert.match(page, /逐帖采集评论/);
+  assert.match(page, /自动归档帖子/);
+  assert.match(page, /人工选择目标/);
+  assert.match(page, /按需采集评论/);
   assert.match(page, /内部语义分析/);
   assert.doesNotMatch(page, /empty: "无公开评论"|unavailable: "平台未开放"/);
   assert.doesNotMatch(page, /ACTIVE AUTHORS|高活跃参与者/);
@@ -363,7 +366,7 @@ test("Monid searches six social platforms and archives public comments and repli
   assert.match(page, /互动共鸣/);
   assert.match(page, /国家 \/ 地区接受情况/);
   assert.match(monid, /MAX_COMMENT_FAILURES = 5/);
-  assert.match(monid, /status = 'review'/);
+  assert.match(monid, /THEN 'review'/);
   assert.match(commentsRoute, /resonance_weight/);
   assert.match(commentsRoute, /audience_region/);
 });
@@ -447,9 +450,9 @@ test("word clouds use multilingual segmentation and remove Chinese and English f
   assert.match(comments, /keywordCounts/);
 });
 
-test("public news comments are collected, archived, and analyzed without inventing samples", async () => {
-  const [comments, providers, sync, schema, repository, page] = await Promise.all([
-    source("db/comments.ts"), source("db/providers.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"),
+test("public news comments are collected only on demand and analyzed without inventing samples", async () => {
+  const [comments, providers, sync, schema, repository, page, commentsRoute] = await Promise.all([
+    source("db/comments.ts"), source("db/providers.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"), source("app/api/comments/route.ts"),
   ]);
   assert.match(providers, /163\\\.com.*中国/);
   assert.match(providers, /网易.*netease/);
@@ -458,13 +461,35 @@ test("public news comments are collected, archived, and analyzed without inventi
   assert.match(comments, /MAX_COMMENTS_PER_ARTICLE = 100/);
   assert.match(comments, /positive_count/);
   assert.match(comments, /keywordCounts/);
-  assert.match(sync, /refreshPublicCommentAnalyses/);
+  assert.doesNotMatch(sync, /refreshPublicCommentAnalyses/);
+  assert.match(comments, /collectPublicCommentAnalysis/);
+  assert.match(commentsRoute, /action === "collectMention"/);
   assert.match(schema, /commentAnalyses/);
   assert.match(schema, /mentionComments/);
   assert.match(repository, /comment_analyses\.reported_count AS comment_reported_count/);
   assert.match(page, /评论区情绪/);
   assert.match(page, /评论区关键词词云/);
   assert.match(page, /页面显示的评论总数不会被冒充为已分析样本/);
+});
+
+test("manual archive links capture public engagement while comment sentiment remains opt-in", async () => {
+  const [dataRoute, commentsRoute, manualCapture, socialLinks, monid, sync, schema, repository, page] = await Promise.all([
+    source("app/api/data/route.ts"), source("app/api/comments/route.ts"), source("db/manual-capture.ts"), source("db/social-links.ts"),
+    source("db/monid.ts"), source("db/news-sync.ts"), source("db/schema.ts"), source("db/repository.ts"), source("app/page.tsx"),
+  ]);
+  assert.match(dataRoute, /captureManualPublicLink/);
+  assert.match(dataRoute, /metadataRequested: true, manualRequested: false/);
+  assert.match(manualCapture, /interactionStatistic|userInteractionCount/);
+  assert.match(manualCapture, /likes.*comments.*shares.*views.*plays/);
+  assert.match(socialLinks, /Instagram.*X.*YouTube.*TikTok.*Facebook.*Reddit/s);
+  assert.match(commentsRoute, /manualRequested: true/);
+  assert.match(monid, /target\.manual_requested = 1/);
+  assert.match(monid, /target\.metadata_requested = 1/);
+  assert.doesNotMatch(sync, /refreshPublicCommentAnalyses/);
+  assert.match(schema, /manualRequested/);
+  assert.match(repository, /ALTER TABLE social_comment_targets ADD COLUMN manual_requested/);
+  assert.match(page, /采集并分析评论/);
+  assert.match(page, /评论正文与情绪分析只有手动开启后才会采集/);
 });
 
 test("workspace exclusion terms immediately hide archived mentions and their comments", async () => {
@@ -640,7 +665,7 @@ test("independent social discovery APIs share the brand scope, exclusion, archiv
   assert.match(sync, /brandScopeDecision/);
   assert.match(sync, /命中排除词/);
   assert.match(sync, /upsertSocialMetrics/);
-  assert.match(sync, /queueSocialCommentTarget/);
+  assert.doesNotMatch(sync, /queueSocialCommentTarget/);
 });
 
 test("additional global news connectors are replaceable, quota-aware, and honest about batch-only sources", async () => {

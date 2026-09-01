@@ -200,5 +200,15 @@ export async function refreshPublicCommentAnalyses(db: D1Database, brandId: numb
   }
   return { checkedArticles: rows.results.length, analyzedArticles, analyzedComments, warnings };
 }
+
+export async function collectPublicCommentAnalysis(db: D1Database, brandId: number, mentionId: number, brandTerms: string[]) {
+  const mention = await db.prepare("SELECT id, url, source FROM mentions WHERE brand_id = ? AND id = ? AND platform IN ('网页新闻','博客')")
+    .bind(brandId, mentionId).first<MentionRow>();
+  if (!mention) throw new Error("档案不存在，或该记录不是可读取公开评论的网页内容");
+  const collection = await collectForMention(mention);
+  await storeCollection(db, brandId, mentionId, collection, brandTerms);
+  return { checkedArticles: 1, analyzedArticles: collection.samples.length ? 1 : 0, analyzedComments: collection.samples.length,
+    warnings: collection.status === "error" ? [collection.error ?? "评论采集失败"] : [], status: collection.status, error: collection.error ?? "" };
+}
 import { applyCalibrationRules, loadCalibrationRules } from "./comment-calibration";
 import { analyzeCommentText, keywordCounts } from "./text-analysis";

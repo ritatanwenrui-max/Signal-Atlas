@@ -1,8 +1,7 @@
 import { env } from "cloudflare:workers";
 import { loadConnectorCredential } from "./credentials";
 import { backfillMediaSources, crawlMediaSources, registerMediaSources } from "./free-crawler";
-import { refreshPublicCommentAnalyses } from "./comments";
-import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, queueSocialCommentTarget, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
+import { collectMonidSocial, countPendingMonidJobs, countPendingMonidSearchJobs, getMonidPlatformState, hasPendingMonidJobs, refreshSocialFollowerCounts, type MonidSearchPlatform } from "./monid";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "./repository";
 import { fetchApifySocialSearch, fetchBlueskySearch, fetchBraveSocialSearch, fetchBrightDataSocialSearch, fetchEventRegistry, fetchForemBlogs, fetchGdelt, fetchGNews, fetchGuardian, fetchHackerNews, fetchMastodon, fetchMediaCloud, fetchMediastack, fetchNewsApiOrg, fetchNewsData, fetchScrapeCreators, fetchTheNewsApi, fetchTumblrBlogs, fetchWordPressBlogs, fetchWorldNews, fetchX, fetchYouTube, inferLanguage, inferSourceCountry, ProviderRequestError, type MonitoringCandidate } from "./providers";
 import { inferDetailedEmotion } from "./text-analysis";
@@ -258,8 +257,6 @@ async function upsertSocialMetrics(db: D1Database, brandId: number, mentionId: n
       JSON.stringify(metrics.matchedTerms), updatedAt).run();
   await db.prepare("UPDATE mentions SET engagement = ?, author = CASE WHEN ? != '' THEN ? ELSE author END WHERE id = ? AND brand_id = ?")
     .bind(candidate.engagement, metrics.authorUsername, metrics.authorUsername ? `@${metrics.authorUsername}` : metrics.authorName, mentionId, brandId).run();
-  if (["Instagram", "X", "YouTube", "TikTok", "Facebook", "Reddit"].includes(candidate.platform))
-    await queueSocialCommentTarget(db, brandId, mentionId, candidate.platform, metrics.postId, candidate.url, metrics.comments);
 }
 
 function retryDelay(error: unknown, failureCount: number) {
@@ -445,7 +442,8 @@ export async function runNewsSync(force = false, userId = "", mode: NewsSyncMode
       await rebuildPropagationEdges(db, brandId, terms);
       await syncMediaEventWindows(db, brandId);
     }
-    const commentRefresh = audienceEnabled ? await refreshPublicCommentAnalyses(db, brandId, terms) : { analyzedComments: 0 };
+    // Comment text and sentiment are opt-in. Routine archive scans only refresh post metadata.
+    const commentRefresh = { checkedArticles: 0, analyzedArticles: 0, analyzedComments: 0, warnings: [] as string[] };
     const translationBefore = audienceEnabled ? await runTranslationCycle(db, brandId, credentialOwnerId)
       : { queued: 0, translated: 0, skipped: 0, errors: 0 };
     const hybridAnalysis = audienceEnabled ? await runHybridAnalysisCycle(db, brandId, credentialOwnerId).catch((error) => ({

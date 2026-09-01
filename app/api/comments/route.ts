@@ -1,9 +1,12 @@
 import { env } from "cloudflare:workers";
 import { getCommentCalibrationStats } from "../../../db/comment-calibration";
-import { queueSocialCommentTarget } from "../../../db/monid";
+import { collectPublicCommentAnalysis } from "../../../db/comments";
+import { loadConnectorCredential } from "../../../db/credentials";
+import { collectMonidSocial, queueSocialCommentTarget } from "../../../db/monid";
 import { officialAccountHandles } from "../../../db/official-accounts";
 import { ensureDatabase, getActiveBrandForUser, getWorkspaceAccessForUser } from "../../../db/repository";
 import { meaningfulTokens } from "../../../db/text-analysis";
+import { socialPostDescriptor } from "../../../db/social-links";
 import { prepareWorkspaceForUser } from "../../../db/workspaces";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
@@ -72,39 +75,6 @@ function rounded(value: number, digits = 1) {
   return Math.round(value * scale) / scale;
 }
 
-function socialPostDescriptor(value: string) {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new Error("请输入完整的公开帖子链接"); }
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("帖子链接必须以 http:// 或 https:// 开头");
-  const host = url.hostname.replace(/^www\./, "").toLowerCase();
-  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
-    if (!url.pathname.match(/^\/(?:p|reel|tv)\/[^/]+/)) throw new Error("请输入 Instagram 帖子或 Reels 的公开链接");
-    return { platform: "Instagram", postId: value };
-  }
-  if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com")) {
-    const postId = url.pathname.match(/\/status\/(\d+)/)?.[1];
-    if (!postId) throw new Error("未能从 X 链接中识别帖子 ID");
-    return { platform: "X", postId };
-  }
-  if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") {
-    const postId = host === "youtu.be" ? url.pathname.split("/").filter(Boolean)[0] : url.searchParams.get("v") || url.pathname.match(/\/(?:shorts|live)\/([^/]+)/)?.[1];
-    if (!postId) throw new Error("未能从 YouTube 链接中识别视频 ID");
-    return { platform: "YouTube", postId };
-  }
-  if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
-    const postId = url.pathname.match(/\/video\/(\d+)/)?.[1];
-    if (!postId) throw new Error("未能从 TikTok 链接中识别视频 ID");
-    return { platform: "TikTok", postId };
-  }
-  if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch") return { platform: "Facebook", postId: value };
-  if (host === "reddit.com" || host.endsWith(".reddit.com") || host === "redd.it") {
-    const rawId = host === "redd.it" ? url.pathname.split("/").filter(Boolean)[0] : url.pathname.match(/\/comments\/([a-z0-9]+)/i)?.[1];
-    if (!rawId) throw new Error("未能从 Reddit 链接中识别帖子 ID");
-    return { platform: "Reddit", postId: rawId.startsWith("t3_") ? rawId : `t3_${rawId}` };
-  }
-  throw new Error("目前支持 Instagram、X、YouTube、TikTok、Facebook 和 Reddit 的公开帖子链接");
-}
-
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "请先登录后添加采集目标" }, { status: 401 });
@@ -115,12 +85,24 @@ export async function POST(request: Request) {
   const brandId = Number(brand?.id ?? 0);
   if (!brandId) return Response.json({ error: "请先创建品牌监测档案" }, { status: 400 });
   if (String(workspace?.role ?? "viewer") === "viewer") return Response.json({ error: "当前账号只有查看权限" }, { status: 403 });
-  const body = await request.json().catch(() => ({})) as { action?: string; postUrl?: string };
-  if (body.action !== "collectPost") return Response.json({ error: "不支持的操作" }, { status: 400 });
+  const body = await request.json().catch(() => ({})) as { action?: string; postUrl?: string; mentionId?: number };
+  if (!['collectPost', 'collectMention'].includes(String(body.action ?? ""))) return Response.json({ error: "不支持的操作" }, { status: 400 });
+  if (body.action === "collectMention") {
+    const mentionId = Number(body.mentionId ?? 0);
+    const mention = await db.prepare("SELECT id, url, platform FROM mentions WHERE brand_id = ? AND id = ?").bind(brandId, mentionId)
+      .first<{ id: number; url: string; platform: string }>();
+    if (!mention) return Response.json({ error: "档案不存在或已被删除" }, { status: 404 });
+    if (["网页新闻", "博客"].includes(mention.platform)) {
+      const terms = await db.prepare("SELECT value FROM tracked_entities WHERE brand_id = ? AND active = 1 AND type != '排除词'")
+        .bind(brandId).all<{ value: string }>();
+      const result = await collectPublicCommentAnalysis(db, brandId, mentionId, terms.results.map((item) => item.value));
+      return Response.json({ ok: true, platform: mention.platform, mentionId, ...result });
+    }
+    body.postUrl = mention.url;
+  }
   const postUrl = String(body.postUrl ?? "").trim().slice(0, 1000);
-  let descriptor: { platform: string; postId: string };
-  try { descriptor = socialPostDescriptor(postUrl); }
-  catch (error) { return Response.json({ error: error instanceof Error ? error.message : "帖子链接无法识别" }, { status: 400 }); }
+  const descriptor = socialPostDescriptor(postUrl);
+  if (!descriptor) return Response.json({ error: "请输入 Instagram、X、YouTube、TikTok、Facebook 或 Reddit 的完整公开帖子链接" }, { status: 400 });
   let mention = await db.prepare("SELECT id FROM mentions WHERE brand_id = ? AND url = ? ORDER BY id DESC LIMIT 1")
     .bind(brandId, postUrl).first<{ id: number }>();
   if (!mention) {
@@ -137,10 +119,14 @@ export async function POST(request: Request) {
     VALUES (?, ?, ?, ?, '[]', ?)
     ON CONFLICT(mention_id) DO UPDATE SET platform = excluded.platform, post_id = excluded.post_id, metrics_updated_at = excluded.metrics_updated_at`)
     .bind(mention.id, brandId, descriptor.platform, descriptor.postId, now).run();
-  await queueSocialCommentTarget(db, brandId, mention.id, descriptor.platform, descriptor.postId, postUrl, 0);
+  await queueSocialCommentTarget(db, brandId, mention.id, descriptor.platform, descriptor.postId, postUrl, 0,
+    { manualRequested: true, metadataRequested: ["Instagram", "Reddit"].includes(descriptor.platform) });
   await db.prepare(`UPDATE social_comment_targets SET status = 'queued', top_level_complete = 0, cursor = '', pages_fetched = 0,
     last_error = '已加入指定帖子采集队列', updated_at = ? WHERE brand_id = ? AND mention_id = ?`)
     .bind(now, brandId, mention.id).run();
+  const monidApiKey = await loadConnectorCredential(db, "Monid / Instagram", String(workspace?.credential_owner_user_id ?? user.userId));
+  if (!monidApiKey) return Response.json({ error: "请先在数据采集页面配置 Monid，再手动开启社媒评论采集" }, { status: 400 });
+  await collectMonidSocial(db, brandId, [], monidApiKey, { platforms: [], includeComments: true });
   return Response.json({ ok: true, mentionId: mention.id, platform: descriptor.platform });
 }
 
@@ -252,12 +238,12 @@ export async function GET(request: Request) {
         (target.v2_failures + target.v1_failures) AS failure_count,
         CASE WHEN target.status = 'retrying' THEN datetime(target.updated_at, '+30 minutes') ELSE '' END AS next_retry_at
       FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
-      WHERE target.brand_id = ?${mentionOnlyWhere} ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2
+      WHERE target.brand_id = ? AND target.manual_requested = 1${mentionOnlyWhere} ORDER BY CASE target.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'collecting' THEN 2
         WHEN 'retrying' THEN 3 WHEN 'review' THEN 4 WHEN 'blocked' THEN 5 WHEN 'unavailable' THEN 6 WHEN 'error' THEN 7 ELSE 8 END,
       target.updated_at DESC LIMIT 20`).bind(brandId, ...mentionOnlyBinds).all<Record<string, unknown>>(),
     db.prepare(`SELECT COALESCE(SUM(reported_count), 0) AS reported, COALESCE(SUM(collected_count), 0) AS collected
       FROM social_comment_targets target JOIN mentions m ON m.id = target.mention_id
-      WHERE target.brand_id = ?${mentionOnlyWhere}`).bind(brandId, ...mentionOnlyBinds).first<{ reported: number; collected: number }>(),
+      WHERE target.brand_id = ? AND target.manual_requested = 1${mentionOnlyWhere}`).bind(brandId, ...mentionOnlyBinds).first<{ reported: number; collected: number }>(),
     db.prepare(`SELECT c.*, m.title AS post_title, m.translation_en AS post_translation_en, m.language AS post_language, m.url AS post_url,
       annotation.model_sentiment, annotation.model_emotion, annotation.manual_sentiment, annotation.manual_emotion
       FROM mention_comments c JOIN mentions m ON m.id = c.mention_id

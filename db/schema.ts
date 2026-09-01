@@ -94,6 +94,9 @@ export const mentions = sqliteTable("mentions", {
   author: text("author").notNull().default(""),
   provider: text("provider").notNull().default(""),
   discoveredVia: text("discovered_via").notNull().default("global_discovery"),
+  captureStatus: text("capture_status").notNull().default(""),
+  captureError: text("capture_error").notNull().default(""),
+  captureUpdatedAt: text("capture_updated_at").notNull().default(""),
   contentHash: text("content_hash").notNull().default(""),
   wordCount: integer("word_count").notNull().default(0),
   sentimentScore: integer("sentiment_score").notNull().default(0),
@@ -505,6 +508,8 @@ export const socialCommentTargets = sqliteTable("social_comment_targets", {
   status: text("status").notNull().default("queued"),
   pagesFetched: integer("pages_fetched").notNull().default(0),
   lastError: text("last_error").notNull().default(""),
+  manualRequested: integer("manual_requested", { mode: "boolean" }).notNull().default(false),
+  metadataRequested: integer("metadata_requested", { mode: "boolean" }).notNull().default(false),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("idx_social_comment_targets_brand_status").on(table.brandId, table.status, table.updatedAt)]);
 

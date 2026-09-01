@@ -84,6 +84,9 @@ const tables = [
     author TEXT NOT NULL DEFAULT '',
     provider TEXT NOT NULL DEFAULT '',
     discovered_via TEXT NOT NULL DEFAULT 'global_discovery',
+    capture_status TEXT NOT NULL DEFAULT '',
+    capture_error TEXT NOT NULL DEFAULT '',
+    capture_updated_at TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
     word_count INTEGER NOT NULL DEFAULT 0,
     sentiment_score INTEGER NOT NULL DEFAULT 0,
@@ -429,6 +432,8 @@ const tables = [
     status TEXT NOT NULL DEFAULT 'queued',
     pages_fetched INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
+    manual_requested INTEGER NOT NULL DEFAULT 0,
+    metadata_requested INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS social_comment_reply_queue (
@@ -533,6 +538,9 @@ export async function ensureDatabase() {
     "ALTER TABLE mentions ADD COLUMN translation_attempts INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE mentions ADD COLUMN translation_next_retry_at TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE mentions ADD COLUMN translated_at TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mentions ADD COLUMN capture_status TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mentions ADD COLUMN capture_error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mentions ADD COLUMN capture_updated_at TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE mention_comments ADD COLUMN emotion TEXT NOT NULL DEFAULT '中性陈述'",
     "ALTER TABLE mention_comments ADD COLUMN translation_en TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE mention_comments ADD COLUMN translation_status TEXT NOT NULL DEFAULT 'pending'",
@@ -548,6 +556,8 @@ export async function ensureDatabase() {
     "ALTER TABLE social_comment_targets ADD COLUMN adapter TEXT NOT NULL DEFAULT 'v2'",
     "ALTER TABLE social_comment_targets ADD COLUMN v2_failures INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE social_comment_targets ADD COLUMN v1_failures INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN manual_requested INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE social_comment_targets ADD COLUMN metadata_requested INTEGER NOT NULL DEFAULT 0",
   ];
   for (const statement of columns) {
     try { await db.prepare(statement).run(); } catch { /* Existing deployment already has the column. */ }
@@ -645,13 +655,20 @@ export async function loadDashboardData(userId = "") {
       .bind(brandId).all<{ stage: string; status: string; cost: number; error: string; started_at: string; completed_at: string }>(),
     db.prepare(`SELECT
       (SELECT COUNT(*) FROM monid_jobs WHERE brand_id = ? AND status IN ('CREATED','QUEUED','PENDING','READY','RUNNING')) +
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting','retrying')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running','retrying')) AS count,
-      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND status IN ('queued','running','collecting')) +
-      (SELECT COUNT(*) FROM social_comment_reply_queue WHERE brand_id = ? AND status IN ('queued','running')) AS active_count,
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND (manual_requested = 1 OR metadata_requested = 1)
+        AND status IN ('queued','running','collecting','retrying')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
+        WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status IN ('queued','running','retrying')) AS count,
+      (SELECT COUNT(*) FROM social_comment_targets WHERE brand_id = ? AND (manual_requested = 1 OR metadata_requested = 1)
+        AND status IN ('queued','running','collecting')) +
+      (SELECT COUNT(*) FROM social_comment_reply_queue reply JOIN social_comment_targets target ON target.mention_id = reply.mention_id
+        WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status IN ('queued','running')) AS active_count,
       (SELECT MIN(retry_at) FROM (
-        SELECT datetime(updated_at, '+30 minutes') AS retry_at FROM social_comment_targets WHERE brand_id = ? AND status = 'retrying'
-        UNION ALL SELECT datetime(updated_at, '+30 minutes') FROM social_comment_reply_queue WHERE brand_id = ? AND status = 'retrying'
+        SELECT datetime(updated_at, '+30 minutes') AS retry_at FROM social_comment_targets WHERE brand_id = ?
+          AND (manual_requested = 1 OR metadata_requested = 1) AND status = 'retrying'
+        UNION ALL SELECT datetime(reply.updated_at, '+30 minutes') FROM social_comment_reply_queue reply
+          JOIN social_comment_targets target ON target.mention_id = reply.mention_id
+          WHERE reply.brand_id = ? AND target.manual_requested = 1 AND reply.status = 'retrying'
       )) AS next_retry_at`)
       .bind(brandId, brandId, brandId, brandId, brandId, brandId, brandId).first<{ count: number; active_count: number; next_retry_at: string }>(),
     db.prepare(`SELECT
@@ -957,7 +974,7 @@ export async function loadDashboardData(userId = "") {
         lastFour: storedCredentials.get("Monid / Instagram")?.last_four ?? (env.MONID_API_KEY ? "环境密钥" : ""), name: "Monid 多平台公共搜索",
         status: !monidConfigured ? "credentials" : monidLimited ? "limited" : "online",
         pending: monidPending, retryAt: monidRetryAt, lastError: monidHealth?.last_error ?? "",
-        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook、Reddit 搜索与公开评论采集"
+        detail: !monidConfigured ? "一个 Monid API Key 启用 Instagram、X、YouTube、TikTok、Facebook、Reddit 搜索；评论正文仅在人工开启后采集"
           : monidLimited ? `上次调用未完成：${monidHealth?.last_error || "等待服务恢复"}${monidHealth?.retry_after ? ` · ${new Date(monidHealth.retry_after).toLocaleString("zh-CN")} 后自动重试` : ""}`
           : monidPending ? `${monidPending} 个多平台采集步骤处理中${monidRetryAt && !monidActive ? ` · ${new Date(monidRetryAt).toLocaleString("zh-CN")} 继续重试` : ""}` : "普通文字关键词搜帖 · 作者与互动 · 公开评论与回复归档" },
       ...monidPlatforms.map((platform) => {
