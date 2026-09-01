@@ -682,10 +682,16 @@ export async function fetchGuardian(terms: string[], credential?: string): Promi
 }
 
 export async function fetchWordPressBlogs(terms: string[]): Promise<MonitoringCandidate[]> {
-  const requests = [...new Set(terms.map((term) => term.trim()).filter(Boolean))].slice(0, 3).map(async (term) => {
+  const tags = [...new Set(terms.flatMap((term) => {
+    const words = term.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+    if (!words.length) return [];
+    return [words.join("-"), words.join(""), ...words].filter((tag) => tag.length >= 3);
+  }))].slice(0, 3);
+  const requests = tags.map(async (term) => {
     const endpoint = new URL(`https://public-api.wordpress.com/rest/v1.1/read/tags/${encodeURIComponent(term)}/posts`);
     endpoint.searchParams.set("number", "40"); endpoint.searchParams.set("order", "DESC"); endpoint.searchParams.set("after", `${lastMonthDate()}T00:00:00Z`);
     const response = await fetch(endpoint, { headers: { Accept: "application/json", "User-Agent": "SignalAtlas/2.0" }, signal: AbortSignal.timeout(20_000) });
+    if (response.status === 400) return [];
     if (!response.ok) throw new ProviderRequestError("WordPress.com Reader", response.status, retryAfterMs(response), `WordPress.com HTTP ${response.status}`);
     const payload = await response.json() as { posts?: Array<Record<string, unknown>> };
     return payload.posts ?? [];
