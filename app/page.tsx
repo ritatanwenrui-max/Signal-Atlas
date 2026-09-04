@@ -478,7 +478,7 @@ export default function Home() {
           {view === "propagation" && <PropagationView clusters={clusters} selected={selected} edges={data.propagationEdges} searchSignals={data.searchDemandSignals} onSelect={setSelectedCluster} submit={post} canEdit={Boolean(data.workspace?.canEdit)} uiLanguage={language} />}
           {view === "analytics" && <AnalyticsView analytics={data.analytics} mentions={filteredMentions} uiLanguage={language} />}
           {view === "comments" && <SocialCommentsView brand={data.brand} monidConfigured={Boolean(monidConnector?.configured)} canEdit={Boolean(data.workspace?.canEdit)} uiLanguage={language} />}
-          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} diagnostics={data.collectionDiagnostics} submit={post} canManage={Boolean(data.workspace?.canManage)} />}
+          {view === "coverage" && <CoverageView connectors={data.connectors} sources={data.mediaSources} diagnostics={data.collectionDiagnostics} submit={post} canManage={Boolean(data.workspace?.canManage)} uiLanguage={language} />}
           {view === "reports" && <ReportView brand={data.brand} workspaceName={data.workspace?.name ?? data.brand.name} mentions={data.mentions} analytics={data.analytics} clusters={clusters} countryCodes={countryCode} aiBrief={data.aiBrief} uiLanguage={language} />}
           {view === "settings" && data.workspace && <SettingsView brand={data.brand} connectors={data.connectors} entities={data.entities} workspace={data.workspace} submit={post} />}
           {view === "guide" && <ProductGuide />}
@@ -1073,7 +1073,7 @@ function ProductGuide() {
   </article>;
 }
 
-function CoverageView({ connectors, sources, diagnostics, submit, canManage }: { connectors: Connector[]; sources: MediaSource[]; diagnostics: CollectionDiagnostic[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean }) {
+function CoverageView({ connectors, sources, diagnostics, submit, canManage, uiLanguage }: { connectors: Connector[]; sources: MediaSource[]; diagnostics: CollectionDiagnostic[]; submit: (payload: Record<string, unknown>, success: string) => Promise<unknown>; canManage: boolean; uiLanguage: UiLanguage }) {
   const active = sources.filter((item) => item.status === "active").length;
   const latestDiagnosticMap = new Map<string, CollectionDiagnostic>();
   for (const item of diagnostics) if (!latestDiagnosticMap.has(item.platform)) latestDiagnosticMap.set(item.platform, item);
@@ -1092,8 +1092,6 @@ function CoverageView({ connectors, sources, diagnostics, submit, canManage }: {
   const [secondaryCredential, setSecondaryCredential] = useState("");
   const [accountId, setAccountId] = useState("");
   const [busy, setBusy] = useState(false);
-  const configurable = connectors.filter((item) => item.configurable && item.provider);
-  const newsBudgets = connectors.filter((item) => item.quotaLimit && item.provider);
   function openCredential(provider: string) { if (!canManage) return; setEditing(provider); setCredential(""); setSecondaryCredential(""); setAccountId(""); }
   async function saveCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!editing || !credential.trim()) return; setBusy(true);
@@ -1111,11 +1109,75 @@ function CoverageView({ connectors, sources, diagnostics, submit, canManage }: {
     finally { setBusy(false); }
   }
   async function removeCredential(provider: string) { setBusy(true); try { await submit({ action: "deleteConnectorCredential", provider }, `${provider} 的团队 API 配置已删除`); } finally { setBusy(false); } }
+  const officialConnectorIds = new Set(["x", "youtube", "meta", "tiktok"]);
+  const monidPlatformConnectors = connectors.filter((item) => item.id.startsWith("monid-") && item.id !== "monid-vault")
+    .sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" }));
+  const monidConnector = connectors.find((item) => item.id === "monid-vault");
+  const optionalOfficialConnectors = connectors.filter((item) => officialConnectorIds.has(item.id))
+    .sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" }));
+  const connectorGroups = [
+    { id: "news", label: uiLanguage === "en" ? "News" : "新闻", ids: new Set(["common-crawl", "gnews", "guardian", "mediacloud", "mediastack", "news", "newsapi-org", "newsdata", "the-news-api", "worldnews"]) },
+    { id: "social", label: uiLanguage === "en" ? "Social media" : "社交媒体", ids: new Set(["apify", "bluesky-public", "brave-search", "bright-data", "hacker-news-public", "mastodon", "monid-vault", "scrapecreators"]) },
+    { id: "web", label: uiLanguage === "en" ? "Blogs & web" : "博客与网页", ids: new Set(["crawler", "forem-blogs", "tumblr", "wordpress-reader"]) },
+    { id: "analysis", label: uiLanguage === "en" ? "Translation & analysis" : "翻译与分析", ids: new Set(["google-search-console", "llm-openai", "translator-azure", "translator-deepl", "translator-libre", "translator-mymemory"]) },
+  ].map((group) => ({ ...group, connectors: connectors.filter((item) => group.ids.has(item.id)).sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" })) }));
+  function stateLabel(connector: Connector) {
+    if (uiLanguage === "en") {
+      if (connector.stateLabel) return connector.id === "common-crawl" ? "Batch setup required" : connector.stateLabel;
+      if (connector.status === "limited") return "Backoff";
+      if (connector.status === "online" && connector.pending) return "Collecting";
+      if (connector.status === "online") return "Running";
+      if (connector.status === "credentials") return "Credentials required";
+      return connector.configured ? "Credentials saved / approval required" : "Authorization required";
+    }
+    return connector.stateLabel ?? (connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权");
+  }
+  function scheduleLabel(value?: string) {
+    if (!value || uiLanguage !== "en") return value;
+    const hourly = value.match(/^每\s*(\d+)\s*小时$/);
+    if (hourly) return `Every ${hourly[1]} hours`;
+    if (/^每日\s*1\s*次$/.test(value)) return "Once daily";
+    return value.replace("每日", "Daily").replace("每", "Every ").replace("小时", " hours");
+  }
+  function displayName(connector: Connector) {
+    if (uiLanguage !== "en") return connector.name;
+    const names: Record<string, string> = {
+      "common-crawl": "Common Crawl CC-NEWS", crawler: "Free publisher tracking", "forem-blogs": "DEV / Forem Blogs",
+      "hacker-news-public": "Hacker News", "monid-vault": "Monid", "wordpress-reader": "WordPress.com Reader",
+    };
+    return names[connector.id] ?? connector.provider ?? connector.name;
+  }
+  function connectorDetail(connector: Connector) {
+    if (uiLanguage !== "en") return connector.detail;
+    const details: Record<string, string> = {
+      "common-crawl": "Keyless WARC archive source. It requires a separate batch-processing deployment and is not part of the live scan.",
+      crawler: `${sources.length} publishers tracked through RSS, Atom, news sitemaps and compliant page discovery.`,
+      "google-search-console": connector.configured ? "Search clicks and impressions are refreshed every six hours to support event detection." : "Connect the official domain to add search-demand signals to event detection.",
+      "llm-openai": connector.configured ? "Rules analyze the full dataset; the LLM reviews priority items and drafts report findings." : "Rule-based analysis remains active. Add an API key to enable priority semantic review and report drafting.",
+      "translator-azure": connector.configured ? "Primary background translation service." : "Optional high-volume background translation service.",
+      "translator-deepl": connector.configured ? "English translation fallback is connected." : "Optional fallback for English translation.",
+      "translator-libre": connector.configured ? "The team's self-hosted translation service is connected." : "Connect a self-hosted translation endpoint with no application character cap.",
+      "translator-mymemory": connector.configured ? "Identified free fallback is available." : "Anonymous fallback capacity is limited; add a contact email to raise the allowance.",
+    };
+    if (details[connector.id]) return details[connector.id];
+    if (!connector.configured && connector.configurable) return "Add an API credential to include this source in scheduled collection.";
+    if (connector.status === "limited") return "Temporarily paused after a provider limit or failure; automatic retry remains enabled.";
+    if (!connector.configurable) return "Public connector with no API key required; included in scheduled collection.";
+    return "Connected and included in scheduled collection.";
+  }
+  function credentialActions(connector: Connector) {
+    if (!connector.configurable || !connector.provider) return null;
+    const removable = connector.configured && !["环境密钥", "环境配置"].includes(connector.lastFour || "");
+    return <div className="connector-actions"><button type="button" disabled={!canManage || busy} onClick={() => openCredential(connector.provider!)}>{connector.configured ? (uiLanguage === "en" ? "Replace API" : "更换 API") : (uiLanguage === "en" ? "Configure API" : "配置 API")}</button>{canManage && removable && <button type="button" className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>{uiLanguage === "en" ? "Remove" : "删除"}</button>}</div>;
+  }
+  function connectorCard(connector: Connector) {
+    const quotaPercent = connector.quotaLimit ? Math.min(100, Math.max(0, Number(connector.quotaUsed ?? 0) / connector.quotaLimit * 100)) : 0;
+    return <article className="connector-directory-card" key={connector.id}><header><i className={connector.status} /><div><strong>{displayName(connector)}</strong>{connector.provider && connector.provider !== displayName(connector) && <small>{connector.provider}</small>}</div><span className={`connector-state ${connector.status}`}>{stateLabel(connector)}</span></header><p>{connectorDetail(connector)}</p>{(connector.scheduleLabel || connector.quotaLimit) && <div className="connector-metadata">{connector.scheduleLabel && <span><b>{uiLanguage === "en" ? "Schedule" : "更新"}</b>{scheduleLabel(connector.scheduleLabel)}</span>}{Boolean(connector.quotaLimit) && <span><b>{uiLanguage === "en" ? "Daily budget" : "今日额度"}</b>{connector.quotaUsed ?? 0} / {connector.quotaLimit} · {uiLanguage === "en" ? `${connector.quotaRemaining ?? 0} remaining` : `剩余 ${connector.quotaRemaining ?? 0}`}<i><em style={{ width: `${quotaPercent}%` }} /></i></span>}</div>}{connector.retryAt && <small className="connector-retry">{uiLanguage === "en" ? "Next retry" : "下次重试"} · {formatDate(connector.retryAt, true)}</small>}{connector.lastError && <small className="connector-error">{uiLanguage === "en" ? "The previous attempt failed; automatic retry is scheduled." : connector.lastError}</small>}{credentialActions(connector)}</article>;
+  }
   return <div className="coverage-page">
     <section className="coverage-architecture panel-dark"><div><h2>采集计划与混合分析</h2><p>新闻档案优先使用多个独立新闻源、全球博客索引和社交搜索索引发现新内容；搜索与归档确认没有新增后，后台才进入帖子评论、回复和受众分析阶段。</p></div><div className="architecture-flow"><article><b>01</b><strong>新闻与博客发现</strong><span>NewsAPI.ai / GNews / WordPress / Forem / Tumblr / GDELT 等</span><small>按各自额度分时运行</small></article><i>→</i><article><b>02</b><strong>社交内容补漏</strong><span>Bluesky / Mastodon / Hacker News / ScrapeCreators / Brave 等</span><small>平台搜索与多索引交叉发现</small></article><i>→</i><article><b>03</b><strong>规则全量分析</strong><span>品牌限定 / 排除词 / 地区 / 事件</span><small>人工标注优先</small></article><i>→</i><article><b>04</b><strong>受众采集</strong><span>评论 / 回复 / 翻译 / 语义</span><small>档案阶段完成后运行</small></article></div></section>
-    <section className="surface collection-diagnostics"><div className="section-head"><div><p className="eyebrow">DAILY API BUDGET</p><h3>每日采集更新与额度计划</h3></div><span className="diagnostic-state complete">UTC 自然日重置</span></div>
-      <p className="diagnostic-intro">自动任务不会因为手动刷新突破免费额度。每个来源都有独立计数、运行间隔和退避时间；预留额度用于分页、失败重试和人工补扫。</p>
-      <div className="connector-grid">{newsBudgets.map((connector) => <article key={`budget-${connector.id}`}><div><i className={connector.status} /><strong>{connector.provider}</strong><span className={`connector-state ${connector.status}`}>{connector.scheduleLabel}</span></div><p>今日已用 {connector.quotaUsed ?? 0} / {connector.quotaLimit} · 剩余 {connector.quotaRemaining ?? 0}{connector.quotaRemaining === 0 && connector.quotaResetAt ? ` · ${formatDate(connector.quotaResetAt, true)} 恢复` : ""}</p></article>)}</div>
+    <section className="surface connector-directory"><div className="section-head"><div><p className="eyebrow">CONNECTOR DIRECTORY</p><h3>{uiLanguage === "en" ? "Data sources and services" : "数据来源与服务"}</h3></div><span className="diagnostic-state complete">{uiLanguage === "en" ? "One entry per connector" : "每个连接器只显示一次"}</span></div><p className="diagnostic-intro">{uiLanguage === "en" ? "Connectors are grouped by purpose. Each card combines live status, schedule, daily budget and credential controls." : "按用途查找接口；运行状态、更新时间、每日额度和凭证管理统一放在同一张卡片中。每组内按英文字母顺序排列。"}</p>
+      <div className="connector-category-list">{connectorGroups.map((group) => <section className={`connector-category connector-category-${group.id}`} key={group.id}><header><h4>{group.label}</h4><span>{group.connectors.length}</span></header><div className="connector-directory-grid">{group.connectors.map((connector) => connector.id === "monid-vault" && monidConnector ? <article className="connector-directory-card monid-connector-card" key={connector.id}><header><i className={connector.status} /><div><strong>Monid</strong><small>{uiLanguage === "en" ? "One API key · six social platforms" : "一个 API Key · 六个平台"}</small></div><span className={`connector-state ${connector.status}`}>{stateLabel(connector)}</span></header><p>{uiLanguage === "en" ? "Keyword discovery and public post metrics run automatically. Comment bodies and replies are collected only when a user starts them." : "统一负责关键词搜帖和公开互动数据；评论正文与回复仍只在人工开启后采集。"}</p><div className="monid-platform-grid">{monidPlatformConnectors.map((platform) => { const lastSuccess = platform.detail.match(/最近成功\s*(.+)$/)?.[1]; const building = platform.detail.includes("正在建库"); return <div key={platform.id}><span><i className={platform.status} /><strong>{platform.name.replace(" · Monid", "")}</strong></span><b>{uiLanguage === "en" ? (building ? "Building index" : stateLabel(platform)) : stateLabel(platform)}</b><small>{uiLanguage === "en" ? (lastSuccess ? `Last successful ${lastSuccess}` : "Waiting for the first successful search") : platform.detail.replace(`${platform.name.replace(" · Monid", "")} 独立搜索状态与重试时钟 · `, "")}</small></div>; })}</div>{credentialActions(connector)}</article> : connectorCard(connector))}</div>{group.id === "social" && <details className="optional-connectors"><summary><span><strong>{uiLanguage === "en" ? "Optional official platform APIs" : "官方平台 API（暂未使用）"}</strong><small>{uiLanguage === "en" ? "Collapsed by default and excluded from the current collection plan" : "默认收起，不参与当前采集计划"}</small></span><b>{optionalOfficialConnectors.length}</b></summary><div className="connector-directory-grid">{optionalOfficialConnectors.map(connectorCard)}</div></details>}</section>)}</div>
     </section>
     <section className="surface collection-diagnostics"><div className="section-head"><div><p className="eyebrow">COLLECTION DIAGNOSTICS</p><h3>采集完整度与漏收诊断</h3></div><span className={`diagnostic-state ${diagnosticSummary.pending ? "pending" : "complete"}`}>{diagnosticSummary.pending ? `${diagnosticSummary.pending} 个搜索任务待返回` : "最近批次已返回"}</span></div>
       <p className="diagnostic-intro">系统保留各平台最近一轮搜索的候选去向。这里可以区分“平台没有返回”“被品牌规则过滤”“已经归档过”和“成功新增”，避免把接口失败误认为没有新闻。</p>
@@ -1123,8 +1185,6 @@ function CoverageView({ connectors, sources, diagnostics, submit, canManage }: {
       <div className="table-scroll"><table className="diagnostic-table"><thead><tr><th>平台</th><th>实际搜索</th><th>候选</th><th>相关</th><th>新增</th><th>重复</th><th>过滤</th><th>任务状态</th><th>原因与错误</th></tr></thead><tbody>{latestDiagnostics.map((item) => <tr key={`${item.sync_run_id}-${item.platform}`}><td><strong>{item.platform}</strong><small>{item.providers}</small></td><td>{item.query_count} 组</td><td>{item.candidate_count}</td><td>{item.relevant_count}</td><td>{item.inserted_count}</td><td>{item.duplicate_count}</td><td>{item.filtered_count}</td><td><span className={`diagnostic-status ${item.status}`}>{item.status === "pending" ? `等待 ${item.pending_count}` : item.status === "partial" ? "部分失败" : "批次完成"}</span><small>{formatDate(item.completed_at, true)}</small></td><td><span>{reasonSummary(item.filter_reasons)}</span>{item.error && <small className="diagnostic-error">{item.error}</small>}</td></tr>)}</tbody></table></div>
       {!latestDiagnostics.length && <div className="empty-table">新版诊断会从下一次新闻巡检开始记录；现有历史档案不会受到影响。</div>}
     </section>
-    <section className="surface connector-section"><div className="section-head"><div><p className="eyebrow">CONNECTOR STATUS</p><h3>采集连接器</h3></div></div><div className="connector-grid">{connectors.map((connector) => <article key={connector.id}><div><i className={connector.status} /><strong>{connector.name}</strong><span className={`connector-state ${connector.status}`}>{connector.stateLabel ?? (connector.status === "limited" ? "暂缓重试" : connector.status === "online" && connector.pending ? "采集中" : connector.status === "online" ? "运行中" : connector.status === "credentials" ? "待凭证" : connector.configured ? "凭证已存 / 待权限" : "需授权")}</span></div><p>{connector.detail}</p>{connector.configurable && connector.provider && <button className="connector-config-button" disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? `已配置 · ${connector.lastFour === "环境密钥" ? "站点默认密钥" : `•••• ${connector.lastFour}`}` : canManage ? "＋ 配置团队 API" : "管理员可配置"}</button>}</article>)}</div></section>
-    <section className="surface credential-vault"><div className="vault-copy"><p className="eyebrow">TEAM API VAULT</p><h3>团队数据连接器</h3><p>管理员只需配置一次新闻、社媒和翻译服务，所有成员共享同一批采集与英文翻译结果。凭证由服务端加密，完整值不会返回任何成员的浏览器。</p><div className="vault-security"><span>✓ 团队共用采集结果</span><span>✓ 服务端加密</span><span>✓ 仅管理员可更换</span></div></div><div className="credential-list">{configurable.map((connector) => <article key={connector.id}><div><i className={connector.configured ? "configured" : ""} /><div><strong>{connector.name}</strong><small>{connector.configured ? connector.lastFour === "环境密钥" || connector.lastFour === "环境配置" ? "当前使用站点默认配置" : `团队配置 •••• ${connector.lastFour}` : connector.provider === "MyMemory" ? "匿名额度很小，建议添加联系邮箱" : "尚未配置团队密钥"}</small></div></div><div><button disabled={!canManage} onClick={() => openCredential(connector.provider!)}>{connector.configured ? "更换" : "配置"}</button>{canManage && connector.configured && !["环境密钥", "环境配置"].includes(connector.lastFour || "") && <button className="danger-link" disabled={busy} onClick={() => void removeCredential(connector.provider!)}>删除</button>}</div></article>)}</div></section>
     {editing && canManage && <div className="credential-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="credential-modal" onSubmit={saveCredential} onMouseDown={(event) => event.stopPropagation()}>
       <div className="section-head"><div><p className="eyebrow">SECURE CONNECTOR SETUP</p><h3>配置 {editing}</h3></div><button type="button" className="modal-close" onClick={() => setEditing(null)}>×</button></div>
       <p>{editing === "Google Search Console" ? "读取官网每天的搜索点击与曝光曲线。系统在搜索需求明显持续攀升的第一天建立事件窗口，峰值只作为窗口内最高点；新闻相似度仍负责判断事件内容与传播关系。可使用已获该资源权限的服务账号 JSON，或包含 refresh_token 的 OAuth JSON。" : editing === "Media Cloud" ? "用于检索 Media Cloud 全球在线新闻档案。系统每 4 小时运行一次，按每日安全预算计数。" : editing === "NewsData.io" ? "用于补充全球多语言最新新闻。系统每 2 小时运行一次，并为分页、重试和人工补扫保留免费 credits。" : editing === "World News API" ? "用于补充来源国家、语言、摘要、正文和情绪字段。系统每 6 小时运行一次，并按 points 安全预扣。" : editing === "The News API" ? "全球新闻关键词补全。免费层额度较宽松，但单次返回较少；系统每 6 小时低频运行。" : editing === "GNews" ? "以多语言关键词检索 Google News 索引结果。免费层有发布时间延迟且禁止商业使用，公开生产环境需要升级到允许商用的方案。" : editing === "NewsAPI.org" ? "检索全球新闻标题与正文摘要。开发者免费方案仅供开发测试，公开或商业部署前需要使用相应付费许可。" : editing === "mediastack" ? "用于每日低频补档。免费层月度额度较小且为延迟数据；商业使用需要相应付费方案。" : editing === "Guardian Open Platform" ? "仅检索 Guardian 自有内容。开发者密钥限非商业用途；公开商业展示前需确认许可。" : editing === "Mastodon" ? "填写要搜索的 Mastodon 实例地址和只读访问令牌。全文结果取决于该实例是否启用搜索索引；不同实例看到的联邦内容范围不同。" : editing === "ScrapeCreators" ? "用于 Instagram Reels 与 TikTok 的普通文字关键词搜索，补充没有写品牌 hashtag 的公开内容。" : editing === "Brave Search" ? "用站外网页索引搜索 Instagram、TikTok、X、Facebook、Reddit 与 YouTube 的公开页面。" : editing === "Apify" ? "使用 Apify Google Search Scraper 作为每天两次的社交内容补全索引。" : editing === "Bright Data" ? "使用 Bright Data SERP API 作为第二搜索索引。需要同时填写 API Key 与你创建的 SERP Zone 名称。" : editing === "Monid / Instagram" ? "一个密钥启用 Instagram、X、YouTube、TikTok、Facebook、Reddit 的普通文字关键词搜索，以及各平台可公开取得的帖子评论与回复采集。保存时会先验证密钥。" : editing === "OpenAI LLM" ? "用于混合分析中的重点语义复核和报告 Agent。规则模型仍处理全部数据；LLM 只分析高风险、高互动、跨语言或判断不明确的内容。人工标注始终具有最高优先级。" : editing === "Meta / Instagram" ? "用于采集 Business / Creator 账号的标签与 @提及；启用仍取决于 Meta 权限和 App Review。" : editing === "TikTok" ? "用于 TikTok Research API 的公开内容查询；启用仍取决于 Research API 审批。" : editing === "Azure Translator" ? "推荐使用 Azure Translator F0 免费层作为后台自动翻译主力。填写资源密钥；区域按 Azure 资源页面显示填写，单服务全局资源可留空。" : editing === "DeepL API Free" ? "DeepL API Free 每月提供免费字符额度，系统会把它作为 Azure 或自托管翻译失败时的备用。" : editing === "LibreTranslate" ? "填写你自己部署的 LibreTranslate HTTPS 地址；若实例没有启用 API Key，第二项可留空。" : editing === "MyMemory" ? "填写联系邮箱可使用 MyMemory 的已识别免费配额。它仍只作为最后一级兜底，不建议单独承担全部翻译。" : `输入你自己的 ${editing === "X" ? "Bearer Token" : "API Key"}。`} 保存后仅服务端可以解密使用。</p>

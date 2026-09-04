@@ -53,8 +53,8 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /network-edge cross/);
   assert.match(page, /样本不足/);
   assert.match(page, /saveConnectorCredential/);
-  assert.match(page, /TEAM API VAULT/);
-  assert.match(page, /团队共用采集结果/);
+  assert.match(page, /CONNECTOR DIRECTORY/);
+  assert.match(page, /每个连接器只显示一次/);
   assert.match(page, /SHARED TEAM WORKSPACE/);
   assert.match(page, /添加到团队/);
   assert.match(page, /Instagram Business \/ Creator Account ID/);
@@ -66,6 +66,23 @@ test("dashboard provides lifetime archive, event analytics, maps, and shared tea
   assert.match(page, /60 \* 60 \* 1000/);
   assert.match(page, /<strong>Somnia Lab<\/strong><small>GLOBAL MEDIA INTELLIGENCE<\/small>/);
   assert.doesNotMatch(page, /硅姬|矽姬/);
+});
+
+test("data collection groups connectors once by purpose and nests Monid platform status", async () => {
+  const page = await source("app/page.tsx");
+  assert.match(page, /connectorGroups = \[/);
+  assert.match(page, /"News" : "新闻"/);
+  assert.match(page, /"Social media" : "社交媒体"/);
+  assert.match(page, /"Blogs & web" : "博客与网页"/);
+  assert.match(page, /"Translation & analysis" : "翻译与分析"/);
+  assert.match(page, /localeCompare\(b\.name, "en"/);
+  assert.match(page, /monidPlatformConnectors\.map/);
+  assert.match(page, /一个 API Key · 六个平台/);
+  assert.match(page, /官方平台 API（暂未使用）/);
+  assert.match(page, /<details className="optional-connectors">/);
+  assert.doesNotMatch(page, /每日采集更新与额度计划/);
+  assert.doesNotMatch(page, /<h3>采集连接器<\/h3>/);
+  assert.doesNotMatch(page, /TEAM API VAULT/);
 });
 
 test("automatic events preserve every rise while propagation keeps news-similarity evidence", async () => {
